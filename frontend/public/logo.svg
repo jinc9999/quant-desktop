@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" fill="none">
+  <!-- 圆形背景 -->
+  <circle cx="64" cy="64" r="60" fill="#4068c9" fill-opacity="0.12"/>
+  <circle cx="64" cy="64" r="60" stroke="#4068c9" stroke-opacity="0.35" stroke-width="2"/>
+  <!-- K线柱 -->
+  <g stroke="#4068c9" stroke-width="4" stroke-linecap="round">
+    <line x1="34" y1="82" x2="34" y2="96"/>
+    <line x1="52" y1="70" x2="52" y2="88"/>
+    <line x1="70" y1="58" x2="70" y2="78"/>
+    <line x1="88" y1="44" x2="88" y2="66"/>
+  </g>
+  <g fill="#4068c9">
+    <rect x="29" y="84" width="10" height="8" rx="2"/>
+    <rect x="47" y="72" width="10" height="10" rx="2"/>
+    <rect x="65" y="60" width="10" height="12" rx="2"/>
+    <rect x="83" y="46" width="10" height="14" rx="2"/>
+  </g>
+  <!-- 上升折线 -->
+  <polyline points="30,74 50,60 68,64 92,36" fill="none" stroke="#4068c9" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- 箭头 -->
+  <path d="M92 36 L80 38 M92 36 L90 48" fill="none" stroke="#4068c9" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

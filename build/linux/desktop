@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=My Product
+Comment=Binance Quant Trading Desktop Client
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/quant-desktop %u
+Terminal=false
+Type=Application
+Icon=quant-desktop
+Categories=Utility;
+StartupWMClass=quant-desktop
+
+ 

@@ -1,0 +1,37 @@
+.task
+bin
+frontend/dist
+frontend/node_modules
+build/linux/appimage/build
+build/windows/nsis/MicrosoftEdgeWebview2Setup.exe
+# Mobile generated (per-machine; overlays hold absolute paths)
+build/ios/xcode/overlay.json
+build/ios/xcode/gen/
+build/android/overlay.json
+build/android/gen/
+
+# ===== 敏感数据（禁止提交）=====
+# 运行数据库：含交易记录与 API 密钥，三种模式隔离，绝不入库
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# 回测历史数据（14G+ 币安 K 线 + 资金费率 CSV），只留代码不入数据
+backtest/data/
+backtest/data_funding/
+backtest/backtest
+
+# ===== 编译产物 =====
+quant-desktop
+*.exe
+build/windows/quant-desktop/
+
+# ===== 日志 =====
+*.log
+
+# ===== 系统/IDE =====
+.DS_Store
+.trae
+.idea/
+.vscode/

@@ -1,0 +1,15 @@
+{
+	"fixed": {
+		"file_version": "1.0.0"
+	},
+	"info": {
+		"0000": {
+			"ProductVersion": "1.0.0",
+			"CompanyName": "QuantDesk",
+			"FileDescription": "币安合约量化交易桌面客户端",
+			"LegalCopyright": "© 2026 QuantDesk",
+			"ProductName": "量化交易客户端",
+			"Comments": "基于 Wails v3 + Vue3 + Go 构建"
+		}
+	}
+}

@@ -1,0 +1,62 @@
+@use "theme";
+@use "transition";
+@use "element-plus";
+@use "sidebar";
+@use "dark";
+
+/* 自定义全局 CssVar */
+:root {
+  /* 左侧菜单展开、收起动画时长 */
+  --pure-transition-duration: 0.3s;
+
+  /* 常用border-color 需要时可取用 */
+  --pure-border-color: rgb(5 5 5 / 6%);
+
+  /* switch关闭状态下的color 需要时可取用 */
+  --pure-switch-off-color: #a6a6a6;
+
+  /** 主题色 */
+  --pure-theme-sub-menu-active-text: initial;
+  --pure-theme-menu-bg: none;
+  --pure-theme-menu-hover: none;
+  --pure-theme-sub-menu-bg: transparent;
+  --pure-theme-menu-text: initial;
+  --pure-theme-sidebar-logo: none;
+  --pure-theme-menu-title-hover: initial;
+  --pure-theme-menu-active-before: transparent;
+}
+
+/* 灰色模式 */
+.html-grey {
+  filter: grayscale(100%);
+}
+
+/* 色弱模式 */
+.html-weakness {
+  filter: invert(80%);
+}
+
+/* 全局滚动条可见性增强：常驻显示、加宽、提高对比度
+   解决深色主题下滚动条过细过暗、用户无法察觉可滚动的问题 */
+.el-scrollbar__bar {
+  opacity: 1 !important;
+  z-index: 10;
+}
+
+.el-scrollbar__bar .el-scrollbar__thumb {
+  background-color: rgb(144 147 153 / 55%);
+  opacity: 1;
+}
+
+.el-scrollbar__bar .el-scrollbar__thumb:hover {
+  background-color: rgb(144 147 153 / 85%);
+}
+
+/* 加宽滚动条轨道，增大可点击/可拖拽面积 */
+.el-scrollbar__bar.is-vertical {
+  width: 8px;
+}
+
+.el-scrollbar__bar.is-horizontal {
+  height: 8px;
+}
