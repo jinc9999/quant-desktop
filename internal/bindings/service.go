@@ -45,10 +45,11 @@ type QuantService struct {
 const strategyCfgKey = "strategy:cfg"
 
 // defaultProxyAddr / defaultProxyPort 内置默认代理配置（用户设定 2026-08-05）。
-// 新环境（如 Windows 首装）库中无保存代理时自动使用；不可达时 NewClient 回退本地检测。
+// 新环境（如 Windows 首装）库中无保存代理时自动使用；不可达时 NewClient 自动
+// 沿内置候选链（本地 10808 → 远端 45.251.241.89 → 本地检测）继续探测，不会因代理而死。
 const (
-	defaultProxyAddr = "45.251.241.89"
-	defaultProxyPort = 49988
+	defaultProxyAddr = "127.0.0.1"
+	defaultProxyPort = 10808
 )
 
 // NewQuantService 创建量化服务实例

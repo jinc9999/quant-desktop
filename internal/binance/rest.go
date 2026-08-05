@@ -64,6 +64,31 @@ func detectLocalProxy() *url.URL {
 	return nil
 }
 
+// builtinProxies 内置默认代理候选链（用户设定 2026-08-05）：
+// 本地代理优先（延迟低、更稳），远端代理兜底；
+// 与用户指定代理探测失败后依次尝试，全部不可达再回退本地自动检测，最后直连。
+// 每个候选带独立探测超时：本地端口快速判定（500ms），远端代理放宽（1.5s）。
+var builtinProxies = []struct {
+	addr    string
+	timeout time.Duration
+}{
+	{"127.0.0.1:10808", 500 * time.Millisecond},   // 本地 V2Ray/Socks 代理（用户设定）
+	{"45.251.241.89:49988", 1500 * time.Millisecond}, // 远端代理（用户设定）
+}
+
+// probeProxy 探测代理是否可达（TCP 握手）
+// addr: 代理地址（host:port）
+// timeout: 探测超时
+// 返回是否可达
+func probeProxy(addr string, timeout time.Duration) bool {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
 // newProxiedHTTPClient 创建带代理的 HTTP 客户端
 func newProxiedHTTPClient(proxyURL *url.URL) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -96,22 +121,38 @@ func NewClient(apiKey, apiSecret, mode string, proxyAddr string, proxyPort int) 
 
 	fut := futures.NewClient(apiKey, apiSecret)
 
-	// 优先使用用户指定的代理，否则自动检测。
-	// 指定代理在启动时先做连通性探测：不可达（服务器关机/端口错误/网络隔离）时
-	// 自动回退到本地代理检测，避免整个交易客户端因代理不可用而全部请求失败。
+	// 代理解析优先级（依次探测，找到可用即用）：
+	//   1. 用户指定代理（前端设置/数据库保存，最高优先）
+	//   2. 内置默认代理链（本地 10808 → 远端 45.251.241.89，用户设定 2026-08-05）
+	//   3. 本地常见端口自动检测（Clash 7897 等）
+	//   4. 直连
+	// 每个候选先做 TCP 连通性探测（3s），不可达的跳过并记录日志，
+	// 避免把交易客户端写死在一个不可用的代理上。
 	var proxyURL *url.URL
 	if proxyAddr != "" && proxyPort > 0 {
 		addr := fmt.Sprintf("%s:%d", proxyAddr, proxyPort)
-		conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
-		if err != nil {
-			log.Printf("[Binance] 指定代理 %s 不可达（%v），回退自动检测", addr, err)
-			proxyURL = detectLocalProxy()
-		} else {
-			conn.Close()
+		if probeProxy(addr, 3*time.Second) {
 			proxyURL, _ = url.Parse("http://" + addr)
 			log.Printf("[Binance] 使用用户指定代理: %s", addr)
+		} else {
+			log.Printf("[Binance] 指定代理 %s 不可达，尝试内置代理链", addr)
 		}
-	} else {
+	}
+	if proxyURL == nil {
+		for _, bp := range builtinProxies {
+			// 与用户指定代理相同则跳过（已探测过）
+			if proxyAddr != "" && proxyPort > 0 && bp.addr == fmt.Sprintf("%s:%d", proxyAddr, proxyPort) {
+				continue
+			}
+			if probeProxy(bp.addr, bp.timeout) {
+				proxyURL, _ = url.Parse("http://" + bp.addr)
+				log.Printf("[Binance] 使用内置默认代理: %s", bp.addr)
+				break
+			}
+			log.Printf("[Binance] 内置代理 %s 不可达，尝试下一个", bp.addr)
+		}
+	}
+	if proxyURL == nil {
 		proxyURL = detectLocalProxy()
 	}
 	httpClient := newProxiedHTTPClient(proxyURL)
