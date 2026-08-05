@@ -1,0 +1,24 @@
+#!/bin/sh
+# Windows amd64 交叉编译 C 编译器包装脚本（Zig）
+# 作用：
+#   - 剥离 Go CGO 传入的 -target 参数（避免与 zig cc 自带 target 冲突）
+#   - 将 GCC 风格 -mwindows/-mconsole 翻译为 zig/lld 支持的 -Wl,--subsystem,windows/console
+#     （Go 外部链接用 -mwindows 指定 GUI 子系统，zig cc 不支持该标志会静默忽略，
+#       导致 exe 变成控制台程序、运行时弹出黑窗）
+#   - 关闭 zig 默认的 UBSan 插桩（Windows 目标无对应运行时，链接报 undefined symbol）
+# 用法: CC=<路径>/zcc-windows-amd64 go build（配合 CGO_ENABLED=1 GOOS=windows GOARCH=amd64）
+ARGS=""
+SKIP_NEXT=0
+for arg in "$@"; do
+    if [ $SKIP_NEXT -eq 1 ]; then
+        SKIP_NEXT=0
+        continue
+    fi
+    case "$arg" in
+        -target) SKIP_NEXT=1 ;;
+        -mwindows) ARGS="$ARGS -Wl,--subsystem,windows" ;;
+        -mconsole) ARGS="$ARGS -Wl,--subsystem,console" ;;
+        *) ARGS="$ARGS $arg" ;;
+    esac
+done
+exec zig cc -fno-sanitize=all -target x86_64-windows-gnu $ARGS

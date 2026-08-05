@@ -22,6 +22,10 @@ backtest/data/
 backtest/data_funding/
 backtest/backtest
 
+# 回测输出与覆盖率（生成物）
+backtest/out_*/
+coverage.out
+
 # ===== 编译产物 =====
 quant-desktop
 *.exe
