@@ -19,6 +19,7 @@ import (
 	binance "github.com/adshao/go-binance/v2"
 	"github.com/adshao/go-binance/v2/common"
 	"github.com/adshao/go-binance/v2/futures"
+	"golang.org/x/net/proxy"
 )
 
 // Client 币安 API 客户端
@@ -57,28 +58,45 @@ var remoteProxyCandidates = []struct {
 	{"45.251.241.89:49988", 5 * time.Second},
 }
 
-// verifyProxy 验证代理是否真正可用：
-// 1) TCP 握手通过；2) 通过该代理请求币安公开时间接口（/api/v1/time）返回 200。
-// 仅 TCP 通而无法转发 HTTPS 的“死代理”（如端口开放但服务异常）不会被误选。
+// probeProxy 探测代理地址实际支持的协议，并返回带 scheme 的可用代理 URL：
+// 依次实测 HTTP 与 SOCKS5 两种协议（通过代理请求币安公开时间接口，200 才算可用），
+// 仅 TCP 通而无法转发 HTTPS 的"死代理"（如端口开放但服务异常）不会被误选。
 // addr: 代理地址（host:port）
 // mode: 运行模式（SIMULATION 用 demo 域名实测，其余用实盘域名）
-// timeout: 探测超时
-// 返回是否真正可用
-func verifyProxy(addr, mode string, timeout time.Duration) bool {
+// timeout: 单次协议探测超时
+// 返回带协议前缀的代理 URL；两种协议均不可用时返回 nil（由调用方决定降级）
+func probeProxy(addr, mode string, timeout time.Duration) *url.URL {
+	// 1) TCP 握手（快速过滤未监听的端口）
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
-		return false
+		return nil
 	}
 	conn.Close()
 
-	proxyURL, _ := url.Parse("http://" + addr)
 	// 用合约平台真实存在的时间接口做实测（/api/v1/time 在 fapi 域名上不存在，
 	// 会返回 CloudFront 403 导致误判代理不可用；实测 fapi/demo-fapi 的 /fapi/v1/time 均返回 200）
 	testURL := "https://fapi.binance.com/fapi/v1/time"
 	if mode == "SIMULATION" {
 		testURL = "https://demo-fapi.binance.com/fapi/v1/time"
 	}
-	client := newProxiedHTTPClient(proxyURL)
+
+	// 2) 先试 HTTP 代理（绝大多数本地代理客户端默认 HTTP 协议）
+	if u, _ := url.Parse("http://" + addr); testProxyClient(newProxiedHTTPClient(u), testURL, timeout) {
+		return u
+	}
+	// 3) 再试 SOCKS5 代理（v2rayN 默认 10808 为 Socks 端口，Clash 等也常提供）
+	if u, _ := url.Parse("socks5://" + addr); testProxyClient(newProxiedHTTPClient(u), testURL, timeout) {
+		return u
+	}
+	return nil
+}
+
+// testProxyClient 通过指定 HTTP 客户端请求测试 URL，返回是否成功（HTTP 200）
+// client: 已配置代理的 HTTP 客户端
+// testURL: 探测用的币安时间接口地址
+// timeout: 请求超时
+// 返回是否可用
+func testProxyClient(client *http.Client, testURL string, timeout time.Duration) bool {
 	client.Timeout = timeout + 2*time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), timeout+2*time.Second)
 	defer cancel()
@@ -95,15 +113,14 @@ func verifyProxy(addr, mode string, timeout time.Duration) bool {
 }
 
 // detectLocalProxy 检测本机可用代理（本地优先：延迟低、更稳）
-// 遍历常见本地端口，第一个通过 TCP+HTTP 实测的即返回；全部不可用返回 nil（直连）
+// 遍历常见本地端口，第一个通过 TCP+HTTP/SOCKS5 实测的即返回；全部不可用返回 nil（直连）
 // mode: 运行模式（用于实测域名选择）
 func detectLocalProxy(mode string) *url.URL {
 	for _, port := range localProxyPorts {
 		addr := fmt.Sprintf("127.0.0.1:%d", port)
-		if verifyProxy(addr, mode, 1500*time.Millisecond) {
-			proxyURL, _ := url.Parse("http://" + addr)
-			log.Printf("[Binance] 检测到可用本地代理: %s", addr)
-			return proxyURL
+		if u := probeProxy(addr, mode, 1500*time.Millisecond); u != nil {
+			log.Printf("[Binance] 检测到可用本地代理: %s（协议: %s）", addr, u.Scheme)
+			return u
 		}
 	}
 	log.Printf("[Binance] 未检测到可用本地代理")
@@ -111,15 +128,47 @@ func detectLocalProxy(mode string) *url.URL {
 }
 
 // newProxiedHTTPClient 创建带代理的 HTTP 客户端
+// 支持两种代理协议：http/https（标准 Proxy 机制）与 socks5（x/net/proxy 拨号器）；
+// proxyURL 为 nil 时使用直连
+// proxyURL: 代理地址（含协议前缀，如 http://127.0.0.1:7897 或 socks5://127.0.0.1:10808）
 func newProxiedHTTPClient(proxyURL *url.URL) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if proxyURL != nil {
-		transport.Proxy = http.ProxyURL(proxyURL)
+		switch proxyURL.Scheme {
+		case "socks5", "socks5h":
+			// SOCKS5 代理：标准库 http.Transport 的 Proxy 机制不支持 socks5，
+			// 需用 x/net/proxy 建立 SOCKS5 拨号器并通过 DialContext 注入
+			d, err := proxy.SOCKS5("tcp", proxyURL.Host, nil, proxy.Direct)
+			if err == nil {
+				transport.Proxy = nil
+				transport.DialContext = (&socks5Dialer{d: d}).DialContext
+			}
+		default: // http / https
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
 	}
 	return &http.Client{
 		Transport: transport,
 		Timeout:   30 * time.Second,
 	}
+}
+
+// socks5Dialer 将 x/net/proxy 的 Dialer 适配为 http.Transport.DialContext
+// 优先使用底层拨号器的 DialContext（支持 context 取消）；不支持的退化为普通 Dial
+type socks5Dialer struct {
+	d proxy.Dialer
+}
+
+// DialContext 拨号方法（实现 http.Transport.DialContext 签名）
+// ctx: 拨号上下文
+// network: 网络类型（tcp）
+// addr: 目标地址（host:port）
+// 返回已建立的连接或错误
+func (s *socks5Dialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	if cd, ok := s.d.(proxy.ContextDialer); ok {
+		return cd.DialContext(ctx, network, addr)
+	}
+	return s.d.Dial(network, addr)
 }
 
 // NewClient 创建币安客户端
@@ -142,7 +191,7 @@ func NewClient(apiKey, apiSecret, mode string, proxyAddr string, proxyPort int) 
 
 	fut := futures.NewClient(apiKey, apiSecret)
 
-	// 代理解析优先级（每个候选都做 TCP+HTTP 实测，转发不可用的“死代理”不会误选）：
+	// 代理解析优先级（每个候选都做 TCP+HTTP/SOCKS5 实测，转发不可用的"死代理"不会误选）：
 	//   1. 用户指定代理（前端设置/数据库保存，最高优先）
 	//   2. 本地常见端口自动检测（7897/7890/10808 等，延迟低更稳）
 	//   3. 远端兜底代理（45.251.241.89:49988，用户设定 2026-08-05）
@@ -150,11 +199,11 @@ func NewClient(apiKey, apiSecret, mode string, proxyAddr string, proxyPort int) 
 	var proxyURL *url.URL
 	if proxyAddr != "" && proxyPort > 0 {
 		addr := fmt.Sprintf("%s:%d", proxyAddr, proxyPort)
-		if verifyProxy(addr, mode, 3*time.Second) {
-			proxyURL, _ = url.Parse("http://" + addr)
-			log.Printf("[Binance] 使用用户指定代理: %s", addr)
+		if u := probeProxy(addr, mode, 3*time.Second); u != nil {
+			proxyURL = u
+			log.Printf("[Binance] 使用用户指定代理: %s（协议: %s）", addr, u.Scheme)
 		} else {
-			log.Printf("[Binance] 指定代理 %s 验证失败（TCP/HTTP 实测），尝试本地自动检测", addr)
+			log.Printf("[Binance] 指定代理 %s 验证失败（TCP/HTTP/SOCKS5 实测），尝试本地自动检测", addr)
 		}
 	}
 	if proxyURL == nil {
@@ -166,9 +215,9 @@ func NewClient(apiKey, apiSecret, mode string, proxyAddr string, proxyPort int) 
 			if proxyAddr != "" && proxyPort > 0 && rp.addr == fmt.Sprintf("%s:%d", proxyAddr, proxyPort) {
 				continue
 			}
-			if verifyProxy(rp.addr, mode, rp.timeout) {
-				proxyURL, _ = url.Parse("http://" + rp.addr)
-				log.Printf("[Binance] 使用远端兜底代理: %s", rp.addr)
+			if u := probeProxy(rp.addr, mode, rp.timeout); u != nil {
+				proxyURL = u
+				log.Printf("[Binance] 使用远端兜底代理: %s（协议: %s）", rp.addr, u.Scheme)
 				break
 			}
 			log.Printf("[Binance] 远端代理 %s 验证失败，尝试下一个", rp.addr)
