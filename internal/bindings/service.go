@@ -44,6 +44,13 @@ type QuantService struct {
 // 整份 StrategyConfig 以 JSON 序列化后存储，按当前模式库隔离（SIMULATION/LIVE 各自独立）
 const strategyCfgKey = "strategy:cfg"
 
+// defaultProxyAddr / defaultProxyPort 内置默认代理配置（用户设定 2026-08-05）。
+// 新环境（如 Windows 首装）库中无保存代理时自动使用；不可达时 NewClient 回退本地检测。
+const (
+	defaultProxyAddr = "45.251.241.89"
+	defaultProxyPort = 49988
+)
+
 // NewQuantService 创建量化服务实例
 func NewQuantService() *QuantService {
 	return &QuantService{
@@ -97,16 +104,20 @@ func (s *QuantService) Init() error {
 		}
 	}
 
-	// 加载保存的代理配置
+	// 加载保存的代理配置；库中无保存值时使用内置默认代理（用户设定 2026-08-05）。
+	// 默认代理在新环境（如 Windows 首装）首次启动即自动生效；
+	// 若默认代理不可达，NewClient 会自动回退本地代理检测，不会因代理配置而死。
 	proxyAddr, proxyPort, err := db.LoadProxyConfig()
-	if err != nil {
-		log.Printf("[Binding] 加载代理配置失败（使用自动检测）: %v", err)
+	if err != nil || proxyAddr == "" || proxyPort <= 0 {
+		if err != nil {
+			log.Printf("[Binding] 加载代理配置失败（使用内置默认代理 %s:%d）: %v", defaultProxyAddr, defaultProxyPort, err)
+		}
+		s.proxyAddr = defaultProxyAddr
+		s.proxyPort = defaultProxyPort
 	} else {
 		s.proxyAddr = proxyAddr
 		s.proxyPort = proxyPort
-		if proxyAddr != "" && proxyPort > 0 {
-			log.Printf("[Binding] 已加载代理配置: %s:%d", proxyAddr, proxyPort)
-		}
+		log.Printf("[Binding] 已加载代理配置: %s:%d", proxyAddr, proxyPort)
 	}
 
 	// 加载当前模式保存的凭据（如有）

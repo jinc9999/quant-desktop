@@ -96,12 +96,21 @@ func NewClient(apiKey, apiSecret, mode string, proxyAddr string, proxyPort int) 
 
 	fut := futures.NewClient(apiKey, apiSecret)
 
-	// 优先使用用户指定的代理，否则自动检测
+	// 优先使用用户指定的代理，否则自动检测。
+	// 指定代理在启动时先做连通性探测：不可达（服务器关机/端口错误/网络隔离）时
+	// 自动回退到本地代理检测，避免整个交易客户端因代理不可用而全部请求失败。
 	var proxyURL *url.URL
 	if proxyAddr != "" && proxyPort > 0 {
 		addr := fmt.Sprintf("%s:%d", proxyAddr, proxyPort)
-		proxyURL, _ = url.Parse("http://" + addr)
-		log.Printf("[Binance] 使用用户指定代理: %s", addr)
+		conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+		if err != nil {
+			log.Printf("[Binance] 指定代理 %s 不可达（%v），回退自动检测", addr, err)
+			proxyURL = detectLocalProxy()
+		} else {
+			conn.Close()
+			proxyURL, _ = url.Parse("http://" + addr)
+			log.Printf("[Binance] 使用用户指定代理: %s", addr)
+		}
 	} else {
 		proxyURL = detectLocalProxy()
 	}
