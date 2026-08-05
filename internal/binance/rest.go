@@ -44,49 +44,70 @@ type Client struct {
 	dryRunOrderID atomic.Int64
 }
 
-// detectLocalProxy 自动检测本地代理端口
-// 尝试常见代理端口（Clash/V2Ray/SS 等），返回第一个可用的代理 URL
-// 如果都不可用则返回 nil（直连）
-func detectLocalProxy() *url.URL {
-	// 常见本地代理端口：Clash Verge(7897), Clash(7890), V2Ray(1087/1080), SS(1080)
-	ports := []int{7897, 7890, 7891, 1087, 1080, 8118}
-	for _, port := range ports {
-		addr := fmt.Sprintf("127.0.0.1:%d", port)
-		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			proxyURL, _ := url.Parse(fmt.Sprintf("http://%s", addr))
-			log.Printf("[Binance] 检测到本地代理: %s", addr)
-			return proxyURL
-		}
-	}
-	log.Printf("[Binance] 未检测到本地代理，使用直连")
-	return nil
-}
+// localProxyPorts 常见本地代理端口（按优先级）：
+// Clash Verge(7897), Clash(7890/7891), V2Ray(1087/1080), SS(1080), 用户设定 V2Ray(10808)
+var localProxyPorts = []int{7897, 7890, 7891, 1087, 1080, 8118, 10808}
 
-// builtinProxies 内置默认代理候选链（用户设定 2026-08-05）：
-// 本地代理优先（延迟低、更稳），远端代理兜底；
-// 与用户指定代理探测失败后依次尝试，全部不可达再回退本地自动检测，最后直连。
-// 每个候选带独立探测超时：本地端口快速判定（500ms），远端代理放宽（1.5s）。
-var builtinProxies = []struct {
+// remoteProxyCandidates 远端兜底代理（用户设定 2026-08-05）：
+// 仅当本机无可用代理时才尝试；每级都做 HTTP 实测，转发不可用的不会误选。
+var remoteProxyCandidates = []struct {
 	addr    string
 	timeout time.Duration
 }{
-	{"127.0.0.1:10808", 500 * time.Millisecond},   // 本地 V2Ray/Socks 代理（用户设定）
-	{"45.251.241.89:49988", 1500 * time.Millisecond}, // 远端代理（用户设定）
+	{"45.251.241.89:49988", 5 * time.Second},
 }
 
-// probeProxy 探测代理是否可达（TCP 握手）
+// verifyProxy 验证代理是否真正可用：
+// 1) TCP 握手通过；2) 通过该代理请求币安公开时间接口（/api/v1/time）返回 200。
+// 仅 TCP 通而无法转发 HTTPS 的“死代理”（如端口开放但服务异常）不会被误选。
 // addr: 代理地址（host:port）
+// mode: 运行模式（SIMULATION 用 demo 域名实测，其余用实盘域名）
 // timeout: 探测超时
-// 返回是否可达
-func probeProxy(addr string, timeout time.Duration) bool {
+// 返回是否真正可用
+func verifyProxy(addr, mode string, timeout time.Duration) bool {
 	conn, err := net.DialTimeout("tcp", addr, timeout)
 	if err != nil {
 		return false
 	}
 	conn.Close()
-	return true
+
+	proxyURL, _ := url.Parse("http://" + addr)
+	// 用合约平台真实存在的时间接口做实测（/api/v1/time 在 fapi 域名上不存在，
+	// 会返回 CloudFront 403 导致误判代理不可用；实测 fapi/demo-fapi 的 /fapi/v1/time 均返回 200）
+	testURL := "https://fapi.binance.com/fapi/v1/time"
+	if mode == "SIMULATION" {
+		testURL = "https://demo-fapi.binance.com/fapi/v1/time"
+	}
+	client := newProxiedHTTPClient(proxyURL)
+	client.Timeout = timeout + 2*time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), timeout+2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, testURL, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// detectLocalProxy 检测本机可用代理（本地优先：延迟低、更稳）
+// 遍历常见本地端口，第一个通过 TCP+HTTP 实测的即返回；全部不可用返回 nil（直连）
+// mode: 运行模式（用于实测域名选择）
+func detectLocalProxy(mode string) *url.URL {
+	for _, port := range localProxyPorts {
+		addr := fmt.Sprintf("127.0.0.1:%d", port)
+		if verifyProxy(addr, mode, 1500*time.Millisecond) {
+			proxyURL, _ := url.Parse("http://" + addr)
+			log.Printf("[Binance] 检测到可用本地代理: %s", addr)
+			return proxyURL
+		}
+	}
+	log.Printf("[Binance] 未检测到可用本地代理")
+	return nil
 }
 
 // newProxiedHTTPClient 创建带代理的 HTTP 客户端
@@ -121,39 +142,40 @@ func NewClient(apiKey, apiSecret, mode string, proxyAddr string, proxyPort int) 
 
 	fut := futures.NewClient(apiKey, apiSecret)
 
-	// 代理解析优先级（依次探测，找到可用即用）：
+	// 代理解析优先级（每个候选都做 TCP+HTTP 实测，转发不可用的“死代理”不会误选）：
 	//   1. 用户指定代理（前端设置/数据库保存，最高优先）
-	//   2. 内置默认代理链（本地 10808 → 远端 45.251.241.89，用户设定 2026-08-05）
-	//   3. 本地常见端口自动检测（Clash 7897 等）
+	//   2. 本地常见端口自动检测（7897/7890/10808 等，延迟低更稳）
+	//   3. 远端兜底代理（45.251.241.89:49988，用户设定 2026-08-05）
 	//   4. 直连
-	// 每个候选先做 TCP 连通性探测（3s），不可达的跳过并记录日志，
-	// 避免把交易客户端写死在一个不可用的代理上。
 	var proxyURL *url.URL
 	if proxyAddr != "" && proxyPort > 0 {
 		addr := fmt.Sprintf("%s:%d", proxyAddr, proxyPort)
-		if probeProxy(addr, 3*time.Second) {
+		if verifyProxy(addr, mode, 3*time.Second) {
 			proxyURL, _ = url.Parse("http://" + addr)
 			log.Printf("[Binance] 使用用户指定代理: %s", addr)
 		} else {
-			log.Printf("[Binance] 指定代理 %s 不可达，尝试内置代理链", addr)
+			log.Printf("[Binance] 指定代理 %s 验证失败（TCP/HTTP 实测），尝试本地自动检测", addr)
 		}
 	}
 	if proxyURL == nil {
-		for _, bp := range builtinProxies {
-			// 与用户指定代理相同则跳过（已探测过）
-			if proxyAddr != "" && proxyPort > 0 && bp.addr == fmt.Sprintf("%s:%d", proxyAddr, proxyPort) {
+		proxyURL = detectLocalProxy(mode)
+	}
+	if proxyURL == nil {
+		for _, rp := range remoteProxyCandidates {
+			// 与用户指定代理相同则跳过（已实测过）
+			if proxyAddr != "" && proxyPort > 0 && rp.addr == fmt.Sprintf("%s:%d", proxyAddr, proxyPort) {
 				continue
 			}
-			if probeProxy(bp.addr, bp.timeout) {
-				proxyURL, _ = url.Parse("http://" + bp.addr)
-				log.Printf("[Binance] 使用内置默认代理: %s", bp.addr)
+			if verifyProxy(rp.addr, mode, rp.timeout) {
+				proxyURL, _ = url.Parse("http://" + rp.addr)
+				log.Printf("[Binance] 使用远端兜底代理: %s", rp.addr)
 				break
 			}
-			log.Printf("[Binance] 内置代理 %s 不可达，尝试下一个", bp.addr)
+			log.Printf("[Binance] 远端代理 %s 验证失败，尝试下一个", rp.addr)
 		}
 	}
 	if proxyURL == nil {
-		proxyURL = detectLocalProxy()
+		log.Printf("[Binance] 未找到可用代理，使用直连")
 	}
 	httpClient := newProxiedHTTPClient(proxyURL)
 	fut.HTTPClient = httpClient
