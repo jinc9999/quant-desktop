@@ -359,6 +359,11 @@ func (e *Engine) runOnce(ctx context.Context) {
 
 	// 3.7 新币过滤：计算被拦截合约集合（含一次性过滤日志），筛选层/开仓层共用
 	blockedNew := e.buildNewListingBlocked(tickers, now)
+	// 3.71 过滤生效确认：每 Tick 输出被拦截合约数量（为 0 时不输出，避免刷屏）
+	if len(blockedNew) > 0 {
+		log.Printf("[Strategy] Tick %d 新币过滤生效: 拦截 %d 个新上市合约（已从候选筛选中剔除）",
+			e.tickCount, len(blockedNew))
+	}
 
 	// 4. 筛选候选（kline 模式：先粗筛 → 拉当前 K 线开盘价（缓存）→ K 线实体涨幅判定；
 	//    sliding 模式：滑动窗口过程涨幅判定）
@@ -518,13 +523,16 @@ func (e *Engine) buildNewListingBlocked(tickers []binance.Ticker, now int64) map
 			continue
 		}
 		e.newListLogged[t.Symbol] = true
+		dateStr := time.UnixMilli(onboard).Format("2006-01-02")
+		log.Printf("[Strategy] 新币过滤: 拦截 %s（上市日期 %s，上市天数 %d 天 <= 阈值 %d 天）",
+			t.Symbol, dateStr, days, e.cfg.NewListingMinDays)
 		e.db.InsertLog(&storage.TradeLog{
 			Timestamp: now,
 			Level:     "info",
 			Module:    "screener",
 			Symbol:    t.Symbol,
 			Message: fmt.Sprintf("新币过滤: 排除 %s（上市日期 %s，上市天数 %d 天 <= 阈值 %d 天）",
-				t.Symbol, time.UnixMilli(onboard).Format("2006-01-02"), days, e.cfg.NewListingMinDays),
+				t.Symbol, dateStr, days, e.cfg.NewListingMinDays),
 		})
 	}
 	return blocked
@@ -702,6 +710,14 @@ func (e *Engine) openPositions(ctx context.Context, candidates []Candidate, pric
 		// 新币过滤（防御性检查）：上市天数 <= 阈值的合约不参与任何开仓（含追加仓）。
 		// 与筛选层 filterTickers 双保险：即使候选被其他路径引入也在此拦截。
 		if e.isNewListing(c.Symbol, time.Now().UnixMilli()) {
+			// 防御层拦截日志：正常流程下候选已被 filterTickers 剔除，此路径仅覆盖
+			// 绕过筛选层的场景（如追加仓），记录被拦截合约名称便于核对过滤是否生效
+			if onboard, ok := e.client.GetOnboardDate(c.Symbol); ok {
+				log.Printf("[Strategy] 新币过滤(开仓防御): 拦截开仓 %s（上市 %d 天 <= 阈值 %d 天）",
+					c.Symbol, ListingDays(onboard, time.Now().UnixMilli()), e.cfg.NewListingMinDays)
+			} else {
+				log.Printf("[Strategy] 新币过滤(开仓防御): 拦截开仓 %s（上市日期未知）", c.Symbol)
+			}
 			continue
 		}
 
