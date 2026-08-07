@@ -61,8 +61,8 @@ func TestDefaultStrategyConfig(t *testing.T) {
 	if cfg.Min24hGainPct != 4.0 {
 		t.Errorf("Min24hGainPct: 期望 4.0, 实际 %f", cfg.Min24hGainPct)
 	}
-	if cfg.MinQuoteVolume != 100000 {
-		t.Errorf("MinQuoteVolume: 期望 100000, 实际 %f", cfg.MinQuoteVolume)
+	if cfg.MinQuoteVolume != 10000000 {
+		t.Errorf("MinQuoteVolume: 期望 10000000, 实际 %f", cfg.MinQuoteVolume)
 	}
 	if cfg.TopN != 10 {
 		t.Errorf("TopN: 期望 10, 实际 %d", cfg.TopN)

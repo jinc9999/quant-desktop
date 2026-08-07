@@ -885,3 +885,69 @@ func TestPersistConfig_Running(t *testing.T) {
 		t.Fatalf("运行中持久化失败: raw=%q err=%v", raw, err)
 	}
 }
+
+// ==================== 十九、持久化配置迁移测试 ====================
+
+// TestMigratePersistedConfig_OldMinQuoteVolume 验证旧持久化配置中最小成交额 10 万 → 1000 万迁移。
+// 场景：用户升级前保存的配置 MinQuoteVolume=100000（旧默认值），升级后应自动迁移为 10000000。
+func TestMigratePersistedConfig_OldMinQuoteVolume(t *testing.T) {
+	cfg := binance.DefaultStrategyConfig()
+	cfg.MinQuoteVolume = 100000 // 模拟旧版持久化配置
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+
+	migrated, got, err := migratePersistedStrategyConfig(string(data))
+	if err != nil {
+		t.Fatalf("迁移返回错误: %v", err)
+	}
+	if !migrated {
+		t.Fatal("期望发生迁移（最小成交额 100000 → 10000000）")
+	}
+	if got.MinQuoteVolume != 10000000 {
+		t.Errorf("MinQuoteVolume = %v, 期望 10000000", got.MinQuoteVolume)
+	}
+}
+
+// TestMigratePersistedConfig_NoChange 验证新配置（已含 1000 万）不被重复迁移，
+// 且用户显式保存的其他成交额值（非旧默认 100000）保持不变。
+func TestMigratePersistedConfig_NoChange(t *testing.T) {
+	t.Run("新默认值 1000 万不迁移", func(t *testing.T) {
+		cfg := binance.DefaultStrategyConfig() // MinQuoteVolume 已是 10000000
+		data, _ := json.Marshal(cfg)
+
+		migrated, got, err := migratePersistedStrategyConfig(string(data))
+		if err != nil {
+			t.Fatalf("迁移返回错误: %v", err)
+		}
+		if migrated {
+			t.Error("新配置不应触发迁移")
+		}
+		if got.MinQuoteVolume != 10000000 {
+			t.Errorf("MinQuoteVolume = %v, 期望 10000000", got.MinQuoteVolume)
+		}
+	})
+
+	t.Run("用户显式保存的非默认值不覆盖", func(t *testing.T) {
+		cfg := binance.DefaultStrategyConfig()
+		cfg.MinQuoteVolume = 500000 // 用户显式配置
+		data, _ := json.Marshal(cfg)
+
+		_, got, err := migratePersistedStrategyConfig(string(data))
+		if err != nil {
+			t.Fatalf("迁移返回错误: %v", err)
+		}
+		if got.MinQuoteVolume != 500000 {
+			t.Errorf("MinQuoteVolume = %v, 期望保留 500000（非旧默认值不应迁移）", got.MinQuoteVolume)
+		}
+	})
+}
+
+// TestMigratePersistedConfig_BadJSON 验证非法 JSON 返回错误，调用方回退默认值。
+func TestMigratePersistedConfig_BadJSON(t *testing.T) {
+	_, _, err := migratePersistedStrategyConfig("{invalid json")
+	if err == nil {
+		t.Fatal("非法 JSON 应返回错误")
+	}
+}

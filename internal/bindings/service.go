@@ -46,6 +46,37 @@ type QuantService struct {
 // 整份 StrategyConfig 以 JSON 序列化后存储，按当前模式库隔离（SIMULATION/LIVE 各自独立）
 const strategyCfgKey = "strategy:cfg"
 
+// migratePersistedStrategyConfig 对旧版持久化策略配置执行升级迁移。
+// 处理两类历史数据：
+//  1. 新币过滤字段缺失（旧版 JSON 无 enableNewListingFilter 键）：补默认值（开启 + 60 天）；
+//  2. 最小成交额仍为旧值 10 万 USDT（2026-08-07 用户要求 10 万 → 1000 万）：升级为 1000 万。
+//
+// 用户显式保存的其他值不受影响（仅精确匹配旧默认值才迁移）。
+// 返回: 是否发生迁移、迁移后的配置、解析错误（JSON 无法解析时返回错误，由调用方回退默认值）。
+func migratePersistedStrategyConfig(raw string) (bool, binance.StrategyConfig, error) {
+	var saved binance.StrategyConfig
+	if err := json.Unmarshal([]byte(raw), &saved); err != nil {
+		return false, saved, err
+	}
+	migrated := false
+	// 新币过滤字段迁移：旧持久化配置 JSON 缺少新键（升级前保存），
+	// 补上默认值（开启 + 60 天），保证升级后保护自动生效；
+	// 用户显式保存的 false/0（JSON 含新键）不会被覆盖。
+	if !bytes.Contains([]byte(raw), []byte(`"enableNewListingFilter"`)) {
+		dft := binance.DefaultStrategyConfig()
+		saved.EnableNewListingFilter = dft.EnableNewListingFilter
+		saved.NewListingMinDays = dft.NewListingMinDays
+		migrated = true
+	}
+	// 最小成交额参数迁移：旧持久化配置中 24h 成交额下限仍为旧的 10 万 USDT 时，
+	// 升级为 1000 万 USDT（2026-08-07 用户要求）；用户显式保存的其他值不会被覆盖。
+	if saved.MinQuoteVolume == 100000 {
+		saved.MinQuoteVolume = 10000000
+		migrated = true
+	}
+	return migrated, saved, nil
+}
+
 // defaultProxyAddr / defaultProxyPort 内置默认代理配置（用户设定 2026-08-05）。
 // 新环境（如 Windows 首装）库中无保存代理时自动使用；不可达时 NewClient 自动
 // 沿内置候选链（本地 10808 → 远端 45.251.241.89 → 本地检测）继续探测，不会因代理而死。
@@ -98,21 +129,21 @@ func (s *QuantService) Init() error {
 	// 加载上次「应用到项目」保存的策略配置（如有），覆盖默认值；
 	// 各模式数据库独立，持久化配置天然按模式隔离
 	if v, err := db.GetKeyValue(strategyCfgKey); err == nil && v != "" {
-		var saved binance.StrategyConfig
-		if err := json.Unmarshal([]byte(v), &saved); err == nil {
-			s.cfg = saved
-			// 新币过滤字段迁移：旧持久化配置 JSON 缺少新键（升级前保存），
-			// 补上默认值（开启 + 60 天），保证升级后保护自动生效；
-			// 用户显式保存的 false/0（JSON 含新键）不会被覆盖。
-			if !bytes.Contains([]byte(v), []byte(`"enableNewListingFilter"`)) {
-				dft := binance.DefaultStrategyConfig()
-				s.cfg.EnableNewListingFilter = dft.EnableNewListingFilter
-				s.cfg.NewListingMinDays = dft.NewListingMinDays
-				log.Printf("[Binding] 已迁移新币过滤配置为默认值（开启，%d 天）", s.cfg.NewListingMinDays)
+		migrated, migratedCfg, err := migratePersistedStrategyConfig(v)
+		if err != nil {
+			log.Printf("[Binding] 持久化策略配置解析失败（使用默认值）: %v", err)
+		} else {
+			s.cfg = migratedCfg
+			// 升级迁移发生（新币过滤缺键 / 旧最小成交额 10 万）时回写数据库保持存储一致
+			if migrated {
+				if data, err := json.Marshal(migratedCfg); err == nil {
+					if err := db.SetKeyValue(strategyCfgKey, string(data)); err != nil {
+						log.Printf("[Binding] 回写迁移后策略配置失败: %v", err)
+					}
+				}
+				log.Printf("[Binding] 已迁移持久化策略配置（最小成交额 → 1000 万 USDT 等）")
 			}
 			log.Printf("[Binding] 已加载持久化策略配置（应用到项目）")
-		} else {
-			log.Printf("[Binding] 持久化策略配置解析失败（使用默认值）: %v", err)
 		}
 	}
 

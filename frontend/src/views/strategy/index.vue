@@ -23,7 +23,7 @@ const strategyParams = ref({
   timeframe: "15m",
   minGainPct: 4.0,
   min24hGainPct: 4.0,
-  minQuoteVolume: 100000,
+  minQuoteVolume: 10000000,     // 最小成交额(USDT)：24h 累计成交额下限 1000 万（2026-08-07 10 万→1000 万）
   topN: 10,
   maxOpenPositions: 10,         // 最大同时持仓数（2026-08-04 5→10）
   leverage: 10,

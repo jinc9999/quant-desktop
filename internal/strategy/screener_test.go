@@ -2,7 +2,9 @@
 package strategy
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"quant-desktop/internal/binance"
 )
@@ -236,6 +238,57 @@ func TestScreenSliding_Boundary_MinVolumeExact(t *testing.T) {
 	}
 	if got[0].Symbol != "VOLEXACTUSDT" {
 		t.Errorf("Symbol = %q, 期望 VOLEXACTUSDT", got[0].Symbol)
+	}
+}
+
+// TestScreenSliding_Boundary_MinVolumeNewDefault 验证新默认阈值 1000 万 USDT 的边界语义：
+// 成交额恰好等于阈值应纳入（>= 语义），略低于阈值（999 万）应被过滤。
+// 覆盖用户需求「边界值测试」：新参数值下筛选逻辑正确生效。
+func TestScreenSliding_Boundary_MinVolumeNewDefault(t *testing.T) {
+	now := int64(1000000)
+	w := NewSlidingWindow(300000, 10000)
+	feedBaseline(w, "EXACT10MUSDT", now, 100)
+	feedBaseline(w, "BELOW10MUSDT", now, 100)
+
+	tickers := []binance.Ticker{
+		{Symbol: "EXACT10MUSDT", LastPrice: 106, QuoteVolume: 10000000}, // 恰好 1000 万
+		{Symbol: "BELOW10MUSDT", LastPrice: 106, QuoteVolume: 9990000},  // 999 万 < 1000 万
+	}
+	priceMap := map[string]float64{"EXACT10MUSDT": 106, "BELOW10MUSDT": 106}
+
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 10000000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	if len(got) != 1 {
+		t.Fatalf("len = %d, 期望 1（仅 1000 万整入选，999 万被过滤）", len(got))
+	}
+	if got[0].Symbol != "EXACT10MUSDT" {
+		t.Errorf("Symbol = %q, 期望 EXACT10MUSDT", got[0].Symbol)
+	}
+}
+
+// TestBuildKlineOpenMap_NewMinQuoteVolume 验证引擎 K 线粗筛路径在新默认阈值 1000 万下生效：
+// 成交额达到 1000 万整的币被拉取 K 线，低于阈值的币跳过。
+// 覆盖用户需求「功能测试 + 边界值测试」：新参数值在引擎真实执行路径（buildKlineOpenMap）生效。
+func TestBuildKlineOpenMap_NewMinQuoteVolume(t *testing.T) {
+	e, _ := newTestEngine(t)
+	e.cfg.SignalMode = "kline"
+	e.cfg.Timeframe = "15m"
+	e.cfg.MinQuoteVolume = 10000000 // 新默认阈值 1000 万
+	e.cfg.Min24hGainPct = 5.0
+
+	ctx := context.Background()
+	now := time.Now().UnixMilli()
+
+	tickers := []binance.Ticker{
+		{Symbol: "TENMUSDT", QuoteVolume: 10000000, PriceChange: 8.0}, // 恰好 1000 万，粗筛通过
+		{Symbol: "NINEUSDT", QuoteVolume: 9000000, PriceChange: 8.0},  // 900 万 < 1000 万，跳过
+	}
+
+	m := e.buildKlineOpenMap(ctx, tickers, now, nil)
+	if len(m) != 1 {
+		t.Fatalf("K 线开盘价数量 = %d, 期望 1（仅 TENMUSDT 通过粗筛）", len(m))
+	}
+	if m["TENMUSDT"] != 100.0 {
+		t.Errorf("TENMUSDT open = %v, 期望 100.0（DRY_RUN 固定值）", m["TENMUSDT"])
 	}
 }
 

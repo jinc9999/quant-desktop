@@ -171,7 +171,7 @@ func DefaultStrategyConfig() StrategyConfig {
 		Timeframe:              "15m",
 		MinGainPct:             4.0,
 		Min24hGainPct:          4.0, // 双条件筛选：24h 涨幅 >= 4% 且 15m K 线涨幅 >= 4%
-		MinQuoteVolume:         100000,
+		MinQuoteVolume:         10000000, // 24h 成交额下限 1000 万 USDT（2026-08-07 用户要求 10 万→1000 万，过滤小市值低流动性币）
 		TopN:                   10,
 		MaxOpenPositions:       10,   // 最大同时持仓 10（2026-08-04 用户要求 5→10）
 		Leverage:               10,   // 10x 杠杆
