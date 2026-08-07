@@ -2,8 +2,11 @@
 package strategy
 
 import (
+	"bytes"
 	"context"
+	"log"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -244,6 +247,93 @@ func TestOpenPositions_DryRun(t *testing.T) {
 	}
 	if len(orders) != 2 {
 		t.Fatalf("活跃委托数 = %d, 期望 2（止损+跟踪止损）", len(orders))
+	}
+}
+
+// TestOpenPositions_MinQuoteVolumeCheck 验证开仓前成交额校验（默认 1000 万 USDT）：
+// 候选成交额不达标（900 万 < 1000 万）时决策=拒绝开仓，不产生持仓；
+// 候选成交额恰好等于阈值（1000 万）时决策=允许开仓，DRY_RUN 下真实开仓。
+// 覆盖用户需求「开仓前金额校验」关键路径与边界值（>= 语义）。
+func TestOpenPositions_MinQuoteVolumeCheck(t *testing.T) {
+	e, db := newTestEngine(t)
+	ctx := context.Background()
+	e.cfg.MinQuoteVolume = 10000000 // 新默认阈值 1000 万
+
+	// 1. 不达标候选：900 万 < 1000 万 → 拒绝开仓
+	e.openPositions(ctx, []Candidate{
+		{Symbol: "LOWVOLUSDT", GainPct: 6.0, QuoteVolume: 9000000},
+	}, map[string]float64{"LOWVOLUSDT": 100.0}, nil)
+
+	positions, err := db.GetOpenPositions()
+	if err != nil {
+		t.Fatalf("查询持仓失败: %v", err)
+	}
+	if len(positions) != 0 {
+		t.Fatalf("不达标候选开仓数 = %d, 期望 0（900 万 < 1000 万应拒绝开仓）", len(positions))
+	}
+
+	// 2. 达标候选：恰好 1000 万整 → 允许开仓
+	e.openPositions(ctx, []Candidate{
+		{Symbol: "OKVOLUSDT", GainPct: 6.0, QuoteVolume: 10000000},
+	}, map[string]float64{"OKVOLUSDT": 100.0}, nil)
+
+	positions, err = db.GetOpenPositions()
+	if err != nil {
+		t.Fatalf("查询持仓失败: %v", err)
+	}
+	if len(positions) != 1 {
+		t.Fatalf("达标候选开仓数 = %d, 期望 1（恰好 1000 万应允许开仓）", len(positions))
+	}
+	if positions[0].Symbol != "OKVOLUSDT" {
+		t.Errorf("Symbol = %q, 期望 OKVOLUSDT", positions[0].Symbol)
+	}
+}
+
+// TestLogQuoteVolumeFilter 验证每 Tick 成交额校验日志（任务 2a/2b 可观测性要求）：
+// ① 汇总行输出达标数/被过滤数/阈值；
+// ② 接近阈值（>=50%）却被过滤的合约逐条打印判断过程：原始金额→校验规则→限制匹配→决策结果；
+// ③ 远离阈值的低流动性币只计入汇总、不逐条打印（防刷屏）。
+func TestLogQuoteVolumeFilter(t *testing.T) {
+	e, _ := newTestEngine(t)
+	e.cfg.MinQuoteVolume = 10000000 // 新默认阈值 1000 万
+
+	// 捕获全局 log 输出（本包测试非并行，defer 恢复输出目标）
+	var buf bytes.Buffer
+	oldOut := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(oldOut)
+
+	tickers := []binance.Ticker{
+		{Symbol: "BIGUSDT", QuoteVolume: 150000000}, // 1.5 亿，达标
+		{Symbol: "NEARUSDT", QuoteVolume: 6000000},  // 600 万 >= 50% 阈值，接近但被过滤 → 逐条打印
+		{Symbol: "SMALLUSDT", QuoteVolume: 100000},  // 10 万，远离阈值 → 仅计入汇总
+	}
+	e.logQuoteVolumeFilter(tickers)
+
+	out := buf.String()
+
+	// ① 汇总行
+	if !strings.Contains(out, "最小成交额校验") {
+		t.Errorf("缺少汇总行，实际输出:\n%s", out)
+	}
+	if !strings.Contains(out, "达标=1") || !strings.Contains(out, "被过滤=2") || !strings.Contains(out, ">=10000000USDT") {
+		t.Errorf("汇总行统计或阈值错误，实际输出:\n%s", out)
+	}
+
+	// ② 接近阈值被过滤合约的逐条判断过程
+	if !strings.Contains(out, "成交额过滤 NEARUSDT") {
+		t.Errorf("缺少 NEARUSDT 逐条明细行，实际输出:\n%s", out)
+	}
+	if !strings.Contains(out, "原始金额=6000000USDT") ||
+		!strings.Contains(out, "校验规则=24h成交额>=10000000USDT") ||
+		!strings.Contains(out, "限制匹配=不满足") ||
+		!strings.Contains(out, "决策=剔除") {
+		t.Errorf("明细行缺少 原始金额/校验规则/限制匹配/决策 字段，实际输出:\n%s", out)
+	}
+
+	// ③ 远离阈值的不逐条打印
+	if strings.Contains(out, "成交额过滤 SMALLUSDT") {
+		t.Errorf("远离阈值的 SMALLUSDT 不应逐条打印，实际输出:\n%s", out)
 	}
 }
 

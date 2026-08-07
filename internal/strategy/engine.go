@@ -357,6 +357,10 @@ func (e *Engine) runOnce(ctx context.Context) {
 	// 3.5 预热期窗口状态摘要日志
 	e.logWindowStatus(tickers, priceMap, now)
 
+	// 3.6 最小成交额判断过程日志：每 Tick 输出全市场成交额校验统计与示例，
+	// 用于确认 1000 万 USDT 限制在粗筛/筛选/开仓各环节真实生效（原始金额→规则→限制→决策）
+	e.logQuoteVolumeFilter(tickers)
+
 	// 3.7 新币过滤：计算被拦截合约集合（含一次性过滤日志），筛选层/开仓层共用
 	blockedNew := e.buildNewListingBlocked(tickers, now)
 	// 3.71 过滤生效确认：每 Tick 输出被拦截合约数量（为 0 时不输出，避免刷屏）
@@ -611,6 +615,51 @@ func (e *Engine) logCandidates(candidates []Candidate, now int64) {
 	}
 }
 
+// logQuoteVolumeFilter 输出最小成交额（24h 累计成交额）校验的判断过程日志。
+// 需求背景：用户要求确认 1000 万 USDT 成交额限制在关键路径真实生效，
+// 并清晰记录每个被过滤合约的原始金额 → 校验规则 → 限制匹配 → 决策结果。
+//
+// 输出策略（避免每 Tick 刷屏）：
+//  1. 每次 Tick 输出一行汇总：达标数 / 被过滤数 / 阈值；
+//  2. 仅对成交额接近阈值（>= 阈值的 50%）却被过滤的合约打印逐条判断过程，
+//     远离阈值的低流动性币（常态）只计入汇总不逐条打印。
+//
+// 实际拦截仍由 buildKlineOpenMap 粗筛与 ScreenSliding 流动性过滤执行，
+// 本函数只负责可观测性日志，不改变任何业务逻辑。
+func (e *Engine) logQuoteVolumeFilter(tickers []binance.Ticker) {
+	threshold := e.cfg.MinQuoteVolume
+	if len(tickers) == 0 {
+		return
+	}
+	pass, filtered := 0, 0
+	var nearMiss []binance.Ticker // 接近阈值（>= 50%）却被过滤的合约
+	for _, t := range tickers {
+		if t.QuoteVolume >= threshold {
+			pass++
+		} else {
+			filtered++
+			if t.QuoteVolume >= threshold*0.5 {
+				nearMiss = append(nearMiss, t)
+			}
+		}
+	}
+	// 汇总：原始金额判断总量 → 校验规则 → 限制匹配
+	log.Printf("[Strategy] Tick %d 最小成交额校验: 规则=24h成交额>=%.0fUSDT 达标=%d 被过滤=%d 全市场=%d",
+		e.tickCount, threshold, pass, filtered, len(tickers))
+	// 逐条判断过程（仅接近阈值的被过滤合约，限制最多 10 条）
+	if len(nearMiss) > 0 {
+		limit := len(nearMiss)
+		if limit > 10 {
+			limit = 10
+		}
+		for i := 0; i < limit; i++ {
+			t := nearMiss[i]
+			log.Printf("[Strategy]   成交额过滤 %s: 原始金额=%.0fUSDT 校验规则=24h成交额>=%.0fUSDT 限制匹配=不满足 决策=剔除（不入候选）",
+				t.Symbol, t.QuoteVolume, threshold)
+		}
+	}
+}
+
 // openPositions 根据候选币种执行开仓（P0：有界并发）
 // candidates: 已按涨幅降序排列的候选列表
 // priceMap: symbol -> 最新价映射
@@ -753,6 +802,17 @@ func (e *Engine) openPositions(ctx context.Context, candidates []Candidate, pric
 		if !ok || entryPrice <= 0 {
 			continue
 		}
+
+		// 成交额校验（开仓前确认）：候选必须满足 24h 累计成交额下限（默认 1000 万 USDT）。
+		// 该限制在筛选层（buildKlineOpenMap 粗筛 + ScreenSliding）已拦截不达标合约，
+		// 此处为开仓前的最终确认日志，记录候选原始成交额与校验决策。
+		if c.QuoteVolume < e.cfg.MinQuoteVolume {
+			log.Printf("[Strategy] 成交额校验(开仓前): %s 原始金额=%.0fUSDT 校验规则=24h成交额>=%.0fUSDT 限制匹配=不满足 决策=拒绝开仓",
+				c.Symbol, c.QuoteVolume, e.cfg.MinQuoteVolume)
+			continue
+		}
+		log.Printf("[Strategy] 成交额校验(开仓前): %s 原始金额=%.0fUSDT 校验规则=24h成交额>=%.0fUSDT 限制匹配=满足 决策=允许开仓",
+			c.Symbol, c.QuoteVolume, e.cfg.MinQuoteVolume)
 
 		// 已持仓币种：默认不重复开仓（避免双仓位）；
 		// 开启追加仓位（EnableAddOn）时，满足以下全部条件才允许追加 1 张新单：

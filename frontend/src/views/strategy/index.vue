@@ -508,7 +508,9 @@ onUnmounted(() => {
             </el-tooltip>
           </el-form-item>
           <el-form-item label="最小成交额">
-            <el-input-number v-model="strategyParams.minQuoteVolume" :min="10000" :step="10000" />
+            <el-tooltip content="24h 累计成交额下限（USDT），默认 1000 万（10,000,000）；低于该值的合约不进入候选" placement="top">
+              <el-input-number v-model="strategyParams.minQuoteVolume" :min="10000" :step="10000" />
+            </el-tooltip>
           </el-form-item>
           <el-form-item label="候选数量(Top N)">
             <el-tooltip content="0 = 不限制，所有达标币种均可开仓（受最大持仓数约束）" placement="top">

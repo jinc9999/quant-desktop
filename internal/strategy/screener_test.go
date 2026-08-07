@@ -265,6 +265,60 @@ func TestScreenSliding_Boundary_MinVolumeNewDefault(t *testing.T) {
 	}
 }
 
+// TestScreenSliding_Boundary_MinVolumeAbove 验证新默认阈值 1000 万下「超过阈值」场景：
+// 成交额显著超过阈值（1.5 亿）与略超阈值（1050 万）均应入选，
+// 接近但不足（990 万）仍被过滤。
+// 与等于（1000 万）/接近（999 万）场景合起来，完整覆盖 等于 / 接近 / 超过 三档边界值。
+func TestScreenSliding_Boundary_MinVolumeAbove(t *testing.T) {
+	now := int64(1000000)
+	w := NewSlidingWindow(300000, 10000)
+	feedBaseline(w, "HUGEUSDT", now, 100)   // 1.5 亿，显著超过阈值
+	feedBaseline(w, "SLIGHTUSDT", now, 100) // 1050 万，略超阈值
+	feedBaseline(w, "NEARUSDT", now, 100)   // 990 万，接近但不足
+
+	tickers := []binance.Ticker{
+		{Symbol: "HUGEUSDT", LastPrice: 106, QuoteVolume: 150000000},
+		{Symbol: "SLIGHTUSDT", LastPrice: 106, QuoteVolume: 10500000},
+		{Symbol: "NEARUSDT", LastPrice: 106, QuoteVolume: 9900000},
+	}
+	priceMap := map[string]float64{"HUGEUSDT": 106, "SLIGHTUSDT": 106, "NEARUSDT": 106}
+
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 10000000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	if len(got) != 2 {
+		t.Fatalf("len = %d, 期望 2（1.5 亿与 1050 万入选，990 万被过滤）", len(got))
+	}
+	for _, c := range got {
+		if c.Symbol == "NEARUSDT" {
+			t.Errorf("NEARUSDT 成交额 990 万 < 1000 万，不应入选")
+		}
+	}
+}
+
+// TestScreenSliding_CustomHigherThreshold 验证用户将成交额阈值手动调高（超过 1000 万，如 2000 万）时：
+// 成交额 2500 万（>2000 万）入选、1500 万（>1000 万但 <2000 万）被过滤。
+// 覆盖用户需求「创建测试策略、设置超过 1000 万的成交额参数」：阈值可上调且生效（过滤更严格）。
+func TestScreenSliding_CustomHigherThreshold(t *testing.T) {
+	now := int64(1000000)
+	w := NewSlidingWindow(300000, 10000)
+	feedBaseline(w, "BIGUSDT", now, 100)   // 2500 万 > 2000 万
+	feedBaseline(w, "MIDUSDT", now, 100)   // 1500 万：高于 1000 万但低于 2000 万
+
+	tickers := []binance.Ticker{
+		{Symbol: "BIGUSDT", LastPrice: 106, QuoteVolume: 25000000},
+		{Symbol: "MIDUSDT", LastPrice: 106, QuoteVolume: 15000000},
+	}
+	priceMap := map[string]float64{"BIGUSDT": 106, "MIDUSDT": 106}
+
+	// 用户自定义阈值 2000 万
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 20000000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	if len(got) != 1 {
+		t.Fatalf("len = %d, 期望 1（仅 2500 万入选，1500 万被 2000 万阈值过滤）", len(got))
+	}
+	if got[0].Symbol != "BIGUSDT" {
+		t.Errorf("Symbol = %q, 期望 BIGUSDT", got[0].Symbol)
+	}
+}
+
 // TestBuildKlineOpenMap_NewMinQuoteVolume 验证引擎 K 线粗筛路径在新默认阈值 1000 万下生效：
 // 成交额达到 1000 万整的币被拉取 K 线，低于阈值的币跳过。
 // 覆盖用户需求「功能测试 + 边界值测试」：新参数值在引擎真实执行路径（buildKlineOpenMap）生效。
