@@ -6,6 +6,8 @@ import (
 	"errors"
 	"math"
 	"testing"
+
+	"github.com/adshao/go-binance/v2/futures"
 )
 
 // newDryRunClient 创建 DRY_RUN 模式的测试客户端
@@ -902,5 +904,111 @@ func TestDefaultStrategyConfig_NewFields(t *testing.T) {
 	}
 	if cfg.MaxHoldMin != 120 {
 		t.Errorf("MaxHoldMin: 期望 120（最长持仓 120 分钟）, 实际 %d", cfg.MaxHoldMin)
+	}
+	if !cfg.EnableNewListingFilter {
+		t.Errorf("EnableNewListingFilter: 期望 true（新币过滤默认开启）, 实际 %v", cfg.EnableNewListingFilter)
+	}
+	if cfg.NewListingMinDays != 60 {
+		t.Errorf("NewListingMinDays: 期望 60（默认过滤 60 天内新币）, 实际 %d", cfg.NewListingMinDays)
+	}
+}
+
+// ==================== 四、TestConnection 测试 ====================
+
+// TestTestConnection_DryRun 验证 DRY_RUN 模式无法测试连接（无真实凭据），
+// 且诊断字段 domain/proxy 正常输出（不发起网络请求）。
+func TestTestConnection_DryRun(t *testing.T) {
+	c := newDryRunClient()
+	r := c.TestConnection(context.Background())
+	if r["ok"] != "false" {
+		t.Errorf("ok: 期望 false, 实际 %s", r["ok"])
+	}
+	if r["message"] != "DRY_RUN 模式无真实凭据，无法测试连接" {
+		t.Errorf("message 不符: %s", r["message"])
+	}
+	if r["domain"] == "" {
+		t.Error("domain 不应为空")
+	}
+	if r["proxy"] == "" {
+		t.Error("proxy 不应为空（应为直连或代理描述）")
+	}
+}
+
+// TestTestConnection_NoCredentials 验证 SIMULATION 模式未填 Key 时的提示。
+func TestTestConnection_NoCredentials(t *testing.T) {
+	// UseDemo/BaseApiDemoURL 为包级全局变量，恢复现场避免影响其他测试
+	oldUseDemo, oldBase := futures.UseDemo, futures.BaseApiDemoURL
+	t.Cleanup(func() { futures.UseDemo, futures.BaseApiDemoURL = oldUseDemo, oldBase })
+
+	c := NewClient("", "", "SIMULATION", "", 0)
+	r := c.TestConnection(context.Background())
+	if r["ok"] != "false" {
+		t.Errorf("ok: 期望 false, 实际 %s", r["ok"])
+	}
+	if r["message"] != "尚未填写 API Key / Secret" {
+		t.Errorf("message 不符: %s", r["message"])
+	}
+	// 诊断字段：模拟盘应指向 demo 域名
+	if r["domain"] != "https://demo-fapi.binance.com" {
+		t.Errorf("domain: 期望 demo-fapi.binance.com, 实际 %s", r["domain"])
+	}
+}
+
+// TestTestConnection_NilClient 验证客户端未初始化时安全返回。
+func TestTestConnection_NilClient(t *testing.T) {
+	c := &Client{}
+	r := c.TestConnection(context.Background())
+	if r["ok"] != "false" {
+		t.Errorf("ok: 期望 false, 实际 %s", r["ok"])
+	}
+	if r["message"] != "客户端未初始化" {
+		t.Errorf("message 不符: %s", r["message"])
+	}
+}
+
+// TestNewClient_Live_ResetsDemoFlag 回归测试：全局 UseDemo 残留 bug。
+// 场景：用户先切模拟盘（UseDemo=true），再切回实盘——NewClient 必须重置 UseDemo，
+// 否则 REST/WS 全部误发到 demo-fapi.binance.com，实盘 Key 在测试网返回 -2015。
+func TestNewClient_Live_ResetsDemoFlag(t *testing.T) {
+	// 保存现场，测试后恢复，避免影响其他测试
+	oldUseDemo := futures.UseDemo
+	t.Cleanup(func() { futures.UseDemo = oldUseDemo })
+
+	// 模拟用户先切模拟盘：全局 UseDemo 被置为 true
+	NewClient("", "", "SIMULATION", "", 0)
+	if !futures.UseDemo {
+		t.Fatal("前置条件不成立：模拟盘应设置 UseDemo=true")
+	}
+
+	// 再切实盘：必须重置 UseDemo，BaseURL 回到主网
+	c := NewClient("key", "secret", "LIVE", "", 0)
+	if futures.UseDemo {
+		t.Error("LIVE 模式必须重置全局 UseDemo=false，否则 REST/WS 误发测试网")
+	}
+	if c.futuresClient.BaseURL != "https://fapi.binance.com" {
+		t.Errorf("LIVE 模式 BaseURL 应为 https://fapi.binance.com, 实际 %s", c.futuresClient.BaseURL)
+	}
+}
+
+// ==================== 五、新币过滤 onboardDate 测试 ====================
+
+// TestGetOnboardDate 验证 GetOnboardDate 返回缓存的上市日期（未知返回 ok=false）
+func TestGetOnboardDate(t *testing.T) {
+	c := newDryRunClient()
+	c.onboardDateMu.Lock()
+	c.onboardDateMap = map[string]int64{
+		"NEWUSDT": 1753000000000,
+		"OLDUSDT": 1600000000000,
+	}
+	c.onboardDateMu.Unlock()
+
+	if d, ok := c.GetOnboardDate("NEWUSDT"); !ok || d != 1753000000000 {
+		t.Errorf("期望 NEWUSDT 上市日期 1753000000000, 实际 %d ok=%v", d, ok)
+	}
+	if d, ok := c.GetOnboardDate("OLDUSDT"); !ok || d != 1600000000000 {
+		t.Errorf("期望 OLDUSDT 上市日期 1600000000000, 实际 %d ok=%v", d, ok)
+	}
+	if _, ok := c.GetOnboardDate("UNKNOWN"); ok {
+		t.Error("期望 UNKNOWN ok=false, 实际 ok=true")
 	}
 }

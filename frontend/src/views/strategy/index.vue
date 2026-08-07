@@ -5,6 +5,7 @@
  * 通过 Wails 绑定调用 Go 后端 QuantService
  */
 import { ref, watch, onMounted, onUnmounted } from "vue";
+import { ElNotification } from "element-plus";
 import { showError, showSuccess } from "../../utils/error-handler";
 import { callService } from "../../utils/service";
 import { QuantService } from "../../../bindings/quant-desktop/internal/bindings";
@@ -42,7 +43,9 @@ const strategyParams = ref({
   confirmThreshold: 0,         // 短窗口涨幅确认阈值（%），kline 模式下不生效
   volumeSurgeThreshold: 1.5,   // 成交量放大倍数阈值（0=关闭，1.5=放量 1.5 倍才追）
   signalMode: "kline",         // 信号模式：kline=15m K线实体实时检测 / sliding=滑动窗口（旧版）
-  maxPullbackPct: 9.0          // 山顶过滤器（%）：距 24h 最高/最低回撤超此值不追，0=关闭
+  maxPullbackPct: 9.0,         // 山顶过滤器（%）：距 24h 最高/最低回撤超此值不追，0=关闭
+  enableNewListingFilter: true, // 新币过滤：排除上市 60 天内的新合约（无历史数据、波动剧烈）
+  newListingMinDays: 60        // 新币过滤天数阈值（天）：上市天数 <= 该值的合约被过滤
 });
 
 // 运行状态
@@ -61,6 +64,8 @@ const apiKey = ref("");
 const apiSecret = ref("");
 // 保存模式操作进行中标记
 const savingMode = ref(false);
+// 连接测试进行中标记
+const testingConnection = ref(false);
 
 // 代理配置
 const proxyAddress = ref("");
@@ -99,7 +104,9 @@ function toBackendConfig() {
     confirmThreshold: p.confirmThreshold,
     volumeSurgeThreshold: p.volumeSurgeThreshold,
     signalMode: p.signalMode,
-    maxPullbackPct: p.maxPullbackPct
+    maxPullbackPct: p.maxPullbackPct,
+    enableNewListingFilter: p.enableNewListingFilter,
+    newListingMinDays: p.newListingMinDays
   };
 }
 
@@ -135,7 +142,9 @@ async function loadConfig() {
       confirmThreshold: cfg.confirmThreshold ?? 0,
       volumeSurgeThreshold: cfg.volumeSurgeThreshold ?? 1.5,
       signalMode: cfg.signalMode ?? "kline",
-      maxPullbackPct: cfg.maxPullbackPct ?? 9.0
+      maxPullbackPct: cfg.maxPullbackPct ?? 9.0,
+      enableNewListingFilter: cfg.enableNewListingFilter ?? true,
+      newListingMinDays: cfg.newListingMinDays ?? 60
     };
   }
 }
@@ -216,7 +225,9 @@ async function saveCredentials() {
   savingMode.value = true;
   try {
     const msg = await callService(
-      () => QuantService.SetCredentials(runMode.value, apiKey.value, apiSecret.value),
+      // trim 清理首尾空白，防止 Windows 复制粘贴带入空格/换行导致币安 -2014
+      () =>
+        QuantService.SetCredentials(runMode.value, apiKey.value.trim(), apiSecret.value.trim()),
       { context: "保存模式" }
     );
     if (msg !== null) {
@@ -225,6 +236,48 @@ async function saveCredentials() {
     }
   } finally {
     savingMode.value = false;
+  }
+}
+
+/**
+ * 测试 API Key 认证（只读，绝不下单）
+ * 调用后端直接以标准签名请求币安账户只读接口，
+ * 成功显示余额摘要，失败显示完整诊断（域名/代理/出口 IP/币安错误），用于快速定位认证问题。
+ */
+async function testConnection() {
+  if (testingConnection.value) return;
+  testingConnection.value = true;
+  try {
+    // 先保存当前填写的凭据，确保后端使用最新 Key 测试
+    await callService(
+      () =>
+        QuantService.SetCredentials(runMode.value, apiKey.value.trim(), apiSecret.value.trim()),
+      { silent: true }
+    );
+    const result = await callService(() => QuantService.TestConnection(), { silent: true });
+    if (!result) return;
+    if (result.ok === "true") {
+      showSuccess(result.message || "连接测试通过");
+      return;
+    }
+    // 失败：展示完整诊断链路（域名/代理/网络/出口 IP），便于区分白名单、Secret、网络三类问题
+    const lines = [`${result.message || "未知错误"}`];
+    if (result.domain) lines.push(`请求域名：${result.domain}`);
+    if (result.proxy) lines.push(`代理链路：${result.proxy}`);
+    if (result.network) lines.push(`网络自检：${result.network}`);
+    if (result.exit_ip) {
+      lines.push(`出口 IP：${result.exit_ip}（请与币安 IP 白名单核对）`);
+    }
+    ElNotification({
+      title: "连接测试失败",
+      message: lines.join("<br/>"),
+      type: "error",
+      duration: 0,
+      position: "top-right",
+      dangerouslyUseHTMLString: true
+    });
+  } finally {
+    testingConnection.value = false;
   }
 }
 
@@ -351,6 +404,15 @@ onUnmounted(() => {
           >
             保存模式
           </el-button>
+          <el-button
+            type="warning"
+            plain
+            :loading="testingConnection"
+            :disabled="isRunning"
+            @click="testConnection"
+          >
+            测试连接
+          </el-button>
         </el-form-item>
       </el-form>
       <p class="mode-tip">
@@ -433,6 +495,16 @@ onUnmounted(() => {
           <el-form-item label="山顶过滤器(%)">
             <el-tooltip content="当前价距 24h 最高/最低价回撤超过该值不追（防止买在山顶接飞刀），0=关闭" placement="top">
               <el-input-number v-model="strategyParams.maxPullbackPct" :min="0" :max="50" :step="0.5" />
+            </el-tooltip>
+          </el-form-item>
+          <el-form-item label="新币过滤">
+            <el-tooltip content="过滤上市天数小于等于阈值的合约（新上市合约无历史数据、波动剧烈，追涨风险高），不影响平仓与已有持仓" placement="top">
+              <el-switch v-model="strategyParams.enableNewListingFilter" />
+            </el-tooltip>
+          </el-form-item>
+          <el-form-item label="过滤天数(天)">
+            <el-tooltip content="上市天数小于等于该值的合约被过滤，0=关闭" placement="top">
+              <el-input-number v-model="strategyParams.newListingMinDays" :min="0" :max="365" :step="1" />
             </el-tooltip>
           </el-form-item>
           <el-form-item label="最小成交额">

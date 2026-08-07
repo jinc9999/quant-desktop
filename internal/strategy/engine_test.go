@@ -1655,7 +1655,7 @@ func TestBuildKlineOpenMap(t *testing.T) {
 		{Symbol: "DDUSDT", QuoteVolume: 200000, PriceChange: -8.0}, // 粗筛通过（做空）
 	}
 
-	m := e.buildKlineOpenMap(ctx, tickers, now)
+	m := e.buildKlineOpenMap(ctx, tickers, now, nil)
 	if len(m) != 2 {
 		t.Fatalf("K 线开盘价数量 = %d, 期望 2（仅 AAUSDT + DDUSDT 粗筛通过）", len(m))
 	}
@@ -1673,7 +1673,7 @@ func TestBuildKlineOpenMap(t *testing.T) {
 	}
 
 	// 同一周期二次调用：命中缓存，结果一致
-	m2 := e.buildKlineOpenMap(ctx, tickers, now+5000)
+	m2 := e.buildKlineOpenMap(ctx, tickers, now+5000, nil)
 	if len(m2) != 2 || m2["AAUSDT"] != 100.0 {
 		t.Errorf("缓存复用失败: m2 = %v", m2)
 	}
@@ -1790,4 +1790,149 @@ func TestBreaker_ResetDaily_AfterClose(t *testing.T) {
 		t.Fatalf("日熔断重置后开仓数 = %d, 期望 1", len(opened))
 	}
 	_ = db
+}
+
+// ========== 十七、新币过滤测试 ==========
+
+// TestOpenPositions_NewListingFiltered 验证新币过滤：上市天数 <= 阈值的候选不开仓，老币正常开仓
+func TestOpenPositions_NewListingFiltered(t *testing.T) {
+	e, db := newTestEngine(t)
+	ctx := context.Background()
+	now := time.Now().UnixMilli()
+	dayMs := int64(24 * 3600 * 1000)
+
+	e.cfg.EnableNewListingFilter = true
+	e.cfg.NewListingMinDays = 60
+	e.client.SetOnboardDatesForTest(map[string]int64{
+		"NEWUSDT": now - 30*dayMs,  // 上市 30 天：应被过滤
+		"OLDUSDT": now - 365*dayMs, // 上市 365 天：正常
+	})
+
+	candidates := []Candidate{
+		{Symbol: "NEWUSDT", GainPct: 6.0, QuoteVolume: 200000},
+		{Symbol: "OLDUSDT", GainPct: 6.0, QuoteVolume: 200000},
+	}
+	priceMap := map[string]float64{"NEWUSDT": 10.0, "OLDUSDT": 50.0}
+
+	e.openPositions(ctx, candidates, priceMap, nil)
+
+	positions, err := db.GetOpenPositions()
+	if err != nil {
+		t.Fatalf("查询持仓失败: %v", err)
+	}
+	if len(positions) != 1 {
+		t.Fatalf("OPEN 持仓数 = %d, 期望 1（仅 OLDUSDT，NEWUSDT 被新币过滤拦截）", len(positions))
+	}
+	if positions[0].Symbol != "OLDUSDT" {
+		t.Errorf("持仓 Symbol = %q, 期望 OLDUSDT", positions[0].Symbol)
+	}
+}
+
+// TestOpenPositions_NewListingFilterDisabled 验证关闭过滤后新币正常开仓（开关关闭不影响交易）
+func TestOpenPositions_NewListingFilterDisabled(t *testing.T) {
+	e, db := newTestEngine(t)
+	ctx := context.Background()
+	now := time.Now().UnixMilli()
+	dayMs := int64(24 * 3600 * 1000)
+
+	// EnableNewListingFilter 默认 false：即使存在上市日期数据也不过滤
+	e.client.SetOnboardDatesForTest(map[string]int64{
+		"NEWUSDT": now - 30*dayMs,
+		"OLDUSDT": now - 365*dayMs,
+	})
+
+	candidates := []Candidate{
+		{Symbol: "NEWUSDT", GainPct: 6.0, QuoteVolume: 200000},
+		{Symbol: "OLDUSDT", GainPct: 6.0, QuoteVolume: 200000},
+	}
+	priceMap := map[string]float64{"NEWUSDT": 10.0, "OLDUSDT": 50.0}
+
+	e.openPositions(ctx, candidates, priceMap, nil)
+
+	positions, err := db.GetOpenPositions()
+	if err != nil {
+		t.Fatalf("查询持仓失败: %v", err)
+	}
+	if len(positions) != 2 {
+		t.Fatalf("OPEN 持仓数 = %d, 期望 2（过滤关闭时新币不拦截）", len(positions))
+	}
+}
+
+// TestOpenPositions_NewListing_UnknownDateAllowed 验证上市日期未知（exchangeInfo 未加载）时失败放行
+func TestOpenPositions_NewListing_UnknownDateAllowed(t *testing.T) {
+	e, db := newTestEngine(t)
+	ctx := context.Background()
+
+	e.cfg.EnableNewListingFilter = true
+	e.cfg.NewListingMinDays = 60
+	// onboardDateMap 为空：模拟 exchangeInfo 未加载/加载失败
+
+	candidates := []Candidate{
+		{Symbol: "BTCUSDT", GainPct: 6.0, QuoteVolume: 200000},
+	}
+	priceMap := map[string]float64{"BTCUSDT": 50000.0}
+
+	e.openPositions(ctx, candidates, priceMap, nil)
+
+	positions, err := db.GetOpenPositions()
+	if err != nil {
+		t.Fatalf("查询持仓失败: %v", err)
+	}
+	if len(positions) != 1 {
+		t.Fatalf("OPEN 持仓数 = %d, 期望 1（上市日期未知时放行，不误杀）", len(positions))
+	}
+}
+
+// TestBuildNewListingBlocked_Logs 验证拦截集合计算与过滤日志（含去重）
+func TestBuildNewListingBlocked_Logs(t *testing.T) {
+	e, db := newTestEngine(t)
+	now := time.Now().UnixMilli()
+	dayMs := int64(24 * 3600 * 1000)
+
+	e.cfg.EnableNewListingFilter = true
+	e.cfg.NewListingMinDays = 60
+	e.client.SetOnboardDatesForTest(map[string]int64{
+		"NEWUSDT": now - 10*dayMs,
+		"OLDUSDT": now - 365*dayMs,
+	})
+
+	tickers := []binance.Ticker{
+		{Symbol: "NEWUSDT", LastPrice: 10, PriceChange: 8, QuoteVolume: 500000},
+		{Symbol: "OLDUSDT", LastPrice: 50, PriceChange: 8, QuoteVolume: 500000},
+	}
+
+	blocked := e.buildNewListingBlocked(tickers, now)
+	if !blocked["NEWUSDT"] {
+		t.Error("期望 NEWUSDT 被拦截")
+	}
+	if blocked["OLDUSDT"] {
+		t.Error("期望 OLDUSDT 不被拦截")
+	}
+
+	logs, err := db.GetRecentLogs(10)
+	if err != nil {
+		t.Fatalf("查询日志失败: %v", err)
+	}
+	count := 0
+	for _, l := range logs {
+		if l.Module == "screener" && l.Symbol == "NEWUSDT" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("NEWUSDT 过滤日志数 = %d, 期望 1", count)
+	}
+
+	// 第二次调用：日志不重复（去重）
+	e.buildNewListingBlocked(tickers, now)
+	logs2, _ := db.GetRecentLogs(10)
+	count2 := 0
+	for _, l := range logs2 {
+		if l.Module == "screener" && l.Symbol == "NEWUSDT" {
+			count2++
+		}
+	}
+	if count2 != 1 {
+		t.Errorf("二次调用后 NEWUSDT 过滤日志数 = %d, 期望仍为 1（去重）", count2)
+	}
 }

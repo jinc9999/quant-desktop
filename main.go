@@ -1,5 +1,6 @@
 package main
 
+// 前端构建产物（frontend/dist，由 pnpm build 生成）由下面的 embed 指令嵌入
 import (
 	"embed"
 	"fmt"
@@ -8,14 +9,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"quant-desktop/internal/bindings"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
-//go:embed all:frontend/dist
+//go:embed frontend/dist/*
 var assets embed.FS
 
 // acquireSingleInstanceLock 单实例锁：保证同一时刻只有一个客户端窗口。
@@ -24,14 +24,11 @@ var assets embed.FS
 // 多实例还会并发写同一个 SQLite 库。此后无论用何种方式启动，都只能有一个实例。
 func acquireSingleInstanceLock() (func(), error) {
 	lockPath := filepath.Join(os.TempDir(), "quant-desktop.lock")
-	// 已有锁文件：检查持有进程是否存活
+	// 已有锁文件：检查持有进程是否存活（进程存活探测按平台实现：Unix 用信号 0，Windows 用 OpenProcess）
 	if data, err := os.ReadFile(lockPath); err == nil {
 		if pid, perr := strconv.Atoi(strings.TrimSpace(string(data))); perr == nil {
-			if proc, ferr := os.FindProcess(pid); ferr == nil {
-				// 信号 0 仅探测进程存活，不发送任何信号
-				if err := proc.Signal(syscall.Signal(0)); err == nil {
-					return nil, fmt.Errorf("检测到量化交易客户端已在运行（PID %d），请勿重复启动", pid)
-				}
+			if isProcessAlive(pid) {
+				return nil, fmt.Errorf("检测到量化交易客户端已在运行（PID %d），请勿重复启动", pid)
 			}
 		}
 		// 持有进程已退出（崩溃残留的锁），抢占重建

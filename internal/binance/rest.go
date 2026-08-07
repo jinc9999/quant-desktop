@@ -3,8 +3,13 @@ package binance
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net"
@@ -27,11 +32,19 @@ type Client struct {
 	futuresClient *futures.Client
 	mode          string // DRY_RUN | SIMULATION | LIVE
 
+	// 实际选中的代理 URL（NewClient 候选链探测后的最终结果，nil=直连）。
+	// 仅供「测试连接」诊断报告使用，不参与请求逻辑。
+	proxyURL *url.URL
+
 	// 精度缓存：symbol -> SymbolPrecision
 	precisionMu  sync.RWMutex
 	precisionMap map[string]SymbolPrecision
 	// 精度规则加载锁：防止并发开仓时重复加载 exchangeInfo
 	precisionLoadMu sync.Mutex
+
+	// 上市日期缓存：symbol -> onboardDate（Unix 毫秒，来自 exchangeInfo）
+	onboardDateMu  sync.RWMutex
+	onboardDateMap map[string]int64
 
 	// 杠杆设置缓存：已成功设置目标杠杆的交易对（避免每次开仓重复调用）
 	leverageMu  sync.Mutex
@@ -187,6 +200,12 @@ func NewClient(apiKey, apiSecret, mode string, proxyAddr string, proxyPort int) 
 		futures.BaseWsMarketDemoURL = "wss://demo-fstream.binance.com/market/ws"
 		futures.BaseWsPrivateDemoURL = "wss://demo-fstream.binance.com/private/ws"
 		futures.BaseWsApiDemoURL = "wss://demo-fstream.binance.com/ws-fapi/v1"
+	} else {
+		// 关键：UseDemo 是 go-binance 的包级全局变量。若此前切过模拟盘，
+		// 它会残留为 true，导致实盘(LIVE)/DRY_RUN 的 REST 与 WS 全部误发到
+		// demo-fapi.binance.com——实盘 Key 在测试网返回 -2015（Invalid API-key）。
+		// 非模拟盘模式必须显式重置，REST 与 WS 才回到主网域名。
+		futures.UseDemo = false
 	}
 
 	fut := futures.NewClient(apiKey, apiSecret)
@@ -238,11 +257,13 @@ func NewClient(apiKey, apiSecret, mode string, proxyAddr string, proxyPort int) 
 	}
 
 	return &Client{
-		futuresClient: fut,
-		mode:          mode,
-		precisionMap:  make(map[string]SymbolPrecision),
-		leverageSet:   make(map[string]bool),
-		marginModeSet: make(map[string]bool),
+		futuresClient:  fut,
+		mode:           mode,
+		proxyURL:       proxyURL,
+		precisionMap:   make(map[string]SymbolPrecision),
+		onboardDateMap: make(map[string]int64),
+		leverageSet:    make(map[string]bool),
+		marginModeSet:  make(map[string]bool),
 	}
 }
 
@@ -257,6 +278,7 @@ func (c *Client) LoadExchangeInfo(ctx context.Context) error {
 	}
 
 	m := make(map[string]SymbolPrecision, len(info.Symbols))
+	om := make(map[string]int64, len(info.Symbols))
 	for _, s := range info.Symbols {
 		sp := SymbolPrecision{
 			QtyPrecision:   s.QuantityPrecision,
@@ -270,11 +292,18 @@ func (c *Client) LoadExchangeInfo(ctx context.Context) error {
 			sp.TickSize = mustParseFloat(pf.TickSize)
 		}
 		m[s.Symbol] = sp
+		// 顺带缓存上市日期（新币过滤用）；onboardDate 缺失/为 0 的合约不缓存
+		if s.OnboardDate > 0 {
+			om[s.Symbol] = s.OnboardDate
+		}
 	}
 
 	c.precisionMu.Lock()
 	c.precisionMap = m
 	c.precisionMu.Unlock()
+	c.onboardDateMu.Lock()
+	c.onboardDateMap = om
+	c.onboardDateMu.Unlock()
 
 	log.Printf("[Binance] 已加载 %d 个交易对精度规则", len(m))
 	return nil
@@ -308,6 +337,33 @@ func (c *Client) EnsurePrecision(ctx context.Context, symbol string) error {
 		return fmt.Errorf("补加载精度规则失败: %w", err)
 	}
 	return nil
+}
+
+// GetOnboardDate 获取交易对上市日期（Unix 毫秒）。
+// 数据来自启动时 LoadExchangeInfo 缓存的 exchangeInfo.onboardDate；
+// 返回 ok=false 表示未知（exchangeInfo 未加载/加载失败/该币无上市日期数据）。
+// symbol: 交易对（如 "BTCUSDT"）
+// 返回上市日期（Unix 毫秒）与是否存在
+func (c *Client) GetOnboardDate(symbol string) (int64, bool) {
+	c.onboardDateMu.RLock()
+	defer c.onboardDateMu.RUnlock()
+	if len(c.onboardDateMap) == 0 {
+		return 0, false
+	}
+	d, ok := c.onboardDateMap[symbol]
+	return d, ok
+}
+
+// SetOnboardDatesForTest 仅供测试注入上市日期数据（新币过滤逻辑测试用），不参与生产流程。
+// dates: symbol -> 上市日期（Unix 毫秒）；nil 表示清空（回到未加载状态）
+func (c *Client) SetOnboardDatesForTest(dates map[string]int64) {
+	c.onboardDateMu.Lock()
+	if dates == nil {
+		c.onboardDateMap = make(map[string]int64)
+	} else {
+		c.onboardDateMap = dates
+	}
+	c.onboardDateMu.Unlock()
 }
 
 // Mode 返回客户端运行模式（DRY_RUN / SIMULATION / LIVE）
@@ -1349,4 +1405,140 @@ func mustParseInt64(s string) int64 {
 	var n int64
 	fmt.Sscanf(s, "%d", &n)
 	return n
+}
+
+// TestConnection 验证 API Key 认证是否可用（只读，绝不下单）。
+// 以标准 HMAC-SHA256 签名请求账户只读接口 positionSide/dual，
+// 直接读取币安原始响应，返回完整诊断结果，便于在 Windows 上一键定位认证问题：
+//   - ok: 认证是否成功（true/false）
+//   - mode: 当前运行模式
+//   - domain: 实际请求的币安域名（fapi.binance.com=实盘 / demo-fapi.binance.com=测试网）
+//   - proxy: 实际使用的代理链路（用户指定/自动检测/直连）
+//   - network: 网络链路自检结果（无签名公开接口，区分"网络/代理问题"与"Key 问题"）
+//   - exit_ip: 经当前代理链获取的出口公网 IP（供与币安 IP 白名单对比）
+//   - message: 成功摘要或失败时的完整错误原文（含 code/msg/request ip）
+func (c *Client) TestConnection(ctx context.Context) map[string]string {
+	result := map[string]string{"ok": "false", "mode": c.mode}
+
+	if c.futuresClient == nil {
+		result["message"] = "客户端未初始化"
+		return result
+	}
+	// 诊断信息先取（不依赖网络）
+	result["domain"] = c.futuresClient.BaseURL
+	if c.proxyURL != nil {
+		result["proxy"] = c.proxyURL.String()
+	} else {
+		result["proxy"] = "直连（无代理）"
+	}
+	if c.isDryRun() {
+		result["message"] = "DRY_RUN 模式无真实凭据，无法测试连接"
+		return result
+	}
+	if c.futuresClient.APIKey == "" || c.futuresClient.SecretKey == "" {
+		result["message"] = "尚未填写 API Key / Secret"
+		return result
+	}
+
+	// 1) 网络链路自检：请求同一域名下的无签名公开接口。
+	//    失败 = 网络/代理问题（与 Key 无关）；成功 = 链路通，认证失败才是 Key/白名单问题。
+	timeURL := strings.TrimRight(c.futuresClient.BaseURL, "/") + "/fapi/v1/time"
+	if req, err := http.NewRequestWithContext(ctx, http.MethodGet, timeURL, nil); err == nil {
+		if r, err := c.futuresClient.HTTPClient.Do(req); err != nil {
+			result["network"] = "公开接口请求失败: " + err.Error()
+		} else {
+			r.Body.Close()
+			if r.StatusCode == http.StatusOK {
+				result["network"] = "网络链路正常（公开接口返回 200）"
+			} else {
+				result["network"] = fmt.Sprintf("公开接口返回 HTTP %d（链路异常）", r.StatusCode)
+			}
+		}
+	}
+
+	// 2) 出口公网 IP（经同一代理链，供与币安 IP 白名单对比；失败不阻断主流程）
+	if ip := c.publicIP(ctx); ip != "" {
+		result["exit_ip"] = ip
+	}
+
+	// 3) 标准签名请求（与币安官方一致）：timestamp + HMAC-SHA256
+	ts := time.Now().UnixMilli()
+	query := fmt.Sprintf("timestamp=%d", ts)
+	mac := hmac.New(sha256.New, []byte(c.futuresClient.SecretKey))
+	mac.Write([]byte(query))
+	sig := hex.EncodeToString(mac.Sum(nil))
+	url := fmt.Sprintf("%s/fapi/v1/positionSide/dual?%s&signature=%s", c.futuresClient.BaseURL, query, sig)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		result["message"] = "构造请求失败: " + err.Error()
+		return result
+	}
+	req.Header.Set("X-MBX-APIKEY", c.futuresClient.APIKey)
+
+	resp, err := c.futuresClient.HTTPClient.Do(req)
+	if err != nil {
+		result["message"] = "网络请求失败: " + err.Error()
+		return result
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode == http.StatusOK {
+		result["ok"] = "true"
+		var v struct {
+			DualSidePosition bool `json:"dualSidePosition"`
+		}
+		_ = json.Unmarshal(body, &v)
+		msg := fmt.Sprintf("认证成功！双向持仓模式=%v", v.DualSidePosition)
+		if bal, berr := c.GetFuturesBalance(ctx); berr == nil && bal != nil {
+			msg += fmt.Sprintf("，保证金余额=%.2f USDT", bal.TotalMarginBalance)
+		}
+		result["message"] = msg
+	} else {
+		// 解析币安原始错误，提取 code/msg/request ip（-2015 时币安会返回其看到的出口 IP）
+		var e struct {
+			Code      int64  `json:"code"`
+			Msg       string `json:"msg"`
+			RequestIP string `json:"request ip"`
+		}
+		_ = json.Unmarshal(body, &e)
+		if e.Code != 0 {
+			msg := fmt.Sprintf("币安错误 %d: %s", e.Code, e.Msg)
+			if e.RequestIP != "" {
+				msg += fmt.Sprintf("（币安看到出口 IP: %s）", e.RequestIP)
+			}
+			result["message"] = msg
+		} else {
+			result["message"] = string(body)
+		}
+	}
+	return result
+}
+
+// publicIP 经当前代理链获取出口公网 IP（仅诊断用）。
+// 使用 HTTPS 接口 api.ipify.org（返回纯 IP）；失败返回空字符串，不阻断测试主流程。
+// ctx: 请求上下文
+// 返回出口 IP 字符串（失败为空）
+func (c *Client) publicIP(ctx context.Context) string {
+	ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx2, http.MethodGet, "https://api.ipify.org", nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := c.futuresClient.HTTPClient.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+	b, _ := io.ReadAll(resp.Body)
+	ip := strings.TrimSpace(string(b))
+	if ip == "" || len(ip) > 64 {
+		return ""
+	}
+	return ip
 }

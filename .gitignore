@@ -2,6 +2,7 @@
 bin
 frontend/dist
 frontend/node_modules
+frontend/.bindings-tmp-*/
 build/linux/appimage/build
 build/windows/nsis/MicrosoftEdgeWebview2Setup.exe
 # Mobile generated (per-machine; overlays hold absolute paths)
@@ -36,6 +37,8 @@ build/windows/quant-desktop/
 
 # ===== 系统/IDE =====
 .DS_Store
+# macOS AppleDouble 元数据文件（从 macOS 拷贝/同步到 Windows 时产生）
+._*
 .trae
 .idea/
 .vscode/

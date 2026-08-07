@@ -2,10 +2,12 @@
 package bindings
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -99,6 +101,15 @@ func (s *QuantService) Init() error {
 		var saved binance.StrategyConfig
 		if err := json.Unmarshal([]byte(v), &saved); err == nil {
 			s.cfg = saved
+			// 新币过滤字段迁移：旧持久化配置 JSON 缺少新键（升级前保存），
+			// 补上默认值（开启 + 60 天），保证升级后保护自动生效；
+			// 用户显式保存的 false/0（JSON 含新键）不会被覆盖。
+			if !bytes.Contains([]byte(v), []byte(`"enableNewListingFilter"`)) {
+				dft := binance.DefaultStrategyConfig()
+				s.cfg.EnableNewListingFilter = dft.EnableNewListingFilter
+				s.cfg.NewListingMinDays = dft.NewListingMinDays
+				log.Printf("[Binding] 已迁移新币过滤配置为默认值（开启，%d 天）", s.cfg.NewListingMinDays)
+			}
 			log.Printf("[Binding] 已加载持久化策略配置（应用到项目）")
 		} else {
 			log.Printf("[Binding] 持久化策略配置解析失败（使用默认值）: %v", err)
@@ -168,8 +179,9 @@ func (s *QuantService) SetCredentials(mode, apiKey, apiSecret string) string {
 
 	modeChanged := s.mode != mode
 	s.mode = mode
-	s.apiKey = apiKey
-	s.apiSecret = apiSecret
+	// 清理首尾空白字符（Windows 复制粘贴易带入空格/换行，币安视为格式无效 -2014）
+	s.apiKey = strings.TrimSpace(apiKey)
+	s.apiSecret = strings.TrimSpace(apiSecret)
 
 	// 模式切换时：关闭旧数据库，打开新模式对应的独立数据库
 	if modeChanged {
@@ -292,6 +304,21 @@ func (s *QuantService) GetProxyConfig() map[string]interface{} {
 		"address": s.proxyAddr,
 		"port":    s.proxyPort,
 	}
+}
+
+// TestConnection 测试当前 API Key 认证是否可用（只读，绝不下单）。
+// 直接以标准签名请求账户只读接口，返回完整诊断结果（含 request ip）。
+// 前端「测试连接」按钮调用，用于快速定位 Key 认证问题。
+// 返回: map 包含 ok / mode / message
+func (s *QuantService) TestConnection() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.client == nil {
+		return map[string]string{"ok": "false", "message": "客户端未初始化"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	return s.client.TestConnection(ctx)
 }
 
 // GetMode 获取当前运行模式

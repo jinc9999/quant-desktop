@@ -81,6 +81,9 @@ type Engine struct {
 	// klineOpenCache: symbol -> 当前 K 线周期开盘价缓存。
 	// K 线开盘价在周期内不变，只需每周期拉取一次，降低 REST 调用量（K 线信号模式用）。
 	klineOpenCache map[string]klineOpenEntry
+
+	// newListLogged: 已记录过新币过滤日志的合约（每次进程运行去重，防每 Tick 刷屏）
+	newListLogged map[string]bool
 }
 
 // klineOpenEntry K 线开盘价缓存条目
@@ -112,6 +115,7 @@ func NewEngine(cfg binance.StrategyConfig, client *binance.Client, ws *binance.W
 		openBlocked: make(map[string]time.Time),
 		closeRetry:  make(map[int64]time.Time),
 		klineOpenCache: make(map[string]klineOpenEntry),
+		newListLogged:  make(map[string]bool),
 	}
 }
 
@@ -353,17 +357,20 @@ func (e *Engine) runOnce(ctx context.Context) {
 	// 3.5 预热期窗口状态摘要日志
 	e.logWindowStatus(tickers, priceMap, now)
 
+	// 3.7 新币过滤：计算被拦截合约集合（含一次性过滤日志），筛选层/开仓层共用
+	blockedNew := e.buildNewListingBlocked(tickers, now)
+
 	// 4. 筛选候选（kline 模式：先粗筛 → 拉当前 K 线开盘价（缓存）→ K 线实体涨幅判定；
 	//    sliding 模式：滑动窗口过程涨幅判定）
 	screenStart := time.Now()
 	confirmWindowMs := int64(e.cfg.ConfirmWindowMin * 60000)
 	var klineOpen map[string]float64
 	if e.cfg.SignalMode == "kline" {
-		klineOpen = e.buildKlineOpenMap(ctx, tickers, now)
+		klineOpen = e.buildKlineOpenMap(ctx, tickers, now, blockedNew)
 		// confirmWindowMs 在 kline 模式保留：供放量确认使用（最近 N 分钟成交量 vs 之前窗口）。
 		// 价格二次确认（ConfirmThreshold）对 kline 模式保持关闭，由 screener 内 !klineMode 守卫保证。
 	}
-	candidates := ScreenSliding(e.window, tickers, priceMap, e.cfg.MinGainPct, e.cfg.Min24hGainPct, e.cfg.MinQuoteVolume, e.cfg.TopN, now,
+	candidates := ScreenSliding(e.window, filterTickers(tickers, blockedNew), priceMap, e.cfg.MinGainPct, e.cfg.Min24hGainPct, e.cfg.MinQuoteVolume, e.cfg.TopN, now,
 		e.cfg.EnableShort, confirmWindowMs, e.cfg.ConfirmThreshold, e.cfg.VolumeSurgeThreshold,
 		e.cfg.SignalMode, klineOpen, e.cfg.MaxPullbackPct)
 	screenDur := time.Since(screenStart)
@@ -434,10 +441,11 @@ func (e *Engine) fetchTickers(ctx context.Context) ([]binance.Ticker, error) {
 //   - ctx: 上下文
 //   - tickers: 24h 行情列表
 //   - now: 当前时间（Unix 毫秒）
+//   - blockedNew: 新币过滤拦截集合（被拦截合约跳过 K 线拉取）
 //
 // 返回:
 //   - map[string]float64: symbol -> K 线开盘价（拉取失败的币不入 map，ScreenSliding 将保守跳过）
-func (e *Engine) buildKlineOpenMap(ctx context.Context, tickers []binance.Ticker, now int64) map[string]float64 {
+func (e *Engine) buildKlineOpenMap(ctx context.Context, tickers []binance.Ticker, now int64, blockedNew map[string]bool) map[string]float64 {
 	result := make(map[string]float64)
 	periodMs := int64(ParseTimeframeMs(e.cfg.Timeframe))
 	if periodMs <= 0 {
@@ -448,6 +456,9 @@ func (e *Engine) buildKlineOpenMap(ctx context.Context, tickers []binance.Ticker
 	// 粗筛：成交额 + 24h 涨跌幅（与 ScreenSliding 前置过滤一致，缩小拉取范围）
 	var symbols []string
 	for _, t := range tickers {
+		if blockedNew[t.Symbol] {
+			continue // 新币过滤：不拉取被拦截合约的 K 线，节省 REST 调用
+		}
 		if t.QuoteVolume < e.cfg.MinQuoteVolume {
 			continue
 		}
@@ -475,6 +486,65 @@ func (e *Engine) buildKlineOpenMap(ctx context.Context, tickers []binance.Ticker
 		result[sym] = open
 	}
 	return result
+}
+
+// buildNewListingBlocked 计算本 Tick 被新币过滤拦截的交易对集合，并记录过滤日志。
+// 过滤条件（EnableNewListingFilter && NewListingMinDays>0 时生效）：
+//   上市天数 <= NewListingMinDays 的合约被拦截（排除新上市合约）。
+// 日志去重：每个合约每次进程运行只记录一次（newListLogged），避免每 Tick 刷屏。
+// 上市日期未知（exchangeInfo 未加载/无数据）的合约不拦截（失败放行，与 IsFuturesSymbol 一致）。
+// 参数:
+//   - tickers: 全市场行情列表（含被拦截合约，用于日志与后续筛选剔除）
+//   - now: 当前时间（Unix 毫秒）
+//
+// 返回:
+//   - map[string]bool: 被拦截的合约集合
+func (e *Engine) buildNewListingBlocked(tickers []binance.Ticker, now int64) map[string]bool {
+	blocked := make(map[string]bool)
+	if !e.cfg.EnableNewListingFilter || e.cfg.NewListingMinDays <= 0 {
+		return blocked
+	}
+	for _, t := range tickers {
+		onboard, ok := e.client.GetOnboardDate(t.Symbol)
+		if !ok {
+			continue
+		}
+		days := ListingDays(onboard, now)
+		if days < 0 || days > e.cfg.NewListingMinDays {
+			continue
+		}
+		blocked[t.Symbol] = true
+		if e.newListLogged[t.Symbol] {
+			continue
+		}
+		e.newListLogged[t.Symbol] = true
+		e.db.InsertLog(&storage.TradeLog{
+			Timestamp: now,
+			Level:     "info",
+			Module:    "screener",
+			Symbol:    t.Symbol,
+			Message: fmt.Sprintf("新币过滤: 排除 %s（上市日期 %s，上市天数 %d 天 <= 阈值 %d 天）",
+				t.Symbol, time.UnixMilli(onboard).Format("2006-01-02"), days, e.cfg.NewListingMinDays),
+		})
+	}
+	return blocked
+}
+
+// isNewListing 判断交易对是否因上市天数过短被过滤（开仓层防御性检查）。
+// 与 buildNewListingBlocked 判定一致；上市日期未知时不过滤（失败放行）。
+// symbol: 交易对（如 "NEWUSDT"）
+// now: 当前时间（Unix 毫秒）
+// 返回 true=被过滤（禁止开仓）
+func (e *Engine) isNewListing(symbol string, now int64) bool {
+	if !e.cfg.EnableNewListingFilter || e.cfg.NewListingMinDays <= 0 {
+		return false
+	}
+	onboard, ok := e.client.GetOnboardDate(symbol)
+	if !ok {
+		return false
+	}
+	days := ListingDays(onboard, now)
+	return days >= 0 && days <= e.cfg.NewListingMinDays
 }
 
 // logWindowStatus 打印窗口状态摘要
@@ -626,6 +696,12 @@ func (e *Engine) openPositions(ctx context.Context, candidates []Candidate, pric
 
 		// 合约市场过滤：跳过无合约的交易对（现货有但合约不存在的币种）
 		if !e.client.IsFuturesSymbol(c.Symbol) {
+			continue
+		}
+
+		// 新币过滤（防御性检查）：上市天数 <= 阈值的合约不参与任何开仓（含追加仓）。
+		// 与筛选层 filterTickers 双保险：即使候选被其他路径引入也在此拦截。
+		if e.isNewListing(c.Symbol, time.Now().UnixMilli()) {
 			continue
 		}
 
