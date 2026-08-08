@@ -253,7 +253,7 @@ func TestCloseLong_DryRun(t *testing.T) {
 // 期望返回 OrderResult{Symbol:"BTCUSDT", Status:"NEW", OrderID>0}
 func TestPlaceStopMarket_DryRun(t *testing.T) {
 	c := newDryRunClient()
-	result, err := c.PlaceStopMarket(context.Background(), "BTCUSDT", 60000.0, "LONG")
+	result, err := c.PlaceStopMarket(context.Background(), "BTCUSDT", 60000.0, 0.001, "LONG")
 	if err != nil {
 		t.Fatalf("期望 err=nil, 实际=%v", err)
 	}
@@ -417,7 +417,7 @@ func TestOpenLong_ZeroAmount(t *testing.T) {
 // DRY_RUN 模式不做参数校验，即使触发价为零也模拟挂单成功
 func TestPlaceStopMarket_ZeroPrice(t *testing.T) {
 	c := newDryRunClient()
-	result, err := c.PlaceStopMarket(context.Background(), "BTCUSDT", 0, "LONG")
+	result, err := c.PlaceStopMarket(context.Background(), "BTCUSDT", 0, 0.001, "LONG")
 	if err != nil {
 		t.Fatalf("期望 err=nil, 实际=%v", err)
 	}
@@ -827,7 +827,7 @@ func TestCloseShort_DryRun(t *testing.T) {
 // TestPlaceStopMarket_Short_DryRun 验证 DRY_RUN 模式下做空止损单
 func TestPlaceStopMarket_Short_DryRun(t *testing.T) {
 	c := newDryRunClient()
-	result, err := c.PlaceStopMarket(context.Background(), "BTCUSDT", 70000.0, "SHORT")
+	result, err := c.PlaceStopMarket(context.Background(), "BTCUSDT", 70000.0, 0.001, "SHORT")
 	if err != nil {
 		t.Fatalf("期望 err=nil, 实际=%v", err)
 	}
@@ -854,7 +854,7 @@ func TestPlaceTrailingStop_Short_DryRun(t *testing.T) {
 // TestUpdateStopMarketPrice_DryRun 验证 DRY_RUN 模式下更新止损价
 func TestUpdateStopMarketPrice_DryRun(t *testing.T) {
 	c := newDryRunClient()
-	result, err := c.UpdateStopMarketPrice(context.Background(), 12345, "BTCUSDT", 65000.0, "LONG")
+	result, err := c.UpdateStopMarketPrice(context.Background(), 12345, "BTCUSDT", 65000.0, 0.001, "LONG")
 	if err != nil {
 		t.Fatalf("期望 err=nil, 实际=%v", err)
 	}

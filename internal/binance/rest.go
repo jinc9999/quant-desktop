@@ -792,19 +792,22 @@ func (c *Client) markPriceOf(ctx context.Context, symbol string) (float64, error
 // ctx: 请求上下文
 // symbol: 交易对（如 "BTCUSDT"）
 // stopPrice: 止损触发价格
+// amount: 平仓数量（按数量挂单，避免同方向多张 closePosition 条件单互斥 -4130）
 // side: 方向（LONG/SHORT）
 // 返回 *OrderResult 下单结果（含 AlgoID），error 错误信息
-func (c *Client) PlaceStopMarket(ctx context.Context, symbol string, stopPrice float64, side string) (*OrderResult, error) {
+func (c *Client) PlaceStopMarket(ctx context.Context, symbol string, stopPrice float64, amount float64, side string) (*OrderResult, error) {
 	if c.isDryRun() {
 		return &OrderResult{OrderID: c.nextDryRunOrderID(), AlgoID: c.nextDryRunOrderID(), Symbol: symbol, Side: "SELL", Status: "NEW"}, nil
 	}
 	priceStr := c.FormatPrice(symbol, stopPrice)
+	qtyStr := c.FormatQty(symbol, amount)
 
 	svc := c.futuresClient.NewCreateAlgoOrderService().
 		Symbol(symbol).
 		Type(futures.AlgoOrderTypeStopMarket).
 		TriggerPrice(priceStr).
-		ClosePosition(true).
+		Quantity(qtyStr).
+		ReduceOnly(true).
 		WorkingType(futures.WorkingTypeMarkPrice)
 	if side == "SHORT" {
 		svc.Side(futures.SideTypeBuy).PositionSide(futures.PositionSideTypeShort)
@@ -913,9 +916,9 @@ func (c *Client) PlaceTakeProfit(ctx context.Context, symbol string, takeProfitP
 
 // UpdateStopMarketPrice 更新止损单触发价（撤旧挂新）
 // Algo Order API 无修改接口，需先取消旧单再创建新单
-// 参数：oldAlgoID 旧条件单 ID，symbol 交易对，newTriggerPrice 新触发价，side 方向（LONG/SHORT）
+// 参数：oldAlgoID 旧条件单 ID，symbol 交易对，newTriggerPrice 新触发价，amount 平仓数量，side 方向（LONG/SHORT）
 // 返回值：新单结果，错误信息
-func (c *Client) UpdateStopMarketPrice(ctx context.Context, oldAlgoID int64, symbol string, newTriggerPrice float64, side string) (*OrderResult, error) {
+func (c *Client) UpdateStopMarketPrice(ctx context.Context, oldAlgoID int64, symbol string, newTriggerPrice float64, amount float64, side string) (*OrderResult, error) {
 	if c.isDryRun() {
 		return &OrderResult{OrderID: c.nextDryRunOrderID(), AlgoID: c.nextDryRunOrderID(), Symbol: symbol, Side: "SELL", Status: "NEW"}, nil
 	}
@@ -924,7 +927,7 @@ func (c *Client) UpdateStopMarketPrice(ctx context.Context, oldAlgoID int64, sym
 		log.Printf("[Binance] ⚠️ UpdateStopMarketPrice 取消旧单失败 %s algoId=%d: %v（继续创建新单）", symbol, oldAlgoID, err)
 	}
 	// 再创建新单
-	result, err := c.PlaceStopMarket(ctx, symbol, newTriggerPrice, side)
+	result, err := c.PlaceStopMarket(ctx, symbol, newTriggerPrice, amount, side)
 	if err != nil {
 		return nil, fmt.Errorf("更新止损价失败 %s: %w", symbol, err)
 	}

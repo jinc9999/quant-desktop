@@ -419,3 +419,36 @@ func TestOnCloseFiredOnFilledClose(t *testing.T) {
 		t.Errorf("重复触发后回调次数 = %d, 期望仍为 1", len(closed))
 	}
 }
+
+// TestPlaceStopOrders_MultiplePositionsSameSymbol 回归 -4130：
+// 同币多仓（追加仓）各挂一张按数量止损单，互不冲突。
+// 修复前 STOP_MARKET 使用 ClosePosition(true)，币安同一方向只允许一张 closePosition 条件单，
+// 第 2 仓挂单必然 -4130 并触发回滚；修复后按数量+reduceOnly 挂单（与跟踪止损一致）。
+func TestPlaceStopOrders_MultiplePositionsSameSymbol(t *testing.T) {
+	mgr, db := setupTestEnv(t)
+	ctx := context.Background()
+	cfg := testStrategyConfig()
+
+	// 同币两个独立持仓（模拟 1 首仓 + 1 追加仓）
+	posA := insertTestPosition(t, db)
+	posA.Symbol = "BTCUSDT"
+	posB := insertTestPosition(t, db)
+	posB.Symbol = "BTCUSDT"
+
+	if err := mgr.PlaceStopOrders(ctx, posA, cfg); err != nil {
+		t.Fatalf("首仓挂止损失败: %v", err)
+	}
+	if err := mgr.PlaceStopOrders(ctx, posB, cfg); err != nil {
+		t.Fatalf("追加仓挂止损失败（-4130 回归）: %v", err)
+	}
+
+	for _, pos := range []*storage.Position{posA, posB} {
+		orders, err := db.GetOrdersByPosition(pos.ID)
+		if err != nil {
+			t.Fatalf("查询持仓 %d 委托失败: %v", pos.ID, err)
+		}
+		if len(orders) != 2 {
+			t.Fatalf("持仓 %d 委托数 = %d, 期望 2（STOP_MARKET + TRAILING_STOP_MARKET）", pos.ID, len(orders))
+		}
+	}
+}

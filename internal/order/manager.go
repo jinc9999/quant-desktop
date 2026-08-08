@@ -96,7 +96,7 @@ func (m *Manager) PlaceStopOrders(ctx context.Context, pos *storage.Position, cf
 	var stopResult *binance.OrderResult
 	err = m.retryWithBackoff(ctx, func() error {
 		var e error
-		stopResult, e = m.client.PlaceStopMarket(ctx, pos.Symbol, stopPrice, pos.Side)
+		stopResult, e = m.client.PlaceStopMarket(ctx, pos.Symbol, stopPrice, pos.Amount, pos.Side)
 		return e
 	})
 	if err != nil {
@@ -431,7 +431,7 @@ func (m *Manager) SyncOrders(ctx context.Context, priceMap map[string]float64) e
 					// 仅当变动超过 0.1% 时才更新，避免频繁撤挂触发限频
 					oldStop := stopOrder.StopPrice
 					if oldStop == nil || math.Abs(newStop-*oldStop)/newStop > 0.001 {
-						result, updateErr := m.client.UpdateStopMarketPrice(ctx, stopOrder.AlgoID, pos.Symbol, newStop, pos.Side)
+					result, updateErr := m.client.UpdateStopMarketPrice(ctx, stopOrder.AlgoID, pos.Symbol, newStop, pos.Amount, pos.Side)
 						if updateErr != nil {
 							log.Printf("[ORDER] ❌ %s 动态更新止损价失败 algoId=%d: %v", pos.Symbol, stopOrder.AlgoID, updateErr)
 						} else {
