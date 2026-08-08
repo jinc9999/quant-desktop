@@ -99,6 +99,8 @@ type StrategyConfig struct {
 	FundReversalMult    float64 // L5 费率反转: 费率 > 入场时×该值（默认 1.5）
 	NewListingMinDays   int     // L1 新币过滤: 上市天数 > 该值（默认 60）
 	CooldownAfterTrailingMin int // 实验: 移动止盈平仓后的冷却分钟数（-1=统一用 CooldownMs；0=立即再入）
+	EnableAddOn              bool // 实验: 启用追加仓位（同币移动止盈激活后再命中信号可加仓）
+	MaxAddOnsPerSymbol       int  // 实验: 单币最大追加次数（默认 1，即同币最多 1+1 两仓）
 
 	// ===== S01 单因子实验开关（默认全关，不改变 S01 现有行为）=====
 	FundingVetoEnabled bool    // 实验: 费率过热否决（正费率 ≥ 分级阈值不追）
@@ -898,8 +900,12 @@ func (e *Engine) openPositions(candidates []candidate, now int64) {
 		if held[c.symbol] {
 			if e.cfg.Mode == "v6" {
 				e.v6Skip[2]++
+				continue
 			}
-			continue
+			// 追加仓位（与实盘 EnableAddOn 语义一致）: 同币移动止盈已激活且再次命中信号
+			if !e.canAddOn(c) {
+				continue
+			}
 		}
 		// 破产保护: 可用权益（权益-占用保证金）不足以开一仓则停止开仓
 		// （v6 动态仓位由 v6Sizing 自行校验，不在此用固定保证金截断）
@@ -964,6 +970,31 @@ func sortCandidates(cands []candidate) {
 	sort.Slice(cands, func(i, j int) bool {
 		return cands[i].volume > cands[j].volume
 	})
+}
+
+// canAddOn 判断是否允许追加仓位（与实盘 EnableAddOn 语义一致）:
+// 开启追加 + 同币存在移动止盈已激活的持仓 + 同币持仓数未达 1+MaxAddOnsPerSymbol + 方向一致。
+func (e *Engine) canAddOn(c candidate) bool {
+	if !e.cfg.EnableAddOn || e.cfg.MaxAddOnsPerSymbol <= 0 {
+		return false
+	}
+	count := 0
+	trailing := false
+	for _, p := range e.positions {
+		if p.Symbol != c.symbol {
+			continue
+		}
+		count++
+		if p.Side == c.side && p.TrailingActive {
+			trailing = true
+		}
+	}
+	for _, p := range e.pending {
+		if p.Symbol == c.symbol {
+			count++
+		}
+	}
+	return trailing && count < 1+e.cfg.MaxAddOnsPerSymbol
 }
 
 // candidate 一个开仓候选

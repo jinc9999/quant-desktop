@@ -672,6 +672,8 @@ func main() {
 	tpFlag := flag.Float64("tp", 0.0, "固定止盈 %%（0 关闭，默认 0）")
 	holdFlag := flag.Int("hold", 0, "最大持仓分钟数（0 关闭，默认 0）")
 	trailcdFlag := flag.Int("trailcd", -1, "S01 实验: 移动止盈平仓后冷却分钟数（-1=统一 CooldownMs；0=立即再入）")
+	addonFlag := flag.Bool("addon", false, "S01 实验: 启用追加仓位（同币移动止盈激活后再命中信号可加仓）")
+	addonmaxFlag := flag.Int("addonmax", 1, "S01 实验: 单币最大追加次数（默认 1 = 同币最多两仓）")
 	levFlag := flag.Float64("lev", 10.0, "杠杆倍数（默认 10）")
 	onlyLong := flag.Bool("only-long", false, "仅做多（默认双向）")
 	onlyShort := flag.Bool("only-short", false, "仅做空（默认双向）")
@@ -743,6 +745,8 @@ func main() {
 	cfg.TakeProfitPct = *tpFlag / 100
 	cfg.MaxHoldBars = *holdFlag / 5 // 持仓分钟 → 5m 片数
 	cfg.CooldownAfterTrailingMin = *trailcdFlag
+	cfg.EnableAddOn = *addonFlag
+	cfg.MaxAddOnsPerSymbol = *addonmaxFlag
 	cfg.Leverage = *levFlag
 	cfg.AdaptATRTh = *adaptatrFlag / 100
 	cfg.AdaptBTCEMA = *btcemaFlag

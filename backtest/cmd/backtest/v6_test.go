@@ -341,6 +341,40 @@ func TestS01VolumeZ(t *testing.T) {
 	}
 }
 
+// TestCanAddOn 追加仓位判定（与实盘 EnableAddOn 语义一致）。
+func TestCanAddOn(t *testing.T) {
+	e := testV6Engine()
+	e.cfg.EnableAddOn = true
+	e.cfg.MaxAddOnsPerSymbol = 1
+	c := candidate{symbol: "X", side: "LONG"}
+
+	// 无持仓 → 不允许追加
+	if e.canAddOn(c) {
+		t.Error("无持仓时不应允许追加")
+	}
+	// 持仓未激活移动止盈 → 不允许
+	e.positions = append(e.positions, &Position{Symbol: "X", Side: "LONG", TrailingActive: false})
+	if e.canAddOn(c) {
+		t.Error("移动止盈未激活时不应允许追加")
+	}
+	// 移动止盈已激活 → 允许
+	e.positions[0].TrailingActive = true
+	if !e.canAddOn(c) {
+		t.Error("移动止盈已激活时应允许追加")
+	}
+	// 已达 1+1 上限 → 不允许
+	e.positions = append(e.positions, &Position{Symbol: "X", Side: "LONG", TrailingActive: true})
+	if e.canAddOn(c) {
+		t.Error("同币已达两仓上限时不应允许追加")
+	}
+	// 开关关闭 → 不允许
+	e2 := testV6Engine()
+	e2.positions = append(e2.positions, &Position{Symbol: "X", Side: "LONG", TrailingActive: true})
+	if e2.canAddOn(c) {
+		t.Error("EnableAddOn 关闭时不应允许追加")
+	}
+}
+
 // TestV6SignalChain 完整信号链: 构造挤压→突破序列，信号应触发；
 // 破坏 RSI 区间 / 费率过热否决 / 新币过滤后应静默。
 func TestV6SignalChain(t *testing.T) {
