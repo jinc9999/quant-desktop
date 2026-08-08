@@ -115,14 +115,24 @@ func NewEngine(cfg binance.StrategyConfig, client *binance.Client, ws *binance.W
 	}
 	// 冷却期闭环修复（2026-08-08）：交易所条件单/回滚平仓完成后，
 	// 通知引擎写入冷却期——此前主平仓路径从不写冷却期，导致同币无限快速重复开仓。
+	// 熔断闭环修复（2026-08-08）：条件单平仓同样更新日亏熔断——此前熔断只在引擎
+	// 本地平仓路径（超时/手动）更新，实盘 95% 平仓为交易所条件单触发，
+	// 导致每日 5% 亏损熔断在实盘几乎永不生效（实盘 -35U 无刹车事故根因）。
 	// 回调在 runOnce 同一 goroutine 内触发（SyncOrders 同步调用），无需加锁。
 	if orderMgr != nil {
-		orderMgr.OnClose = func(symbol, reason string) {
-			e.cooldown[symbol] = time.Now()
-			e.cooldownReason[symbol] = reason
-		}
+		orderMgr.OnClose = e.onPositionClosed
 	}
 	return e
+}
+
+// onPositionClosed 平仓回调（引擎注册给订单管理器）：
+// 写冷却期 + 更新日亏/回撤熔断。条件单平仓是实盘主路径，必须与本地平仓同权。
+func (e *Engine) onPositionClosed(symbol, reason string) {
+	e.cooldown[symbol] = time.Now()
+	e.cooldownReason[symbol] = reason
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	e.updateBreaker(ctx)
 }
 
 // SetOnError 设置后台错误回调（用于推送错误到前端弹窗）

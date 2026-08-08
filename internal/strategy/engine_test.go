@@ -1923,6 +1923,38 @@ func TestBreaker_NotTriggered_AllowsOpen(t *testing.T) {
 	}
 }
 
+// TestBreaker_OnClose_UpdatesDailyLoss 验证条件单平仓回调（实盘主路径）更新日亏熔断
+// 背景：此前熔断只在引擎本地平仓（超时/手动）路径更新，交易所条件单平仓从不触发
+// 熔断检查，导致实盘每日 5% 亏损熔断几乎永不生效（2026-08-08 实盘 -35U 无刹车事故根因）。
+// 流程: 注入熔断器(初始权益1000，阈值5%=-50U) → 数据库写入今日已平仓 -60U →
+//       模拟条件单平仓回调 onPositionClosed → 熔断应触发，阻止后续开仓
+func TestBreaker_OnClose_UpdatesDailyLoss(t *testing.T) {
+	e, db := newTestEngine(t)
+
+	breaker := risk.NewCircuitBreaker(0.05, 0.15, 5)
+	breaker.SetInitialEquity(1000)
+	e.SetBreaker(breaker)
+
+	// 写入一笔今日已平仓亏损记录（-60U = 6% > 5% 阈值）
+	id, err := db.InsertPosition(&storage.Position{
+		Symbol: "BTCUSDT", Side: "LONG", EntryPrice: 100, Amount: 1,
+		Leverage: 10, Status: "OPEN", OpenedAt: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("插入持仓失败: %v", err)
+	}
+	if err := db.ClosePosition(id, "STOP_LOSS", -60.0, nil, 0); err != nil {
+		t.Fatalf("平仓失败: %v", err)
+	}
+
+	// 模拟交易所条件单平仓通知（实盘主路径）
+	e.onPositionClosed("BTCUSDT", "STOP_LOSS")
+
+	if !e.isBreakerBlocked() {
+		t.Fatal("条件单平仓后日亏熔断应触发（-60U/1000 = 6% >= 5%）")
+	}
+}
+
 // TestBreaker_ResetDaily_AfterClose 验证跨天时日熔断自动重置
 // 流程: 平仓触发日熔断 → checkBreakerReset 跨天后重置 → 可再次开仓
 func TestBreaker_ResetDaily_AfterClose(t *testing.T) {
