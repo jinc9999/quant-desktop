@@ -67,6 +67,12 @@ function loadSeenIds() {
 }
 
 async function openBrowser() {
+  if (browser) {
+    try { await browser.close(); } catch {}
+  }
+  browser = null;
+  page = null;
+  sniffedHeaders = null;
   browser = await chromium.launch({
     headless: true,
     args: [
@@ -84,6 +90,20 @@ async function openBrowser() {
   });
   page = await context.newPage();
   await sniff();
+}
+
+// 反爬挑战是间歇性的：嗅探失败就换全新浏览器会话重试
+async function openBrowserWithRetry(maxAttempts = 5, delayMs = 20000) {
+  for (let i = 1; i <= maxAttempts; i++) {
+    try {
+      await openBrowser();
+      return;
+    } catch (e) {
+      log(`打开浏览器会话第 ${i}/${maxAttempts} 次失败: ${e.message}`);
+      if (i < maxAttempts) await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw new Error('连续多次无法建立可用浏览器会话，请检查网络/代理或稍后再试');
 }
 
 // 打开广场页面，截获 feed 请求的真实请求头（含浏览器指纹）
@@ -261,16 +281,16 @@ async function runOnce() {
 async function main() {
   const once = process.argv.includes('--once');
   loadSeenIds();
-  await openBrowser();
+  await openBrowserWithRetry();
 
   const loop = async () => {
     try {
       await runOnce();
     } catch (e) {
       log('本轮失败:', e.message);
-      // 会话可能过期：重新加载页面嗅探新请求头后重试一次
+      // 会话可能过期/被反爬拦截：换全新浏览器会话后重试一次
       try {
-        await sniff();
+        await openBrowser();
         await runOnce();
       } catch (e2) {
         log('重试仍失败:', e2.message);
@@ -280,7 +300,7 @@ async function main() {
 
   await loop();
   if (once) {
-    await browser.close();
+    try { await browser.close(); } catch {}
     log('--once 模式完成，退出');
     process.exit(0);
   }
