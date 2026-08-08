@@ -807,7 +807,6 @@ func (c *Client) PlaceStopMarket(ctx context.Context, symbol string, stopPrice f
 		Type(futures.AlgoOrderTypeStopMarket).
 		TriggerPrice(priceStr).
 		Quantity(qtyStr).
-		ReduceOnly(true).
 		WorkingType(futures.WorkingTypeMarkPrice)
 	if side == "SHORT" {
 		svc.Side(futures.SideTypeBuy).PositionSide(futures.PositionSideTypeShort)
