@@ -638,6 +638,8 @@ func main() {
 	modeFlag := flag.String("mode", "momentum", "信号范式: momentum/mr/trend/funding/adaptive")
 	adaptatrFlag := flag.Float64("adaptatr", 2.0, "ADAPT BTC ATR%% 阈值（回踩/追涨判定，默认 2）")
 	btcemaFlag := flag.Int("btcema", 50, "ADAPT BTC EMA 周期（牛熊判定，默认 50）")
+	regimeFlag := flag.String("regime", "none", "市场状态过滤(实验): none/btc24h/btcma/breadth")
+	regimeParamFlag := flag.Float64("regime-param", 0, "市场状态过滤阈值: btc24h=24h涨幅%%门槛; breadth=上涨币占比(0~1)")
 	rbgainFlag := flag.Float64("rbgain", 5.0, "ADAPT 回踩 24h 涨幅门槛 %%（默认 5）")
 	rbemaFlag := flag.Int("rbema", 20, "ADAPT 回踩支撑 EMA 周期（默认 20）")
 	rbshrinkFlag := flag.Float64("rbshrink", 0.7, "ADAPT 回踩缩量倍数（默认 0.7）")
@@ -750,6 +752,8 @@ func main() {
 	cfg.Leverage = *levFlag
 	cfg.AdaptATRTh = *adaptatrFlag / 100
 	cfg.AdaptBTCEMA = *btcemaFlag
+	cfg.Regime = *regimeFlag
+	cfg.RegimeParam = *regimeParamFlag
 	cfg.RBPullGain = *rbgainFlag
 	cfg.RBEMA = *rbemaFlag
 	cfg.RBShrink = *rbshrinkFlag

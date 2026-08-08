@@ -106,6 +106,8 @@ type StrategyConfig struct {
 	FundingVetoEnabled bool    // 实验: 费率过热否决（正费率 ≥ 分级阈值不追）
 	VolumeZThreshold   float64 // 实验: 成交量 Z-Score 确认阈值（0=关闭）
 	RSIFilterEnabled   bool    // 实验: RSI[RSIMin,RSIMax] 趋势带确认
+	Regime             string  // 实验: 市场状态过滤 none/btc24h/btcma/breadth（""=关闭）
+	RegimeParam        float64 // 实验: 过滤阈值（btc24h=24h涨幅%门槛；breadth=上涨币占比 0~1）
 
 	// 自适应融合（adaptive）参数: 按 BTC 市场状态动态切换追涨/回踩/做空三模式
 	AdaptATRTh           float64 // BTC ATR% 阈值: ATR%<=该值 且 BTC>EMA 判定为回踩模式（0.02=2%）
@@ -273,6 +275,11 @@ type btcState struct {
 	tr      [14]float64 // TR 环形缓冲
 	trIdx   int
 	trCnt   int
+	closes     [WindowBars]float64 // 24h 收盘环形（btc24h 市场过滤用）
+	cIdx       int                 // 环形写入位置
+	cCnt       int                 // 已写入根数
+	chg24      float64             // BTC 24h 涨幅（%）
+	chg24Ready bool                // 24h 窗口是否已满
 }
 
 // fundingPoint 单条资金费率结算记录（8h 边界）
@@ -559,6 +566,20 @@ func (e *Engine) updateBTC(b *bar) {
 	}
 	st.atr = sum / float64(st.trCnt)
 	st.close = b.close
+
+	// 24h 涨幅环形（btc24h 市场过滤用）
+	st.closes[st.cIdx] = b.close
+	st.cIdx = (st.cIdx + 1) % WindowBars
+	if st.cCnt < WindowBars {
+		st.cCnt++
+	}
+	if st.cCnt >= WindowBars {
+		old := st.closes[st.cIdx] // 当前写入槽即 288 根前的价格
+		if old > 0 {
+			st.chg24 = (b.close - old) / old * 100
+			st.chg24Ready = true
+		}
+	}
 }
 
 // btcMode 判定当前自适应模式: 回踩(pullback) / 追涨(chase) / 做空(short)
@@ -578,6 +599,40 @@ func (e *Engine) btcMode() string {
 		return "chase"
 	}
 	return "short"
+}
+
+// regimeOK 市场状态过滤（S01 单因子实验，默认关闭）
+// 支持:
+//   - btc24h: BTC 24h 涨幅 >= RegimeParam(%) 才允许开仓
+//   - btcma:  BTC 收盘 >= EMA（牛熊门控）才允许开仓
+//   - breadth: 全市场 24h 上涨币占比 >= RegimeParam(0~1) 才允许开仓
+func (e *Engine) regimeOK() bool {
+	switch e.cfg.Regime {
+	case "btc24h":
+		return e.btc != nil && e.btc.chg24Ready && e.btc.chg24 >= e.cfg.RegimeParam
+	case "btcma":
+		return e.btc != nil && e.btc.emaInit && e.btc.close >= e.btc.ema
+	case "breadth":
+		up, valid := 0, 0
+		for _, st := range e.states {
+			if st.filled < WindowBars {
+				continue
+			}
+			old := prevClose(st, WindowBars)
+			if old <= 0 {
+				continue
+			}
+			valid++
+			if st.closes[(st.idx-1+WindowBars)%WindowBars] > old {
+				up++
+			}
+		}
+		if valid == 0 {
+			return false
+		}
+		return float64(up)/float64(valid) >= e.cfg.RegimeParam
+	}
+	return true
 }
 
 // signalPullback 回踩信号: 24h 涨幅达标 + 价格回踩 EMA 支撑 + 缩量 + 连续企稳
@@ -1535,13 +1590,19 @@ func (e *Engine) OnBar(bars map[string]*bar, fundings map[string]fundingPoint, t
 		cands = e.processFunding(bars, fundings, ts)
 	} else {
 		// 自适应模式: 先推进 BTC 市场状态（模式判定依赖 BTC EMA/ATR）
-		if e.cfg.Mode == "adaptive" {
+		// 市场状态过滤实验（S01 单因子）: momentum 模式同样推进 BTC 状态供 btc24h/btcma 判定
+		if e.cfg.Mode == "adaptive" || (e.cfg.Regime != "" && e.cfg.Regime != "none") {
 			if b, ok := bars["BTCUSDT"]; ok {
 				e.updateBTC(b)
 			}
 		}
+		// 市场状态过滤: 整片先判定一次（breadth 用上一片已更新状态，5m 滞后可忽略）
+		regimePass := e.regimeOK()
 		for sym, b := range bars {
 			st, ready := e.updateState(sym, b)
+			if !regimePass {
+				continue
+			}
 			if side, mode := e.computeSignal(st, b, ready); side != "" {
 				// S01 单因子实验（默认全关）: 费率过热否决 / 成交量 Z 确认 / RSI 趋势带
 				if e.cfg.FundingVetoEnabled && e.fundingVetoed(sym, st.sumVol24) {
