@@ -150,21 +150,24 @@ type StrategyConfig struct {
 	CooldownAfterTrailingMin int   `json:"cooldownAfterTrailingMin"` // 移动止盈平仓后的冷却分钟数（<0=统一用 CooldownMin；0=立即再入；默认 15）
 }
 
-// DefaultStrategyConfig 返回默认策略配置（S01 纯追涨·无门控，2026-08-04 锁定）
-// 回测口径：-mode momentum -closed=false -exit-mode=close -topn 10 -maxpos 5 -minvol 100000
+// DefaultStrategyConfig 返回默认策略配置（S01 v2 纯追涨，2026-08-08 全参数矩阵定稿）
+// 回测口径：-mode momentum -closed=false -exit-mode=close -topn 10 -maxpos 10 -minvol 10000000
 //
-//	-cooldown 60 -gain 4 -min24gain 4 -surge 1.5 -sl 6 -tp 10 -act 3 -cb 2
-//	-hold 120 -margin 10 -lev 10 -only-long
+//	-cooldown 30 -trailcd 15 -gain 4 -min24gain 4 -surge 1.2 -sl 4 -tp 0 -act 2 -cb 3
+//	-hold 180 -margin 10 -lev 10 -only-long -addon
 //
-// 回测绩效（2024-01~2026-08 全 567 币 5m 数据）：21,274 笔、胜率 55.3%、PF 1.16、
-// +4449U / +445% / 回撤 12.3%，三年分段全部盈利。EMA 门控验证为负优化，故锁定无门控版本。
-// 变更（2026-08-04 生效）：① 固定止盈 TakeProfitPct 0.10→0（-tp 0 纯跟踪）。原因：10% 固定止盈
-// 到点即平，截断 3% 激活的移动止盈在 10% 之后的利润奔跑空间，用户否决该封顶设计。
-// ② 最大持仓 MaxOpenPositions 5→10（用户要求扩大持仓容量）。
-// ①② 均未做三年回测验证（S01 基线口径为 -tp 10 -maxpos 5 的 +4449U），模拟盘实盘验证中。
-// 实盘映射：15m K 线实体实时确认、24h 涨幅 >= 4% 双条件、放量确认 1.5x / 2 分钟窗口、
-// Top 10 候选、10x 杠杆 / 10U 保证金、60 分钟冷却、纯多（EnableShort=false）、6% 固定止损、
-// 3% 跟踪激活 + 2% 跟踪回撤（纯跟踪，无固定止盈封顶）、最长持仓 120 分钟超时平仓、
+// 回测绩效（2024-01~2026-08 全 567 币 5m 数据，1000 万成交额口径）：23,801 笔、胜率 51.2%、
+// PF 1.66、+20,259U / +2026% / 回撤 5.80%；±扰动 6 组稳定（PF 1.61~1.71），通过防过拟合检验。
+// 与旧口径对比：旧 S01（-sl 6 -act 3 -cb 2 -hold 120 -surge 1.5 -cooldown 60）为 +9,533U /
+// PF 1.29 / 回撤 10.2%；S01 v2 盈亏翻倍、回撤近半。
+// 关键结论（单参数矩阵，详见 docs/superpowers/plans/2026-08-08-v6-refactor-plan.md §十一）：
+// ① 止损 6%→4%：+2,886U / PF 1.42 / 回撤 6.4%；② 移动止盈激活 3%→2%：+1,887U / 胜率 62.8%；
+// ③ 移动止盈回调 2%→3%：+5,361U / PF 1.43（让利润奔跑）；④ 固定止盈必须为 0（tp=5% 时 PF 0.98 灾难）；
+// ⑤ 最长持仓 120→180 分、止损后冷却 60→30 分、放量 1.5x→1.2x 各小幅改善。
+// 实盘映射：15m K 线实体实时确认、24h 涨幅 >= 4% 双条件、放量确认 1.2x / 2 分钟窗口、
+// Top 10 候选、10x 杠杆 / 10U 保证金、追加仓位开启（同币最多 1+1）、纯多（EnableShort=false）、
+// 4% 固定止损、2% 跟踪激活 + 3% 跟踪回撤（纯跟踪，无固定止盈封顶）、最长持仓 180 分钟超时平仓、
+// 止损后 30 分钟冷却（移动止盈后 15 分钟可再入追趋势）、新币过滤 60 天、24h 成交额 >= 1000 万、
 // 日亏 5% 熔断、账户回撤 15% 熔断、山顶过滤器 9%
 func DefaultStrategyConfig() StrategyConfig {
 	return StrategyConfig{
@@ -177,22 +180,22 @@ func DefaultStrategyConfig() StrategyConfig {
 		MaxOpenPositions:       10,   // 最大同时持仓 10（2026-08-04 用户要求 5→10）
 		Leverage:               10,   // 10x 杠杆
 		PositionMarginUSDT:     10.0, // 每仓保证金 10U
-		CooldownMin:            60,
+		CooldownMin:            30, // 止损/超时平仓后冷却 30 分钟（S01 v2，2026-08-08 矩阵定稿）
 		MarginMode:             MarginModeIsolated,
-		StopLossPct:            0.06,    // 6% 固定止损（10x 爆仓线约 10%，止损早于爆仓）
-		TrailingActivation:     0.03,    // 3% 涨幅激活移动止损（让利润奔跑）
-		TrailingCallback:       0.02,    // 激活后回撤 2% 平仓（保护已得利润）
+		StopLossPct:            0.04,    // 4% 固定止损（S01 v2：紧止损取小亏，回撤 10.2%→6.4%）
+		TrailingActivation:     0.02,    // 2% 涨幅激活移动止损（S01 v2：更早激活锁定利润）
+		TrailingCallback:       0.03,    // 激活后回撤 3% 平仓（S01 v2：松回调让利润奔跑）
 		DailyLossLimitPct:      5.0,     // 日亏 5% 熔断停手（已接入引擎）
 		MaxDrawdownPct:         15.0,    // 账户回撤 15% 全面熔断（已接入引擎）
 		EnableShort:            false,   // S01 纯追涨：只做多，不做空
 		EnableAddOn:            true,    // 追加仓位：移动止盈激活 + 再次命中信号 → 追加 1 张独立新单（2026-08-04 用户要求）
 		ConfirmWindowMin:       2.0,     // 放量确认窗口 2 分钟：最近 2 分钟成交量速率 vs 之前 13 分钟
 		ConfirmThreshold:       0,       // 价格二次确认对 kline 模式关闭（K 线实体确认已过滤噪音）
-		VolumeSurgeThreshold:   1.5,     // 放量确认 1.5x：成交量放大不足 1.5 倍不追（防无量假突破）
+		VolumeSurgeThreshold:   1.2,     // 放量确认 1.2x（S01 v2：矩阵验证 1.5→1.2 小幅改善 +479U）
 		SignalMode:             "kline", // 15m K 线实体实时检测（默认）
 		MaxPullbackPct:         9.0,     // 距 24h 最高/最低回撤超 9% 不追
 		TakeProfitPct:          0,       // 固定止盈 0=关闭（纯跟踪，2026-08-04 用户否决 10% 封顶）；>0 时价格达到入场价*(1+该比例) 先止盈
-		MaxHoldMin:             120,     // 最长持仓 120 分钟：超时按当前价平仓
+		MaxHoldMin:             180,     // 最长持仓 180 分钟（S01 v2：矩阵验证 120→180 小幅改善 +432U）
 		EnableNewListingFilter: true,    // 新币过滤：排除上市 60 天内的新合约（无历史数据、波动剧烈、追涨风险高）
 		NewListingMinDays:      60,
 		// 分原因冷却（2026-08-08 三年回测验证）: 移动止盈平仓后 15 分钟即可再入，

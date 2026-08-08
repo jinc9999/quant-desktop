@@ -76,26 +76,26 @@ func TestDefaultStrategyConfig(t *testing.T) {
 	if cfg.PositionMarginUSDT != 10.0 {
 		t.Errorf("PositionMarginUSDT: 期望 10.0, 实际 %f", cfg.PositionMarginUSDT)
 	}
-	if cfg.CooldownMin != 60 {
-		t.Errorf("CooldownMin: 期望 60, 实际 %d", cfg.CooldownMin)
+	if cfg.CooldownMin != 30 {
+		t.Errorf("CooldownMin: 期望 30（S01 v2，止损后冷却）, 实际 %d", cfg.CooldownMin)
 	}
 	if cfg.MarginMode != MarginModeIsolated {
 		t.Errorf("MarginMode: 期望 ISOLATED, 实际 %s", cfg.MarginMode)
 	}
-	if cfg.StopLossPct != 0.06 {
-		t.Errorf("StopLossPct: 期望 0.06（6%%固定止损，10x 爆仓线约 10%%须早于爆仓）, 实际 %f", cfg.StopLossPct)
+	if cfg.StopLossPct != 0.04 {
+		t.Errorf("StopLossPct: 期望 0.04（S01 v2 紧止损 4%%）, 实际 %f", cfg.StopLossPct)
 	}
 	if cfg.TakeProfitPct != 0 {
 		t.Errorf("TakeProfitPct: 期望 0（纯跟踪，2026-08-04 用户否决 10%%固定止盈封顶）, 实际 %f", cfg.TakeProfitPct)
 	}
-	if cfg.MaxHoldMin != 120 {
-		t.Errorf("MaxHoldMin: 期望 120（最长持仓 120 分钟）, 实际 %d", cfg.MaxHoldMin)
+	if cfg.MaxHoldMin != 180 {
+		t.Errorf("MaxHoldMin: 期望 180（S01 v2 最长持仓 180 分钟）, 实际 %d", cfg.MaxHoldMin)
 	}
-	if cfg.TrailingActivation != 0.03 {
-		t.Errorf("TrailingActivation: 期望 0.03（+3%%触发跟踪止盈，让利润奔跑）, 实际 %f", cfg.TrailingActivation)
+	if cfg.TrailingActivation != 0.02 {
+		t.Errorf("TrailingActivation: 期望 0.02（S01 v2 更早激活跟踪）, 实际 %f", cfg.TrailingActivation)
 	}
-	if cfg.TrailingCallback != 0.02 {
-		t.Errorf("TrailingCallback: 期望 0.02（2%%回撤）, 实际 %f", cfg.TrailingCallback)
+	if cfg.TrailingCallback != 0.03 {
+		t.Errorf("TrailingCallback: 期望 0.03（S01 v2 松回调让利润奔跑）, 实际 %f", cfg.TrailingCallback)
 	}
 	if cfg.DailyLossLimitPct != 5.0 {
 		t.Errorf("DailyLossLimitPct: 期望 5.0, 实际 %f", cfg.DailyLossLimitPct)
@@ -115,8 +115,11 @@ func TestDefaultStrategyConfig(t *testing.T) {
 	if cfg.ConfirmThreshold != 0 {
 		t.Errorf("ConfirmThreshold: 期望 0（kline 模式关闭价格二次确认）, 实际 %f", cfg.ConfirmThreshold)
 	}
-	if cfg.VolumeSurgeThreshold != 1.5 {
-		t.Errorf("VolumeSurgeThreshold: 期望 1.5（放量 1.5 倍才追）, 实际 %f", cfg.VolumeSurgeThreshold)
+	if cfg.VolumeSurgeThreshold != 1.2 {
+		t.Errorf("VolumeSurgeThreshold: 期望 1.2（S01 v2 放量确认）, 实际 %f", cfg.VolumeSurgeThreshold)
+	}
+	if cfg.CooldownAfterTrailingMin != 15 {
+		t.Errorf("CooldownAfterTrailingMin: 期望 15（S01 v2 止盈后冷却）, 实际 %d", cfg.CooldownAfterTrailingMin)
 	}
 	if cfg.SignalMode != "kline" {
 		t.Errorf("SignalMode: 期望 kline, 实际 %s", cfg.SignalMode)
@@ -890,8 +893,8 @@ func TestDefaultStrategyConfig_NewFields(t *testing.T) {
 	if cfg.ConfirmThreshold != 0 {
 		t.Errorf("ConfirmThreshold: 期望 0（kline 模式关闭价格二次确认）, 实际 %f", cfg.ConfirmThreshold)
 	}
-	if cfg.VolumeSurgeThreshold != 1.5 {
-		t.Errorf("VolumeSurgeThreshold: 期望 1.5（放量 1.5 倍才追）, 实际 %f", cfg.VolumeSurgeThreshold)
+	if cfg.VolumeSurgeThreshold != 1.2 {
+		t.Errorf("VolumeSurgeThreshold: 期望 1.2（S01 v2 放量确认）, 实际 %f", cfg.VolumeSurgeThreshold)
 	}
 	if cfg.SignalMode != "kline" {
 		t.Errorf("SignalMode: 期望 kline, 实际 %s", cfg.SignalMode)
@@ -902,8 +905,11 @@ func TestDefaultStrategyConfig_NewFields(t *testing.T) {
 	if cfg.TakeProfitPct != 0 {
 		t.Errorf("TakeProfitPct: 期望 0（纯跟踪，固定止盈关闭）, 实际 %f", cfg.TakeProfitPct)
 	}
-	if cfg.MaxHoldMin != 120 {
-		t.Errorf("MaxHoldMin: 期望 120（最长持仓 120 分钟）, 实际 %d", cfg.MaxHoldMin)
+	if cfg.MaxHoldMin != 180 {
+		t.Errorf("MaxHoldMin: 期望 180（S01 v2 最长持仓 180 分钟）, 实际 %d", cfg.MaxHoldMin)
+	}
+	if cfg.CooldownAfterTrailingMin != 15 {
+		t.Errorf("CooldownAfterTrailingMin: 期望 15（S01 v2 止盈后冷却）, 实际 %d", cfg.CooldownAfterTrailingMin)
 	}
 	if !cfg.EnableNewListingFilter {
 		t.Errorf("EnableNewListingFilter: 期望 true（新币过滤默认开启）, 实际 %v", cfg.EnableNewListingFilter)

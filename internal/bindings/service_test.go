@@ -581,13 +581,13 @@ func TestGetDashboardData_NewFields(t *testing.T) {
 		t.Errorf("topN = %v, 期望 10", topN)
 	}
 
-	// 验证 cooldownMin 字段存在且为默认值 60
+	// 验证 cooldownMin 字段存在且为默认值 30（S01 v2）
 	cooldownMin, ok := data["cooldownMin"]
 	if !ok {
 		t.Fatal("GetDashboardData 缺少键 cooldownMin")
 	}
-	if cooldownMin != 60 {
-		t.Errorf("cooldownMin = %v, 期望 60", cooldownMin)
+	if cooldownMin != 30 {
+		t.Errorf("cooldownMin = %v, 期望 30（S01 v2）", cooldownMin)
 	}
 
 	// 验证 marginMode 字段存在且为默认值 ISOLATED
@@ -637,8 +637,8 @@ func TestGetConfig_Defaults(t *testing.T) {
 	if cfg.TopN != 10 {
 		t.Errorf("默认 TopN = %d, 期望 10", cfg.TopN)
 	}
-	if cfg.CooldownMin != 60 {
-		t.Errorf("默认 CooldownMin = %d, 期望 60", cfg.CooldownMin)
+	if cfg.CooldownMin != 30 {
+		t.Errorf("默认 CooldownMin = %d, 期望 30（S01 v2）", cfg.CooldownMin)
 	}
 	if cfg.MarginMode != "ISOLATED" {
 		t.Errorf("默认 MarginMode = %q, 期望 ISOLATED", cfg.MarginMode)
@@ -647,8 +647,11 @@ func TestGetConfig_Defaults(t *testing.T) {
 	if cfg.TakeProfitPct != 0 {
 		t.Errorf("默认 TakeProfitPct = %f, 期望 0（纯跟踪，固定止盈关闭）", cfg.TakeProfitPct)
 	}
-	if cfg.MaxHoldMin != 120 {
-		t.Errorf("默认 MaxHoldMin = %d, 期望 120（最长持仓 120 分钟）", cfg.MaxHoldMin)
+	if cfg.MaxHoldMin != 180 {
+		t.Errorf("默认 MaxHoldMin = %d, 期望 180（S01 v2 最长持仓 180 分钟）", cfg.MaxHoldMin)
+	}
+	if cfg.CooldownAfterTrailingMin != 15 {
+		t.Errorf("默认 CooldownAfterTrailingMin = %d, 期望 15（S01 v2 止盈后冷却）", cfg.CooldownAfterTrailingMin)
 	}
 	if cfg.EnableShort {
 		t.Errorf("默认 EnableShort = true, 期望 false（S01 纯追涨只做多）")

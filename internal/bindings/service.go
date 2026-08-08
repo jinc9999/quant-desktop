@@ -82,6 +82,32 @@ func migratePersistedStrategyConfig(raw string) (bool, binance.StrategyConfig, e
 		saved.MinQuoteVolume = 10000000
 		migrated = true
 	}
+	// S01 v2 参数迁移（2026-08-08 全参数矩阵定稿，三年回测 +20,259U / PF 1.66 / 回撤 5.8%）：
+	// 旧默认值精确匹配才迁移为 v2 值；用户显式自定义的值（非旧默认）不被覆盖。
+	if saved.StopLossPct == 0.06 {
+		saved.StopLossPct = 0.04
+		migrated = true
+	}
+	if saved.TrailingActivation == 0.03 {
+		saved.TrailingActivation = 0.02
+		migrated = true
+	}
+	if saved.TrailingCallback == 0.02 {
+		saved.TrailingCallback = 0.03
+		migrated = true
+	}
+	if saved.MaxHoldMin == 120 {
+		saved.MaxHoldMin = 180
+		migrated = true
+	}
+	if saved.CooldownMin == 60 {
+		saved.CooldownMin = 30
+		migrated = true
+	}
+	if saved.VolumeSurgeThreshold == 1.5 {
+		saved.VolumeSurgeThreshold = 1.2
+		migrated = true
+	}
 	return migrated, saved, nil
 }
 

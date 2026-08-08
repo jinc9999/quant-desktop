@@ -28,20 +28,21 @@ const strategyParams = ref({
   maxOpenPositions: 10,         // 最大同时持仓数（2026-08-04 5→10）
   leverage: 10,
   positionMarginUsdt: 10.0,
-  cooldownMin: 60,
+  cooldownMin: 30,             // 止损/超时平仓后冷却（S01 v2，2026-08-08 矩阵定稿）
+  cooldownAfterTrailingMin: 15, // 移动止盈平仓后冷却（分钟，<0=统一；0=立即再入；默认 15）
   marginMode: "ISOLATED",
-  stopLossPct: 6,
-  trailingActivation: 3,
-  trailingCallback: 2,
+  stopLossPct: 4,              // 初始止损（S01 v2: 6%→4%，回撤 10.2%→6.4%）
+  trailingActivation: 2,       // 跟踪激活（S01 v2: 3%→2%，更早锁定利润）
+  trailingCallback: 3,         // 跟踪回撤（S01 v2: 2%→3%，让利润奔跑）
   takeProfitPct: 0,            // 固定止盈（%）：价格达到入场价*(1+该比例) 先止盈，0=关闭（纯跟踪，2026-08-04 用户否决 10% 封顶）
-  maxHoldMin: 120,             // 最长持仓（分钟）：超时按当前价平仓，0=关闭
+  maxHoldMin: 180,             // 最长持仓（分钟）：超时按当前价平仓，0=关闭（S01 v2: 120→180）
   dailyLossLimitPct: 5.0,
   maxDrawdownPct: 15.0,
   enableShort: false,          // S01 纯追涨：只做多，不做空
   enableAddOn: true,           // 追加仓位：移动止盈激活（现价>=首仓入场价*1.03）+ 再次命中信号 → 追加 1 张独立新单
   confirmWindowMin: 2,         // 放量确认窗口（分钟）：最近 N 分钟成交量 vs 之前窗口
   confirmThreshold: 0,         // 短窗口涨幅确认阈值（%），kline 模式下不生效
-  volumeSurgeThreshold: 1.5,   // 成交量放大倍数阈值（0=关闭，1.5=放量 1.5 倍才追）
+  volumeSurgeThreshold: 1.2,   // 成交量放大倍数阈值（0=关闭；S01 v2: 1.5→1.2）
   signalMode: "kline",         // 信号模式：kline=15m K线实体实时检测 / sliding=滑动窗口（旧版）
   maxPullbackPct: 9.0,         // 山顶过滤器（%）：距 24h 最高/最低回撤超此值不追，0=关闭
   enableNewListingFilter: true, // 新币过滤：排除上市 60 天内的新合约（无历史数据、波动剧烈）
@@ -90,6 +91,7 @@ function toBackendConfig() {
     leverage: p.leverage,
     positionMarginUsdt: p.positionMarginUsdt,
     cooldownMin: p.cooldownMin,
+    cooldownAfterTrailingMin: p.cooldownAfterTrailingMin,
     marginMode: p.marginMode,
     stopLossPct: p.stopLossPct / 100,
     trailingActivation: p.trailingActivation / 100,
@@ -127,20 +129,21 @@ async function loadConfig() {
       maxOpenPositions: cfg.maxOpenPositions,
       leverage: cfg.leverage,
       positionMarginUsdt: cfg.positionMarginUsdt,
-      cooldownMin: cfg.cooldownMin ?? 60,
+      cooldownMin: cfg.cooldownMin ?? 30,
+      cooldownAfterTrailingMin: cfg.cooldownAfterTrailingMin ?? 15,
       marginMode: cfg.marginMode ?? "ISOLATED",
       stopLossPct: cfg.stopLossPct * 100,
       trailingActivation: cfg.trailingActivation * 100,
       trailingCallback: cfg.trailingCallback * 100,
       takeProfitPct: (cfg.takeProfitPct ?? 0) * 100,
-      maxHoldMin: cfg.maxHoldMin ?? 120,
+      maxHoldMin: cfg.maxHoldMin ?? 180,
       dailyLossLimitPct: cfg.dailyLossLimitPct ?? 5.0,
       maxDrawdownPct: cfg.maxDrawdownPct ?? 15.0,
       enableShort: cfg.enableShort ?? false,
       enableAddOn: cfg.enableAddOn ?? true,
       confirmWindowMin: cfg.confirmWindowMin ?? 2,
       confirmThreshold: cfg.confirmThreshold ?? 0,
-      volumeSurgeThreshold: cfg.volumeSurgeThreshold ?? 1.5,
+      volumeSurgeThreshold: cfg.volumeSurgeThreshold ?? 1.2,
       signalMode: cfg.signalMode ?? "kline",
       maxPullbackPct: cfg.maxPullbackPct ?? 9.0,
       enableNewListingFilter: cfg.enableNewListingFilter ?? true,
@@ -557,7 +560,14 @@ onUnmounted(() => {
             <el-input-number v-model="strategyParams.positionMarginUsdt" :min="1" :max="1000" :step="1" />
           </el-form-item>
           <el-form-item label="冷却期(分钟)">
-            <el-input-number v-model="strategyParams.cooldownMin" :min="1" :max="1440" />
+            <el-tooltip content="止损/超时平仓后的冷却（S01 v2 默认 30 分钟）" placement="top">
+              <el-input-number v-model="strategyParams.cooldownMin" :min="1" :max="1440" />
+            </el-tooltip>
+          </el-form-item>
+          <el-form-item label="止盈后冷却(分钟)">
+            <el-tooltip content="移动止盈平仓后允许快速再入追趋势（S01 v2 默认 15 分钟；0=立即；<0=统一用冷却期）" placement="top">
+              <el-input-number v-model="strategyParams.cooldownAfterTrailingMin" :min="-1" :max="1440" />
+            </el-tooltip>
           </el-form-item>
           <el-form-item label="保证金模式">
             <el-select v-model="strategyParams.marginMode" style="width: 160px">
