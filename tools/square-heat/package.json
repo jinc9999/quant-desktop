@@ -1,0 +1,14 @@
+{
+  "name": "square-heat-collector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "币安广场热度采集器（旁路研究工具，不参与交易）",
+  "type": "module",
+  "scripts": {
+    "start": "node collector.mjs",
+    "once": "node collector.mjs --once"
+  },
+  "dependencies": {
+    "playwright": "1.59.1"
+  }
+}
