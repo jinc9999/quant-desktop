@@ -68,6 +68,14 @@ func migratePersistedStrategyConfig(raw string) (bool, binance.StrategyConfig, e
 		saved.NewListingMinDays = dft.NewListingMinDays
 		migrated = true
 	}
+	// 分原因冷却字段迁移：旧持久化配置缺少 cooldownAfterTrailingMin 键时补默认值（15 分钟）。
+	// 数据依据：三年回测 1000万口径 trailcd=0 +6016U vs 统一 60 分 +5053U；实盘 tick 15 秒取 15 分钟
+	// 既保留止盈后快速再入趋势的收益，又保留对 15 秒级极端追单的保护（止损后仍严格 60 分钟）。
+	if !bytes.Contains([]byte(raw), []byte(`"cooldownAfterTrailingMin"`)) {
+		dft := binance.DefaultStrategyConfig()
+		saved.CooldownAfterTrailingMin = dft.CooldownAfterTrailingMin
+		migrated = true
+	}
 	// 最小成交额参数迁移：旧持久化配置中 24h 成交额下限仍为旧的 10 万 USDT 时，
 	// 升级为 1000 万 USDT（2026-08-07 用户要求）；用户显式保存的其他值不会被覆盖。
 	if saved.MinQuoteVolume == 100000 {

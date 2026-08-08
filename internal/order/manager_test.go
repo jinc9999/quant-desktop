@@ -365,3 +365,57 @@ func TestFilledCloseLoop_DryRun(t *testing.T) {
 		t.Errorf("EventTriggered 事件数 = %d, 期望 1", triggeredCount)
 	}
 }
+
+// TestOnCloseFiredOnFilledClose 验证条件单触发平仓后，OnClose 回调被通知（冷却期闭环修复）。
+// 背景：交易所条件单平仓是主平仓路径，此前从不通知引擎写冷却期，
+// 导致同币无限快速重复开仓（实盘单币日开 40+ 次）。
+func TestOnCloseFiredOnFilledClose(t *testing.T) {
+	mgr, db := setupTestEnv(t)
+	pos := insertTestPosition(t, db)
+	cfg := testStrategyConfig()
+	ctx := context.Background()
+
+	closed := make([][2]string, 0, 2)
+	mgr.OnClose = func(symbol, reason string) {
+		closed = append(closed, [2]string{symbol, reason})
+	}
+
+	if err := mgr.PlaceStopOrders(ctx, pos, cfg); err != nil {
+		t.Fatalf("PlaceStopOrders 失败: %v", err)
+	}
+	orders, err := db.GetActiveOrders()
+	if err != nil {
+		t.Fatalf("GetActiveOrders 失败: %v", err)
+	}
+	var stopOrder *storage.Order
+	for i := range orders {
+		if orders[i].OrderType == binance.OrderTypeStopMarket {
+			stopOrder = &orders[i]
+			break
+		}
+	}
+	if stopOrder == nil {
+		t.Fatal("未找到 STOP_MARKET 委托")
+	}
+
+	filledInfo := &binance.OrderInfo{
+		OrderID:      stopOrder.ExchangeOrderID,
+		Symbol:       stopOrder.Symbol,
+		Type:         binance.OrderTypeStopMarket,
+		Side:         "SELL",
+		Status:       binance.OrderStatusFilled,
+		FilledPrice:  45000.0,
+		FilledAmount: pos.Amount,
+	}
+	mgr.handleFilledOrder(ctx, stopOrder, filledInfo)
+
+	if len(closed) != 1 || closed[0][0] != "BTCUSDT" || closed[0][1] != "STOP_LOSS" {
+		t.Fatalf("OnClose 回调 = %v, 期望恰好一次 [BTCUSDT STOP_LOSS]", closed)
+	}
+
+	// 重复触发（幂等：持仓已 CLOSED，ClosePosition 无效果）不应再次通知
+	mgr.handleFilledOrder(ctx, stopOrder, filledInfo)
+	if len(closed) != 1 {
+		t.Errorf("重复触发后回调次数 = %d, 期望仍为 1", len(closed))
+	}
+}

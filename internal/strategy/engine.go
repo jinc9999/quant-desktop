@@ -72,6 +72,7 @@ type Engine struct {
 	tickErrorCount int64     // Tick 执行失败累计次数
 	startTime      time.Time // 引擎启动时间
 	cooldown       map[string]time.Time // symbol -> 平仓时间，冷却期内不再开仓
+	cooldownReason map[string]string    // symbol -> 最近平仓原因（分原因冷却: 移动止盈可短冷却）
 	failedOpen     map[string]time.Time // symbol -> 开仓失败时间，短期内不再重试
 	openBlocked    map[string]time.Time // symbol -> 结构性开仓失败拉黑截止时间（12h，防反复刷屏）
 	closeRetry     map[int64]time.Time  // positionID -> 平仓失败重试冷却截止时间（3min，防强平模式刷屏）
@@ -102,7 +103,7 @@ func NewEngine(cfg binance.StrategyConfig, client *binance.Client, ws *binance.W
 	// 滑动窗口长度取自 Timeframe 配置（如 "5m" -> 300000ms），
 	// 采样间隔取自扫描间隔，用于推导基准匹配容差
 	sampleMs := int64(cfg.ScanIntervalSec) * 1000
-	return &Engine{
+	e := &Engine{
 		cfg:      cfg,
 		client:   client,
 		ws:       ws,
@@ -111,12 +112,23 @@ func NewEngine(cfg binance.StrategyConfig, client *binance.Client, ws *binance.W
 		window:   NewSlidingWindow(ParseTimeframeMs(cfg.Timeframe), sampleMs),
 		stopCh:   make(chan struct{}),
 		cooldown:   make(map[string]time.Time),
+		cooldownReason: make(map[string]string),
 		failedOpen: make(map[string]time.Time),
 		openBlocked: make(map[string]time.Time),
 		closeRetry:  make(map[int64]time.Time),
 		klineOpenCache: make(map[string]klineOpenEntry),
 		newListLogged:  make(map[string]bool),
 	}
+	// 冷却期闭环修复（2026-08-08）：交易所条件单/回滚平仓完成后，
+	// 通知引擎写入冷却期——此前主平仓路径从不写冷却期，导致同币无限快速重复开仓。
+	// 回调在 runOnce 同一 goroutine 内触发（SyncOrders 同步调用），无需加锁。
+	if orderMgr != nil {
+		orderMgr.OnClose = func(symbol, reason string) {
+			e.cooldown[symbol] = time.Now()
+			e.cooldownReason[symbol] = reason
+		}
+	}
+	return e
 }
 
 // SetOnError 设置后台错误回调（用于推送错误到前端弹窗）
@@ -773,11 +785,17 @@ func (e *Engine) openPositions(ctx context.Context, candidates []Candidate, pric
 		// 冷却期检查：平仓后 CooldownMin 分钟内不再开同一币种
 		if cdTime, inCD := e.cooldown[c.Symbol]; inCD {
 			cooldownDuration := time.Duration(e.cfg.CooldownMin) * time.Minute
+			// 分原因冷却（2026-08-08 回测验证）: 移动止盈平仓后可快速再入追趋势，
+			// 止损/超时等其他平仓保持完整冷却。CooldownAfterTrailingMin<0 时统一冷却。
+			if e.cfg.CooldownAfterTrailingMin >= 0 && e.cooldownReason[c.Symbol] == "TRAILING_STOP" {
+				cooldownDuration = time.Duration(e.cfg.CooldownAfterTrailingMin) * time.Minute
+			}
 			if time.Since(cdTime) < cooldownDuration {
 				continue
 			}
 			// 冷却期已过，清除记录
 			delete(e.cooldown, c.Symbol)
+			delete(e.cooldownReason, c.Symbol)
 		}
 
 		// 开仓失败冷却：同一币种开仓失败后 5 分钟内不再重试，
@@ -1248,6 +1266,7 @@ func (e *Engine) closePosition(ctx context.Context, pos *storage.Position, curre
 			if qErr == nil && !positionExists {
 				_ = e.db.ClosePosition(pos.ID, "GHOST", 0, nil, 0)
 				e.cooldown[pos.Symbol] = time.Now()
+				e.cooldownReason[pos.Symbol] = "GHOST"
 				log.Printf("[Strategy] 幽灵持仓已清理 %s 持仓ID=%d reason=%s: 交易所无此持仓，本地标记为 GHOST 已平仓", pos.Symbol, pos.ID, reason)
 				e.db.InsertLog(&storage.TradeLog{
 					Timestamp: time.Now().UnixMilli(),
@@ -1340,6 +1359,7 @@ func (e *Engine) closePosition(ctx context.Context, pos *storage.Position, curre
 
 	// 记录冷却期：平仓后 CooldownMin 分钟内不再开同一币种
 	e.cooldown[pos.Symbol] = time.Now()
+	e.cooldownReason[pos.Symbol] = reason
 
 	// 平仓后更新熔断状态（日亏累计 + 账户回撤）
 	e.updateBreaker(ctx)
@@ -1495,6 +1515,7 @@ func (e *Engine) scanOrphanPositions(ctx context.Context) {
 		}
 		_ = e.db.ClosePosition(p.ID, "GHOST", 0, nil, 0)
 		e.cooldown[p.Symbol] = time.Now()
+		e.cooldownReason[p.Symbol] = "GHOST"
 		log.Printf("[Strategy] 幽灵持仓已清理 %s 持仓ID=%d: 交易所无此持仓，本地标记为 GHOST 已平仓", p.Symbol, p.ID)
 		e.db.InsertLog(&storage.TradeLog{
 			Timestamp: time.Now().UnixMilli(),

@@ -49,6 +49,7 @@ func newTestEngine(t *testing.T) (*Engine, *storage.DB) {
 		Leverage:           10,
 		PositionMarginUSDT: 5,
 		CooldownMin:        5,
+		CooldownAfterTrailingMin: -1, // 测试默认统一冷却（0=立即再入，避免零值歧义）
 		MarginMode:         binance.MarginModeIsolated,
 		StopLossPct:        0.10,
 		TrailingActivation: 0.05,
@@ -695,6 +696,82 @@ func TestOpenPositions_CooldownConfig(t *testing.T) {
 	}
 	if len(positions) != 0 {
 		t.Errorf("OPEN 持仓数 = %d, 期望 0（冷却期内不应开仓）", len(positions))
+	}
+}
+
+// TestCooldownSetViaManagerCloseCallback 验证冷却期闭环修复：
+// NewEngine 向委托管理器注册 OnClose 回调，条件单平仓后引擎写入冷却期，
+// 同币在冷却期内不再开仓（此前主平仓路径从不通知引擎，导致无限快速追单）。
+func TestCooldownSetViaManagerCloseCallback(t *testing.T) {
+	e, db := newTestEngine(t)
+	ctx := context.Background()
+
+	if e.orderMgr == nil || e.orderMgr.OnClose == nil {
+		t.Fatal("NewEngine 应注册委托管理器平仓回调（OnClose）")
+	}
+
+	// 模拟条件单触发平仓完成：回调被调用 → 引擎写入冷却期（含平仓原因）
+	e.orderMgr.OnClose("BTCUSDT", "TRAILING_STOP")
+	if _, ok := e.cooldown["BTCUSDT"]; !ok {
+		t.Fatal("OnClose 回调后引擎应写入冷却期记录")
+	}
+	if e.cooldownReason["BTCUSDT"] != "TRAILING_STOP" {
+		t.Fatalf("冷却原因 = %q, 期望 TRAILING_STOP", e.cooldownReason["BTCUSDT"])
+	}
+
+	// 冷却期内同币不再开仓（CooldownMin=5 分钟，刚平仓必在期内）
+	candidates := []Candidate{
+		{Symbol: "BTCUSDT", GainPct: 6.0, QuoteVolume: 200000},
+	}
+	priceMap := map[string]float64{"BTCUSDT": 50000.0}
+	e.openPositions(ctx, candidates, priceMap, nil)
+
+	positions, err := db.GetOpenPositions()
+	if err != nil {
+		t.Fatalf("查询持仓失败: %v", err)
+	}
+	if len(positions) != 0 {
+		t.Errorf("OPEN 持仓数 = %d, 期望 0（条件单平仓后冷却期应生效）", len(positions))
+	}
+}
+
+// TestOpenPositions_CooldownByReason 验证分原因冷却（2026-08-08 回测验证）:
+// 移动止盈平仓后按 CooldownAfterTrailingMin 短冷却；止损/其他平仓保持 CooldownMin 完整冷却。
+func TestOpenPositions_CooldownByReason(t *testing.T) {
+	e, db := newTestEngine(t)
+	ctx := context.Background()
+	e.cfg.CooldownMin = 60
+	e.cfg.CooldownAfterTrailingMin = 15
+
+	btc := []Candidate{{Symbol: "BTCUSDT", GainPct: 6.0, QuoteVolume: 200000}}
+	eth := []Candidate{{Symbol: "ETHUSDT", GainPct: 6.0, QuoteVolume: 200000}}
+	priceMap := map[string]float64{"BTCUSDT": 50000.0, "ETHUSDT": 3000.0}
+
+	// 场景1: 移动止盈平仓后 5 分钟（<15 分钟冷却）→ 拦截
+	e.cooldown["BTCUSDT"] = time.Now()
+	e.cooldownReason["BTCUSDT"] = "TRAILING_STOP"
+	e.openPositions(ctx, btc, priceMap, nil)
+	if ps, _ := db.GetOpenPositions(); len(ps) != 0 {
+		t.Fatalf("TRAILING_STOP 后 5 分钟应拦截（冷却 15 分钟）")
+	}
+
+	// 场景2: 移动止盈平仓后 16 分钟（已过 15 分钟冷却）→ 放行开仓
+	e.cooldown["BTCUSDT"] = time.Now().Add(-16 * time.Minute)
+	e.openPositions(ctx, btc, priceMap, nil)
+	ps, _ := db.GetOpenPositions()
+	if len(ps) != 1 || ps[0].Symbol != "BTCUSDT" {
+		t.Fatalf("TRAILING_STOP 后 16 分钟应放行 BTCUSDT, 实际 %+v", ps)
+	}
+
+	// 场景3: 止损平仓后 16 分钟（<60 分钟完整冷却）→ 仍拦截
+	e.cooldown["ETHUSDT"] = time.Now().Add(-16 * time.Minute)
+	e.cooldownReason["ETHUSDT"] = "STOP_LOSS"
+	e.openPositions(ctx, eth, priceMap, nil)
+	ps2, _ := db.GetOpenPositions()
+	for _, p := range ps2 {
+		if p.Symbol == "ETHUSDT" {
+			t.Fatalf("STOP_LOSS 后 16 分钟不应开 ETHUSDT（完整 60 分钟冷却）")
+		}
 	}
 }
 

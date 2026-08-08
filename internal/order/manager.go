@@ -24,6 +24,12 @@ type Manager struct {
 	mu            sync.Mutex    // 保护并发同步
 	lastSyncTime  int64         // 上次同步时间（Unix 毫秒）
 	lastSyncError string        // 上次同步错误信息
+	// OnClose 平仓回调（引擎注册，用于写冷却期）。
+	// 触发时机：条件单触发平仓 / 回滚平仓 / 幽灵清理 完成 DB 关闭后，传入平仓币种。
+	// 传入 reason 供引擎按平仓原因区分冷却（如移动止盈后允许快速再入）。
+	// 背景：冷却期此前仅在引擎本地平仓路径写入，交易所条件单平仓（主路径）从不通知引擎，
+	// 导致同一币种可无限快速重复开仓（实盘曾单币日开 40+ 次），严重偏离回测口径。
+	OnClose func(symbol, reason string)
 }
 
 // NewManager 创建委托管理器
@@ -39,6 +45,13 @@ func NewManager(client *binance.Client, db *storage.DB) *Manager {
 		db:         db,
 		maxRetries: 3,
 		retryDelay: 1 * time.Second,
+	}
+}
+
+// notifyClosed 平仓成功后通知引擎（幂等；OnClose 未注册时为空操作）
+func (m *Manager) notifyClosed(symbol, reason string) {
+	if m.OnClose != nil {
+		m.OnClose(symbol, reason)
 	}
 }
 
@@ -544,6 +557,7 @@ func (m *Manager) handleFilledOrder(ctx context.Context, localOrder *storage.Ord
 	// 计算实际 PnL：查询持仓入场价和数量（根据方向计算）
 	var pnl float64
 	pos, err := m.db.GetPositionByID(localOrder.PositionID)
+	wasOpen := pos != nil && pos.Status == "OPEN"
 	if err == nil && pos != nil && pos.Status == "OPEN" {
 		if pos.Side == "SHORT" {
 			pnl = (pos.EntryPrice - info.FilledPrice) * pos.Amount
@@ -565,6 +579,8 @@ func (m *Manager) handleFilledOrder(ctx context.Context, localOrder *storage.Ord
 	// 平仓（幂等：仅 OPEN 状态生效）
 	if err := m.db.ClosePosition(localOrder.PositionID, reason, pnl, &exitPrice, fee); err != nil {
 		log.Printf("[ORDER] 平仓更新失败 positionID=%d: %v", localOrder.PositionID, err)
+	} else if wasOpen {
+		m.notifyClosed(localOrder.Symbol, reason)
 	}
 
 	// 取消关联的另一条委托
@@ -889,6 +905,8 @@ func (m *Manager) rollbackPosition(ctx context.Context, pos *storage.Position, r
 			}
 			if err := m.db.ClosePosition(pos.ID, "GHOST", 0, nil, 0); err != nil {
 				log.Printf("[ORDER] 回滚标记 GHOST 失败 positionID=%d: %v", pos.ID, err)
+			} else {
+				m.notifyClosed(pos.Symbol, "GHOST")
 			}
 			log.Printf("[ORDER] 回滚平仓 -2022：交易所已无 %s 仓位，本地标记 GHOST 关闭", pos.Symbol)
 			_ = m.db.InsertLog(&storage.TradeLog{
@@ -930,6 +948,8 @@ func (m *Manager) rollbackPosition(ctx context.Context, pos *storage.Position, r
 	// 更新持仓状态（回滚无真实成交，出场价为 nil、手续费为 0）
 	if err := m.db.ClosePosition(pos.ID, "ROLLBACK", 0, nil, 0); err != nil {
 		log.Printf("[ORDER] 回滚更新持仓状态失败 positionID=%d: %v", pos.ID, err)
+	} else {
+		m.notifyClosed(pos.Symbol, "ROLLBACK")
 	}
 
 	// 写入告警日志

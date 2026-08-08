@@ -147,6 +147,7 @@ type StrategyConfig struct {
 	MaxHoldMin             int     `json:"maxHoldMin"`             // 最长持仓分钟数（0=关闭）：超过后按当前价市价平仓，防止仓位长期滞留
 	EnableNewListingFilter bool    `json:"enableNewListingFilter"` // 新币过滤开关：过滤上市天数 <= NewListingMinDays 的新上市合约（默认开启）
 	NewListingMinDays      int     `json:"newListingMinDays"`      // 新币过滤天数阈值（天）：上市天数小于等于该值的合约不参与任何开仓（默认 60，0=关闭）
+	CooldownAfterTrailingMin int   `json:"cooldownAfterTrailingMin"` // 移动止盈平仓后的冷却分钟数（<0=统一用 CooldownMin；0=立即再入；默认 15）
 }
 
 // DefaultStrategyConfig 返回默认策略配置（S01 纯追涨·无门控，2026-08-04 锁定）
@@ -194,5 +195,11 @@ func DefaultStrategyConfig() StrategyConfig {
 		MaxHoldMin:             120,     // 最长持仓 120 分钟：超时按当前价平仓
 		EnableNewListingFilter: true,    // 新币过滤：排除上市 60 天内的新合约（无历史数据、波动剧烈、追涨风险高）
 		NewListingMinDays:      60,
+		// 分原因冷却（2026-08-08 三年回测验证）: 移动止盈平仓后 15 分钟即可再入，
+		// 止损/超时等其他平仓保持 CooldownMin=60 分钟完整冷却。
+		// 数据: 1000万成交额口径下 trailcd=0 三年 +6016U vs 统一 60 分 +5053U（+19%，回撤 10.4%→12.4%）；
+		// 实盘 tick 为 15 秒，取 15 分钟在回测口径内（0 与 15 分钟在 5m 回测粒度下差异 <0.3%）且
+		// 保留对 15 秒级极端追单的保护。止损后严格 60 分钟防止追跌。
+		CooldownAfterTrailingMin: 15,
 	}
 }
