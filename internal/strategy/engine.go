@@ -29,12 +29,6 @@ const failedOpenCooldown = 5 * time.Minute
 // 若只用 5 分钟短冷却会周期性重试刷屏，拉黑 12 小时后当日基本不再重试。
 const openBlockedDuration = 12 * time.Hour
 
-// maxAddOnsPerSymbol 单币种允许的最大追加仓位次数（2026-08-04 用户设定：每币最多追加 1 次）。
-// 追加条件（engine.openPositions）：开启 EnableAddOn 且持仓币的移动止盈已激活
-// （现价 >= 首仓入场价*(1+TrailingActivation)）且再次命中信号。
-// 追加仓为独立仓位：独立入场价、独立 6% 止损、独立 3% 激活 + 2% 回调移动止盈、独立 120 分钟超时。
-const maxAddOnsPerSymbol = 1
-
 // closeRetryInterval 平仓失败（如 -2023 强平模式）后的重试间隔。
 // 强平模式解除需要时间，每 Tick 重试会刷屏报错；3 分钟重试一次兼顾保护与安静。
 const closeRetryInterval = 3 * time.Minute
@@ -837,14 +831,14 @@ func (e *Engine) openPositions(ctx context.Context, candidates []Candidate, pric
 		// ① 移动止盈已激活：同币任一持仓 TrailingActive=true（价格曾到过入场价*(1+TrailingActivation)，
 		//    即趋势曾获确认；2026-08-04 讨论确认用状态而非现价，允许冲高回落后仍追加）
 		// ② 再次命中信号（本 Tick 候选已含该币，即通过 24h/15m K 线/放量/山顶过滤）
-		// ③ 同币持仓数未达 1+maxAddOnsPerSymbol 上限、方向与现仓一致（防对冲）
+		// ③ 同币持仓数未达 1+cfg.MaxAddOnsPerSymbol 上限、方向与现仓一致（防对冲）
 		if pi, isHeld := posMap[c.Symbol]; isHeld {
 			if !e.cfg.EnableAddOn {
 				log.Printf("[Strategy][AddOn] %s 跳过追加仓：EnableAddOn 关闭", c.Symbol)
 				continue
 			}
-			if pi.count >= 1+maxAddOnsPerSymbol {
-				log.Printf("[Strategy][AddOn] %s 跳过追加仓：已达单币上限（同币 %d 仓，最多 1+%d）", c.Symbol, pi.count, maxAddOnsPerSymbol)
+			if pi.count >= 1+e.cfg.MaxAddOnsPerSymbol {
+				log.Printf("[Strategy][AddOn] %s 跳过追加仓：已达单币上限（同币 %d 仓，最多 1+%d）", c.Symbol, pi.count, e.cfg.MaxAddOnsPerSymbol)
 				continue
 			}
 			if c.Side != pi.side {

@@ -50,6 +50,7 @@ func newTestEngine(t *testing.T) (*Engine, *storage.DB) {
 		PositionMarginUSDT: 5,
 		CooldownMin:        5,
 		CooldownAfterTrailingMin: -1, // 测试默认统一冷却（0=立即再入，避免零值歧义）
+		MaxAddOnsPerSymbol: 1,        // 测试默认 1 次追加（同币最多 2 仓，保持既有测试语义）
 		MarginMode:         binance.MarginModeIsolated,
 		StopLossPct:        0.10,
 		TrailingActivation: 0.05,

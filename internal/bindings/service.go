@@ -76,6 +76,13 @@ func migratePersistedStrategyConfig(raw string) (bool, binance.StrategyConfig, e
 		saved.CooldownAfterTrailingMin = dft.CooldownAfterTrailingMin
 		migrated = true
 	}
+	// 追加仓次数迁移：旧持久化配置缺少 maxAddOnsPerSymbol 键时补默认值（2 次 = 同币最多 3 仓）。
+	// 若不补，反序列化后为 0 会导致追加仓静默失效（EnableAddOn=true 但追加次数为 0）。
+	if !bytes.Contains([]byte(raw), []byte(`"maxAddOnsPerSymbol"`)) {
+		dft := binance.DefaultStrategyConfig()
+		saved.MaxAddOnsPerSymbol = dft.MaxAddOnsPerSymbol
+		migrated = true
+	}
 	// 最小成交额参数迁移：旧持久化配置中 24h 成交额下限仍为旧的 10 万 USDT 时，
 	// 升级为 1000 万 USDT（2026-08-07 用户要求）；用户显式保存的其他值不会被覆盖。
 	if saved.MinQuoteVolume == 100000 {

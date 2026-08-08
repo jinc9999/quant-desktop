@@ -653,6 +653,9 @@ func TestGetConfig_Defaults(t *testing.T) {
 	if cfg.CooldownAfterTrailingMin != 15 {
 		t.Errorf("默认 CooldownAfterTrailingMin = %d, 期望 15（S01 v2 止盈后冷却）", cfg.CooldownAfterTrailingMin)
 	}
+	if cfg.MaxAddOnsPerSymbol != 2 {
+		t.Errorf("默认 MaxAddOnsPerSymbol = %d, 期望 2（同币最多 3 仓）", cfg.MaxAddOnsPerSymbol)
+	}
 	if cfg.EnableShort {
 		t.Errorf("默认 EnableShort = true, 期望 false（S01 纯追涨只做多）")
 	}
@@ -952,5 +955,36 @@ func TestMigratePersistedConfig_BadJSON(t *testing.T) {
 	_, _, err := migratePersistedStrategyConfig("{invalid json")
 	if err == nil {
 		t.Fatal("非法 JSON 应返回错误")
+	}
+}
+
+// TestMigratePersistedConfig_MaxAddOns 验证旧持久化配置缺少 maxAddOnsPerSymbol 键时
+// 自动补默认值 2（若不补，反序列化后为 0 会静默关闭追加仓）。
+func TestMigratePersistedConfig_MaxAddOns(t *testing.T) {
+	// 模拟旧版 JSON：有 enableAddOn 但无 maxAddOnsPerSymbol 键
+	raw := `{"scanIntervalSec":15,"timeframe":"15m","enableAddOn":true,"cooldownMin":30}`
+	migrated, got, err := migratePersistedStrategyConfig(raw)
+	if err != nil {
+		t.Fatalf("迁移返回错误: %v", err)
+	}
+	if !migrated {
+		t.Fatal("期望发生迁移（缺少 maxAddOnsPerSymbol 键）")
+	}
+	if got.MaxAddOnsPerSymbol != 2 {
+		t.Errorf("MaxAddOnsPerSymbol = %d, 期望 2", got.MaxAddOnsPerSymbol)
+	}
+	if !got.EnableAddOn {
+		t.Error("EnableAddOn 应保留 true")
+	}
+
+	// 已含键的新配置不应迁移
+	cfg := binance.DefaultStrategyConfig()
+	data, _ := json.Marshal(cfg)
+	migrated2, _, err := migratePersistedStrategyConfig(string(data))
+	if err != nil {
+		t.Fatalf("迁移返回错误: %v", err)
+	}
+	if migrated2 {
+		t.Error("新配置（已含 maxAddOnsPerSymbol）不应触发迁移")
 	}
 }

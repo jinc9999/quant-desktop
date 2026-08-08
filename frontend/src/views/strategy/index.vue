@@ -39,7 +39,8 @@ const strategyParams = ref({
   dailyLossLimitPct: 5.0,
   maxDrawdownPct: 15.0,
   enableShort: false,          // S01 纯追涨：只做多，不做空
-  enableAddOn: true,           // 追加仓位：移动止盈激活（现价>=首仓入场价*1.03）+ 再次命中信号 → 追加 1 张独立新单
+  enableAddOn: true,           // 追加仓位：移动止盈激活（现价>=首仓入场价*1.02）+ 再次命中信号 → 追加独立新单
+  maxAddOnsPerSymbol: 2,       // 单币最大追加次数（默认 2 = 同币最多 1+2=3 仓；0=关闭追加）
   confirmWindowMin: 2,         // 放量确认窗口（分钟）：最近 N 分钟成交量 vs 之前窗口
   confirmThreshold: 0,         // 短窗口涨幅确认阈值（%），kline 模式下不生效
   volumeSurgeThreshold: 1.2,   // 成交量放大倍数阈值（0=关闭；S01 v2: 1.5→1.2）
@@ -102,6 +103,7 @@ function toBackendConfig() {
     maxDrawdownPct: p.maxDrawdownPct,
     enableShort: p.enableShort,
     enableAddOn: p.enableAddOn,
+    maxAddOnsPerSymbol: p.maxAddOnsPerSymbol,
     confirmWindowMin: p.confirmWindowMin,
     confirmThreshold: p.confirmThreshold,
     volumeSurgeThreshold: p.volumeSurgeThreshold,
@@ -141,6 +143,7 @@ async function loadConfig() {
       maxDrawdownPct: cfg.maxDrawdownPct ?? 15.0,
       enableShort: cfg.enableShort ?? false,
       enableAddOn: cfg.enableAddOn ?? true,
+      maxAddOnsPerSymbol: cfg.maxAddOnsPerSymbol ?? 2,
       confirmWindowMin: cfg.confirmWindowMin ?? 2,
       confirmThreshold: cfg.confirmThreshold ?? 0,
       volumeSurgeThreshold: cfg.volumeSurgeThreshold ?? 1.2,
@@ -524,8 +527,13 @@ onUnmounted(() => {
             <el-switch v-model="strategyParams.enableShort" />
           </el-form-item>
           <el-form-item label="追加仓位">
-            <el-tooltip content="持仓币移动止盈已激活（现价>=首仓入场价*(1+激活比例)）且再次命中信号时，追加 1 张独立新单（独立止损/跟踪/超时），单币最多 2 仓" placement="top">
+            <el-tooltip content="持仓币移动止盈已激活（现价>=首仓入场价*(1+激活比例)）且再次命中信号时，追加独立新单（独立止损/跟踪/超时）" placement="top">
               <el-switch v-model="strategyParams.enableAddOn" />
+            </el-tooltip>
+          </el-form-item>
+          <el-form-item label="单币最大追加次数">
+            <el-tooltip content="同币最多 1+该值 仓（默认 2 = 最多 3 仓；0=关闭追加）。2026-08-08 回测验证：2 次追加 +1,408U/回撤 5.62%，第 4 仓边际递减" placement="top">
+              <el-input-number v-model="strategyParams.maxAddOnsPerSymbol" :min="0" :max="5" :step="1" />
             </el-tooltip>
           </el-form-item>
           <el-form-item label="确认窗口(分钟)">

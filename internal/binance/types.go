@@ -138,6 +138,7 @@ type StrategyConfig struct {
 	MaxDrawdownPct         float64 `json:"maxDrawdownPct"`         // 最大回撤（%）：账户从近期高点回撤达到此比例后全面熔断
 	EnableShort            bool    `json:"enableShort"`            // 是否启用做空
 	EnableAddOn            bool    `json:"enableAddOn"`            // 是否启用追加仓位：持仓币移动止盈激活（现价>=首仓入场价*(1+TrailingActivation)）且再次命中信号时追加 1 张独立新单
+	MaxAddOnsPerSymbol     int     `json:"maxAddOnsPerSymbol"`     // 单币最大追加次数（默认 2 = 同币最多 1+2=3 仓；0=关闭追加）
 	ConfirmWindowMin       float64 `json:"confirmWindowMin"`       // 短窗口确认时长（分钟），0=关闭
 	ConfirmThreshold       float64 `json:"confirmThreshold"`       // 短窗口涨幅确认阈值（%），0=关闭
 	VolumeSurgeThreshold   float64 `json:"volumeSurgeThreshold"`   // 成交量放大倍数阈值，0=关闭
@@ -188,7 +189,8 @@ func DefaultStrategyConfig() StrategyConfig {
 		DailyLossLimitPct:      5.0,     // 日亏 5% 熔断停手（已接入引擎）
 		MaxDrawdownPct:         15.0,    // 账户回撤 15% 全面熔断（已接入引擎）
 		EnableShort:            false,   // S01 纯追涨：只做多，不做空
-		EnableAddOn:            true,    // 追加仓位：移动止盈激活 + 再次命中信号 → 追加 1 张独立新单（2026-08-04 用户要求）
+		EnableAddOn:            true,    // 追加仓位：移动止盈激活 + 再次命中信号 → 追加独立新单（2026-08-04 用户要求）
+		MaxAddOnsPerSymbol:     2,       // 单币最多追加 2 次 = 同币 3 仓（2026-08-08 数据验证：2 次追加 +1,408U / 回撤 5.62%；第 4 仓边际递减 +519U）
 		ConfirmWindowMin:       2.0,     // 放量确认窗口 2 分钟：最近 2 分钟成交量速率 vs 之前 13 分钟
 		ConfirmThreshold:       0,       // 价格二次确认对 kline 模式关闭（K 线实体确认已过滤噪音）
 		VolumeSurgeThreshold:   1.2,     // 放量确认 1.2x（S01 v2：矩阵验证 1.5→1.2 小幅改善 +479U）

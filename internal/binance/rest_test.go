@@ -109,6 +109,9 @@ func TestDefaultStrategyConfig(t *testing.T) {
 	if !cfg.EnableAddOn {
 		t.Errorf("EnableAddOn: 期望 true（追加仓位开启）, 实际 false")
 	}
+	if cfg.MaxAddOnsPerSymbol != 2 {
+		t.Errorf("MaxAddOnsPerSymbol: 期望 2（同币最多 3 仓）, 实际 %d", cfg.MaxAddOnsPerSymbol)
+	}
 	if cfg.ConfirmWindowMin != 2.0 {
 		t.Errorf("ConfirmWindowMin: 期望 2.0（放量确认窗口 2 分钟）, 实际 %f", cfg.ConfirmWindowMin)
 	}
