@@ -372,7 +372,15 @@ type Metrics struct {
 	TrailingCount  int
 	TakeProfitCount int // 固定止盈平仓数
 	MaxHoldCount   int // 超时平仓数
+	ATRDecayCount  int // 波动率衰减平仓数（v6）
+	FundReversalCount int // 费率反转平仓数（v6）
 	FundingIncome  float64 // funding 模式: 累计资金费收入(USDT)
+	FirstCount     int     // 首笔入场数（追涨/回踩验证）
+	FirstPnl       float64
+	ChaseCount     int
+	ChasePnl       float64
+	PullbackCount  int
+	PullbackPnl    float64
 }
 
 // computeMetrics 从交易与权益曲线计算全部绩效指标
@@ -417,6 +425,10 @@ func computeMetrics(e *Engine) Metrics {
 			m.TakeProfitCount++
 		case "MAX_HOLD":
 			m.MaxHoldCount++
+		case "ATR_DECAY":
+			m.ATRDecayCount++
+		case "FUND_REVERSAL":
+			m.FundReversalCount++
 		}
 	}
 	m.TotalTrades = len(e.trades)
@@ -430,6 +442,21 @@ func computeMetrics(e *Engine) Metrics {
 		m.AvgHoldBars = float64(holdSum) / float64(m.TotalTrades)
 	}
 	m.FundingIncome = e.fundingIncome
+
+	// 追涨/回踩分类统计
+	for _, t := range e.trades {
+		switch t.ChaseType {
+		case "first":
+			m.FirstCount++
+			m.FirstPnl += t.PnL
+		case "chase":
+			m.ChaseCount++
+			m.ChasePnl += t.PnL
+		case "pullback":
+			m.PullbackCount++
+			m.PullbackPnl += t.PnL
+		}
+	}
 
 	// 收益率与最大回撤
 	initial := e.cfg.InitialEquity
@@ -524,6 +551,14 @@ func printReport(m Metrics, cfg *StrategyConfig) {
 			cfg.SSL*100, cfg.STP*100, cfg.SAct*100, cfg.SCb*100, cfg.SHold, cfg.DailyMax)
 		fmt.Printf("  %.0fx杠杆 %.0fU/仓 x%d 仓 | 手续费%.2f%%/边 | 收盘确认=%v\n",
 			cfg.Leverage, cfg.PositionMarginUSDT, cfg.MaxOpenPositions, cfg.FeeRate*100, cfg.ClosedBarConfirm)
+	case "v6":
+		fmt.Printf("异动币波幅扩张 | L1: 上市>%dd 价>%.0fU ATR%%<=%.0f%% 24h涨>=%.0f%% 额>=%.0fU 量>=20均量x1.5 | L2: BB(20,%.1fσ)宽度分位<%.0f%% 收盘>上轨 阳线实体>0.6 量能x%.1f RSI[%.0f,%.0f] 分>=%.0f\n",
+			cfg.NewListingMinDays, cfg.MinPrice, cfg.MaxATRPct, cfg.Min24hGainPct, cfg.MinQuoteVolume, cfg.BBMult, cfg.BBWidthMinPct, cfg.L2VolMult, cfg.RSIMin, cfg.RSIMax, cfg.L2MinScore)
+		fmt.Printf("  L3: ΔOI(Z)%.0f%% 费率%.0f%%(否决大%.1f%%/中%.1f%%/小%.1f%%) RSI%.0f%% 深度%.0f%%(回测归零) 加权>=%.0f | 仓位=账户x%.1f%%xATR因子x置信度(上限单币%.1f%%) | 止损%.0f%% 跟踪+%.0f%%/-%.0f%% ATR衰减%.0f%% 超时%dh 费率反转x%.1f | 滑点 大%.2f%%/中%.1f%%/小%.1f%% | 日亏<=%.1f%% 连亏<=%d单 敞口<=%.0fx\n",
+			cfg.FactorW1*100, cfg.FactorW2*100, cfg.FundVetoBig*100, cfg.FundVetoMid*100, cfg.FundVetoSmall*100, cfg.FactorW3*100, cfg.FactorW4*100, cfg.L3MinScore,
+			cfg.RiskPct*100, cfg.SingleCoinMarginPct*100, cfg.StopLossPct*100, cfg.TrailingActivation*100, cfg.TrailingCallback*100, cfg.ATRDecayPct*100,
+			cfg.MaxHoldBars*5/60, cfg.FundReversalMult, cfg.SlippageBig*100, cfg.SlippageMid*100, cfg.SlippageSmall*100,
+			cfg.DailyLossPct*100, cfg.MaxConsecutiveLosses, cfg.MaxLeverageExposure)
 	default:
 		fmt.Printf("15m实体>=%.0f%% 24h>=%.0f%% 放量>=%.1fx(前%d根) 山顶<=%.0f%% 24h成交额>=%.0fU | %.0fx杠杆 %.0fU/仓 x%d 仓 | 止损%.0f%% 固定止盈%.0f%% 跟踪+%.0f%%/-%.0f%% 持仓<=%d片 手续费%.2f%%/边 | 收盘确认=%v\n",
 			cfg.MinGainPct, cfg.Min24hGainPct, cfg.VolumeSurgeThreshold, cfg.SurgeLookback, cfg.MaxPullbackPct, cfg.MinQuoteVolume,
@@ -537,7 +572,17 @@ func printReport(m Metrics, cfg *StrategyConfig) {
 	fmt.Printf("平均盈利: %.2fU  平均亏损: %.2fU\n", m.AvgWin, m.AvgLoss)
 	fmt.Printf("盈亏比(Profit Factor): %.2f\n", m.ProfitFactor)
 	fmt.Printf("平均持仓: %.1f 根 5m K 线\n", m.AvgHoldBars)
-	fmt.Printf("平仓原因: 止损 %d 笔 / 固定止盈 %d 笔 / 跟踪止盈 %d 笔 / 超时 %d 笔\n", m.StopLossCount, m.TakeProfitCount, m.TrailingCount, m.MaxHoldCount)
+	fmt.Printf("平仓原因: 止损 %d 笔 / 固定止盈 %d 笔 / 跟踪止盈 %d 笔 / 超时 %d 笔", m.StopLossCount, m.TakeProfitCount, m.TrailingCount, m.MaxHoldCount)
+	if cfg.Mode == "v6" {
+		fmt.Printf(" / 波动率衰减 %d 笔 / 费率反转 %d 笔", m.ATRDecayCount, m.FundReversalCount)
+	}
+	fmt.Printf("\n")
+	if m.FirstCount+m.ChaseCount+m.PullbackCount > 0 {
+		fmt.Printf("追涨/回踩: 首笔 %d 笔 %+.2fU (%.3f/笔) | 追涨 %d 笔 %+.2fU (%.3f/笔) | 回踩 %d 笔 %+.2fU (%.3f/笔)\n",
+			m.FirstCount, m.FirstPnl, safeDiv(m.FirstPnl, float64(m.FirstCount)),
+			m.ChaseCount, m.ChasePnl, safeDiv(m.ChasePnl, float64(m.ChaseCount)),
+			m.PullbackCount, m.PullbackPnl, safeDiv(m.PullbackPnl, float64(m.PullbackCount)))
+	}
 	fmt.Printf("\n--- 收益与风险 ---\n")
 	fmt.Printf("累计盈亏: %.2fU\n", m.TotalPnL)
 	if cfg.Mode == "funding" {
@@ -560,6 +605,13 @@ func safePct(a, b float64) float64 {
 		return 0
 	}
 	return a / b * 100
+}
+
+func safeDiv(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return a / b
 }
 
 // main 回测主程序入口
@@ -619,9 +671,15 @@ func main() {
 	maxposFlag := flag.Int("maxpos", 5, "最大同时持仓数（默认 5）")
 	tpFlag := flag.Float64("tp", 0.0, "固定止盈 %%（0 关闭，默认 0）")
 	holdFlag := flag.Int("hold", 0, "最大持仓分钟数（0 关闭，默认 0）")
+	trailcdFlag := flag.Int("trailcd", -1, "S01 实验: 移动止盈平仓后冷却分钟数（-1=统一 CooldownMs；0=立即再入）")
 	levFlag := flag.Float64("lev", 10.0, "杠杆倍数（默认 10）")
 	onlyLong := flag.Bool("only-long", false, "仅做多（默认双向）")
 	onlyShort := flag.Bool("only-short", false, "仅做空（默认双向）")
+	v6rawFlag := flag.Bool("v6raw", false, "V6 诊断: 关闭日亏/连亏熔断（仅诊断，勿用于正式对比）")
+	slipoffFlag := flag.Bool("slipoff", false, "V6 诊断: 滑点置零（仅诊断，勿用于正式对比）")
+	fvetoFlag := flag.Bool("fveto", false, "S01 实验: 费率过热否决（正费率 ≥ 分级阈值不追）")
+	vzFlag := flag.Float64("vz", 0, "S01 实验: 成交量 Z-Score 确认阈值（0=关闭）")
+	rsiokFlag := flag.Bool("rsiok", false, "S01 实验: RSI[40,70] 趋势带确认")
 	flag.Parse()
 
 	var startTs, endTs int64
@@ -684,6 +742,7 @@ func main() {
 	cfg.MaxOpenPositions = *maxposFlag
 	cfg.TakeProfitPct = *tpFlag / 100
 	cfg.MaxHoldBars = *holdFlag / 5 // 持仓分钟 → 5m 片数
+	cfg.CooldownAfterTrailingMin = *trailcdFlag
 	cfg.Leverage = *levFlag
 	cfg.AdaptATRTh = *adaptatrFlag / 100
 	cfg.AdaptBTCEMA = *btcemaFlag
@@ -711,12 +770,25 @@ func main() {
 		cfg.EnableShort = true
 		cfg.OnlyShort = true
 	}
+	// S01 单因子实验（默认全关，不改动 S01 现有行为）
+	applyS01Experiments(cfg, *fvetoFlag, *vzFlag, *rsiokFlag)
+	// v6 口径覆盖共享参数（必须在 flag 赋值之后，否则默认 flag 会覆盖 v6 规范值）
+	if *modeFlag == "v6" {
+		V6Defaults(cfg)
+		if *v6rawFlag {
+			cfg.DailyLossPct = 100          // 日亏熔断关闭
+			cfg.MaxConsecutiveLosses = 1000000 // 连亏熔断关闭
+		}
+		if *slipoffFlag {
+			cfg.SlippageBig, cfg.SlippageMid, cfg.SlippageSmall = 0, 0, 0
+		}
+	}
 	eng := NewEngine(cfg)
 	begin := time.Now()
 
-	// funding 范式: 加载资金费率数据流
+	// funding / v6 / S01 费率实验: 加载资金费率数据流
 	var fundingStreams []*fundingStream
-	if cfg.Mode == "funding" {
+	if cfg.Mode == "funding" || cfg.Mode == "v6" || (cfg.Mode == "momentum" && cfg.FundingVetoEnabled) {
 		fundingStreams = openFundingStreams(*fundingDir)
 	}
 
@@ -777,6 +849,13 @@ func main() {
 	}
 
 	eng.Finalize(lastBars)
+
+	if cfg.Mode == "v6" {
+		eng.printV6GateStats()
+	}
+	if cfg.Mode == "momentum" && cfg.FundingVetoEnabled {
+		fmt.Printf("费率过热否决信号数: %d\n", eng.fundingVetoCount)
+	}
 
 	elapsed := time.Since(begin)
 	fmt.Printf("回测完成: %d 个时间片，耗时 %.1f 秒\n", processed, elapsed.Seconds())

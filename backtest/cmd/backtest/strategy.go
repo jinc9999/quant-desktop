@@ -10,6 +10,7 @@
 package main
 
 import (
+	"fmt"
 	"math"
 	"sort"
 )
@@ -58,6 +59,52 @@ type StrategyConfig struct {
 	FundMaxHold int     // 最长持有资金费结算周期数（3 = 24h）
 	FundSLPct   float64 // 价格止损比例（0.05 = 5%，保护非中性敞口的突发反向行情）
 
+	// ===== v6 异动币策略参数（定义见 docs/superpowers/plans/2026-08-08-v6-refactor-plan.md）=====
+	MinPrice            float64 // L1: 价格 > 该值（USDT，默认 5）
+	MaxATRPct           float64 // L1: ATR14 / close × 100 ≤ 该值（默认 8%）
+	BBPeriod            int     // 布林带周期（默认 20）
+	BBMult              float64 // 布林带倍数（默认 1.5σ）
+	BBWidthWindow       int     // 布林带宽度分位窗口（默认 288 根 5m = 24h）
+	BBWidthMinPct       float64 // L2 硬门槛: 宽度分位 < 该值（默认 30%）
+	RSIPeriod           int     // RSI 周期（默认 14）
+	RSIMin              float64 // L2 趋势确认下限（默认 40）
+	RSIMax              float64 // L2 趋势确认上限（默认 70）
+	L2VolMult           float64 // L2 量能: (当前+前1根) ≥ 前 N 根均值 × 该值（默认 2.0）
+	L2VolLookback       int     // L2 量能前 N 根（默认 5）
+	L2MinScore          float64 // L2 原始分门槛（默认 60）
+	L3MinScore          float64 // L3 加权总分门槛（默认 70）
+	OIZWindow           int     // ΔOI(Z)/成交量 Z 的窗口（默认 24 根 5m）
+	TierBigVolume       float64 // 大币 24h 成交额下限（默认 5 亿 USDT）
+	TierMidVolume       float64 // 中币 24h 成交额下限（默认 5000 万 USDT）
+	OIZBig              float64 // 大币 ΔOI Z-Score 阈值（默认 2.5）
+	OIZMid              float64 // 中币 ΔOI Z-Score 阈值（默认 2.0）
+	OIZSmall            float64 // 小币 ΔOI Z-Score 阈值（默认 1.5）
+	FundVetoBig         float64 // 大币费率过热否决阈值（小数，默认 0.005 = 0.5%）
+	FundVetoMid         float64 // 中币费率过热否决阈值（默认 0.01 = 1%）
+	FundVetoSmall       float64 // 小币费率过热否决阈值（默认 0.02 = 2%）
+	FactorW1            float64 // L3 因子1 ΔOI 权重（默认 0.35）
+	FactorW2            float64 // L3 因子2 资金费率权重（默认 0.30）
+	FactorW3            float64 // L3 因子3 RSI 权重（默认 0.20）
+	FactorW4            float64 // L3 因子4 盘口深度权重（默认 0.15；回测归零并归一化）
+	RiskPct             float64 // L4 风险预算: 账户×该值（默认 1%）
+	SingleCoinMarginPct float64 // C6 单币保证金上限: 账户×该值（默认 0.5%）
+	MaxLeverageExposure float64 // C6 总敞口上限: 名义价值 ≤ 账户×该值（默认 3x）
+	DailyLossPct        float64 // C6 日亏损熔断（默认 2%）
+	MaxConsecutiveLosses int    // C6 连续亏损熔断（默认 5 单）
+	SlippageBig         float64 // 滑点: 大币（默认 0.05%）
+	SlippageMid         float64 // 滑点: 中币（默认 1%）
+	SlippageSmall       float64 // 滑点: 小币（默认 2%）
+	ATRDecayPct         float64 // L5 波动率衰减: ATR ≤ 开仓后峰值×该值（默认 0.5）
+	ATRDecayMinHoldBars int     // L5 波动率衰减最小持仓（默认 6 根 = 30 分钟）
+	FundReversalMult    float64 // L5 费率反转: 费率 > 入场时×该值（默认 1.5）
+	NewListingMinDays   int     // L1 新币过滤: 上市天数 > 该值（默认 60）
+	CooldownAfterTrailingMin int // 实验: 移动止盈平仓后的冷却分钟数（-1=统一用 CooldownMs；0=立即再入）
+
+	// ===== S01 单因子实验开关（默认全关，不改变 S01 现有行为）=====
+	FundingVetoEnabled bool    // 实验: 费率过热否决（正费率 ≥ 分级阈值不追）
+	VolumeZThreshold   float64 // 实验: 成交量 Z-Score 确认阈值（0=关闭）
+	RSIFilterEnabled   bool    // 实验: RSI[RSIMin,RSIMax] 趋势带确认
+
 	// 自适应融合（adaptive）参数: 按 BTC 市场状态动态切换追涨/回踩/做空三模式
 	AdaptATRTh           float64 // BTC ATR% 阈值: ATR%<=该值 且 BTC>EMA 判定为回踩模式（0.02=2%）
 	AdaptBTCEMA          int     // BTC 状态判断均线周期（5m 粒度，默认 50）
@@ -105,6 +152,7 @@ func DefaultConfig() *StrategyConfig {
 		MaxHoldBars:          0,
 		FeeRate:              0.0004,
 		Mode:                 "momentum",
+		CooldownAfterTrailingMin: -1, // 统一冷却（分原因冷却实验默认关闭）
 		MRDropPct:            0.03,
 		MRTpPct:              0.02,
 		MRSlPct:              0.015,
@@ -153,6 +201,7 @@ type symbolState struct {
 	periodTS   int64               // 当前 15m 周期起点
 	hasPeriod  bool                // 15m 周期是否已初始化
 	lastClose  int64               // 该币最近平仓时间（冷却用）
+	lastCloseReason string         // 该币最近平仓原因（分原因冷却用）
 	fastEma    float64             // 趋势模式: 快线 EMA
 	slowEma    float64             // 趋势模式: 慢线 EMA
 	prevFast   float64             // 上一根快线 EMA（交叉检测用）
@@ -162,6 +211,26 @@ type symbolState struct {
 	rbEmaInit  bool                // 回踩 EMA 是否已初始化
 	rbTouched  bool                // 是否已发生过触及 EMA 的回踩
 	rbStableCnt int                // 触及后连续收盘 >= EMA 的片数（企稳计数）
+
+	// v6 指标状态（仅在 Mode=="v6" 时维护）
+	firstTS     int64       // 该币首根 K 线时间（上市日，新币过滤用）
+	rsi         float64     // RSI(14)（Wilder）
+	rsiInit     bool        // RSI 是否已初始化
+	rsiSeedSumG float64     // RSI 种子期涨幅累计
+	rsiSeedSumL float64     // RSI 种子期跌幅累计
+	rsiSeedCnt  int         // RSI 种子期计数
+	rsiAvgGain  float64     // Wilder 平均涨幅
+	rsiAvgLoss  float64     // Wilder 平均跌幅
+	trRing      [14]float64 // TR 环形缓冲（ATR14）
+	trIdx       int         // TR 环形写入索引
+	trFilled    int         // TR 已写入数
+	atr         float64     // ATR14
+	bbWidths     [288]float64 // 布林带宽度历史（分位计算）
+	bbIdx        int          // 宽度环形写入索引
+	bbFilled     int          // 宽度已写入数
+	bbWidthPrev  float64      // 上一根已完成 K 线的宽度（突破当根的挤压判定基准）
+	bbHasPrev    bool         // 上一根宽度是否已记录
+	bbSqueezePct float64      // 上一根宽度在其历史窗口中的百分位（0~1）
 }
 
 // Position 一笔持仓记录（含待成交 pending 态）
@@ -182,6 +251,15 @@ type Position struct {
 	ActPct           float64 // 该仓移动止盈激活比例
 	CbPct            float64 // 该仓移动止盈回调比例
 	HoldBars         int     // 该仓最长持仓片数
+	Margin           float64 // 占用保证金（v6 动态仓位；旧模式=固定每仓保证金）
+	Notional         float64 // 目标名义价值（v6 动态仓位；旧模式=保证金×杠杆）
+	Slippage         float64 // 分级滑点（v6，大/中/小）
+	ATRPeak          float64 // 开仓后 ATR14 峰值（波动率衰减退出用）
+	EntryATR         float64 // 入场时 ATR14
+	EntryFunding     float64 // 入场时资金费率（费率反转退出用）
+	Score            float64 // L3 加权总分（置信度因子用）
+	Tier             string  // 币种分级 big/mid/small
+	ChaseType        string  // 追涨/回踩分类: first/chase/pullback/flat（回测验证用）
 }
 
 // btcState BTC 市场状态（自适应融合模式用）: EMA 判断牛熊 + ATR 判断波动
@@ -215,6 +293,7 @@ type Trade struct {
 	PnLPct   float64 // 相对名义价值的收益率(%)
 	Reason   string  // STOP_LOSS / TRAILING_STOP
 	HeldBars int     // 持仓 K 线数
+	ChaseType string // 追涨/回踩分类
 }
 
 // EquityPoint 权益曲线采样点
@@ -237,6 +316,21 @@ type Engine struct {
 	lastTS        int64 // 上一片时间
 	btc           *btcState       // 自适应模式: BTC 市场状态
 	dailyCount    map[int64]int   // 单日开仓计数（DailyMax 限制用）
+
+	// v6 运行状态
+	fundRate       map[string]float64 // 最近已知资金费率（结算间保持）
+	fundPrev       map[string]float64 // 上一结算费率（负转正判定）
+	notionalInUse  float64            // 当前名义敞口总和（总敞口限制）
+	dayStartEquity float64            // 当日零点权益（日亏基准）
+	dayPnl         float64            // 当日已实现盈亏（含手续费）
+	dayBlocked     bool               // 日亏熔断: 当日停止开新仓
+	lastDay        int64              // 上一个 UTC 日（跨天重置日熔断）
+	lossStreak     int                // 连续亏损计数
+	lossBlocked    bool               // 连亏熔断: 赢单前停止开新仓
+	v6Gates        [8]int64           // v6 信号漏斗各阶段通过数（诊断用）
+	v6Skip         [4]int64           // v6 开仓拦截原因统计: 0=熔断拦截 1=仓位/敞口/破产 2=已持仓去重 3=实际成交数
+	fundingVetoCount int64            // S01 实验: 费率过热否决的信号数
+	lastEntry        map[string]float64 // 追涨/回踩分类: 每币上一笔入场价
 }
 
 // NewEngine 创建回测引擎
@@ -247,9 +341,14 @@ type Engine struct {
 //   - *Engine: 引擎实例
 func NewEngine(cfg *StrategyConfig) *Engine {
 	return &Engine{
-		cfg:    cfg,
-		states: make(map[string]*symbolState),
-		equity: cfg.InitialEquity,
+		cfg:            cfg,
+		states:         make(map[string]*symbolState),
+		equity:         cfg.InitialEquity,
+		fundRate:       make(map[string]float64),
+		fundPrev:       make(map[string]float64),
+		dayStartEquity: cfg.InitialEquity,
+		lastDay:        -1,
+		lastEntry:      make(map[string]float64),
 	}
 }
 
@@ -362,6 +461,12 @@ func (e *Engine) updateState(symbol string, b *bar) (*symbolState, bool) {
 			k := 2.0 / (float64(e.cfg.RBEMA) + 1)
 			st.rbEma += (b.close - st.rbEma) * k
 		}
+	}
+
+	// v6 模式: 维护 RSI/ATR/布林带宽度历史（用于 L1/L2 判定）；
+	// momentum 模式仅在启用 RSI 实验时维护 RSI/ATR（成本 O(1)，布林带宽度跳过）
+	if e.cfg.Mode == "v6" || (e.cfg.Mode == "momentum" && e.cfg.RSIFilterEnabled) {
+		e.updateV6Indicators(st, b)
 	}
 
 	return st, st.filled >= WindowBars
@@ -536,8 +641,12 @@ func (e *Engine) computeSignal(st *symbolState, b *bar, ready24 bool) (string, s
 		return "", ""
 	}
 
-	// 冷却检查
-	if st.lastClose > 0 && b.ts-st.lastClose < cfg.CooldownMs {
+	// 冷却检查（分原因: 移动止盈平仓后可用更短冷却，默认-1=统一 CooldownMs）
+	cd := cfg.CooldownMs
+	if st.lastCloseReason == "TRAILING_STOP" && cfg.CooldownAfterTrailingMin >= 0 {
+		cd = int64(cfg.CooldownAfterTrailingMin) * 60 * 1000
+	}
+	if st.lastClose > 0 && b.ts-st.lastClose < cd {
 		return "", ""
 	}
 
@@ -554,6 +663,10 @@ func (e *Engine) computeSignal(st *symbolState, b *bar, ready24 bool) (string, s
 	switch cfg.Mode {
 	case "funding":
 		// 资金费率套利: 信号由 processFunding 在资金费结算片直接产生，此处不产生 K 线信号
+		return "", ""
+
+	case "v6":
+		// v6 信号链由 OnBar 专用分支（v6Signal）产生，此处不产生信号
 		return "", ""
 
 	case "mr":
@@ -697,16 +810,58 @@ func (e *Engine) fillPending(bars map[string]*bar, ts int64) {
 		}
 		p.EntryTS = ts
 		p.EntryPrice = b.open
-		p.Amount = e.cfg.PositionMarginUSDT * e.cfg.Leverage / b.open
+		// v6: 按分级滑点恶化入场价（做多加价 / 做空减价）
+		if p.Slippage > 0 {
+			if p.Side == "SHORT" {
+				p.EntryPrice = b.open * (1 - p.Slippage)
+			} else {
+				p.EntryPrice = b.open * (1 + p.Slippage)
+			}
+		}
+		// 追涨/回踩分类: 入场价 vs 该币上一笔入场价（同一引擎内按时间序）
+		if prev, ok := e.lastEntry[p.Symbol]; ok {
+			if p.EntryPrice > prev {
+				p.ChaseType = "chase"
+			} else if p.EntryPrice < prev {
+				p.ChaseType = "pullback"
+			} else {
+				p.ChaseType = "flat"
+			}
+		} else {
+			p.ChaseType = "first"
+		}
+		if p.Notional <= 0 {
+			p.Notional = e.cfg.PositionMarginUSDT * e.cfg.Leverage
+		}
+		p.Amount = p.Notional / p.EntryPrice
+		if p.Amount <= 0 {
+			continue
+		}
 		p.ExtremePrice = b.open
 		p.Pending = false
 		// 破产保护: 权益不足以支付该仓保证金时放弃成交（账户已接近爆仓）
-		if e.equity-e.marginInUse < e.cfg.PositionMarginUSDT {
+		if p.Margin <= 0 {
+			p.Margin = e.cfg.PositionMarginUSDT
+		}
+		if e.equity-e.marginInUse < p.Margin {
 			continue
 		}
 		// 开仓手续费（按名义价值 taker 费率）
 		e.equity -= p.Amount * p.EntryPrice * e.cfg.FeeRate
-		e.marginInUse += e.cfg.PositionMarginUSDT
+		e.marginInUse += p.Margin
+		e.notionalInUse += p.Amount * p.EntryPrice
+		// v6: 固化入场时 ATR 与资金费率（波动率衰减 / 费率反转退出基准）
+		if st := e.states[p.Symbol]; st != nil {
+			p.ATRPeak = st.atr
+			p.EntryATR = st.atr
+		}
+		if v, ok := e.fundRate[p.Symbol]; ok {
+			p.EntryFunding = v
+		}
+		e.lastEntry[p.Symbol] = p.EntryPrice
+		if e.cfg.Mode == "v6" {
+			e.v6Skip[3]++
+		}
 		e.positions = append(e.positions, p)
 	}
 	e.pending = still
@@ -741,10 +896,14 @@ func (e *Engine) openPositions(candidates []candidate, now int64) {
 			break
 		}
 		if held[c.symbol] {
+			if e.cfg.Mode == "v6" {
+				e.v6Skip[2]++
+			}
 			continue
 		}
 		// 破产保护: 可用权益（权益-占用保证金）不足以开一仓则停止开仓
-		if e.equity-e.marginInUse < e.cfg.PositionMarginUSDT {
+		// （v6 动态仓位由 v6Sizing 自行校验，不在此用固定保证金截断）
+		if e.cfg.Mode != "v6" && e.equity-e.marginInUse < e.cfg.PositionMarginUSDT {
 			break
 		}
 		p := &Position{
@@ -755,12 +914,39 @@ func (e *Engine) openPositions(candidates []candidate, now int64) {
 		}
 		// 按信号模式固化退出参数（adaptive: chase/pullback/short 各有独立风控；非 adaptive 用配置默认）
 		switch c.mode {
+		case "v6":
+			// v6 风控熔断: 日亏 / 连亏达标后不再开新仓
+			if e.dayBlocked || e.lossBlocked {
+				e.v6Skip[0]++
+				continue
+			}
+			entryPrice := 0.0
+			if st := e.states[c.symbol]; st != nil {
+				entryPrice = ringAt(&st.closes, st.idx, 0)
+			}
+			if entryPrice <= 0 {
+				continue
+			}
+			notional, margin, amount, ok := e.v6Sizing(c.symbol, c.score, c.tier, entryPrice)
+			if !ok {
+				e.v6Skip[1]++
+				continue
+			}
+			p.Notional = notional
+			p.Margin = margin
+			p.Amount = amount
+			p.Slippage = e.v6Slippage(c.tier)
+			p.Score = c.score
+			p.Tier = c.tier
+			p.SLPct, p.TPPct, p.ActPct, p.CbPct, p.HoldBars = e.cfg.StopLossPct, 0, e.cfg.TrailingActivation, e.cfg.TrailingCallback, e.cfg.MaxHoldBars
 		case "pullback":
 			p.SLPct, p.TPPct, p.ActPct, p.CbPct, p.HoldBars = e.cfg.RBSL, e.cfg.RBTP, e.cfg.RBAct, e.cfg.RBCb, e.cfg.RBHold
 		case "short":
 			p.SLPct, p.TPPct, p.ActPct, p.CbPct, p.HoldBars = e.cfg.SSL, e.cfg.STP, e.cfg.SAct, e.cfg.SCb, e.cfg.SHold
 		default: // chase 或非 adaptive
 			p.SLPct, p.TPPct, p.ActPct, p.CbPct, p.HoldBars = e.cfg.StopLossPct, e.cfg.TakeProfitPct, e.cfg.TrailingActivation, e.cfg.TrailingCallback, e.cfg.MaxHoldBars
+			p.Margin = e.cfg.PositionMarginUSDT
+			p.Notional = e.cfg.PositionMarginUSDT * e.cfg.Leverage
 		}
 		p.Mode = c.mode
 		e.pending = append(e.pending, p)
@@ -786,6 +972,8 @@ type candidate struct {
 	side   string
 	volume float64 // 用于排序的成交额
 	mode   string  // 自适应模式: chase/pullback/short（非 adaptive 为空）
+	score  float64 // v6: L3 加权总分
+	tier   string  // v6: 币种分级 big/mid/small
 }
 
 // closePosition 平仓结算一笔持仓（含资金费收入并入 PnL）
@@ -805,7 +993,27 @@ func (e *Engine) closePosition(p *Position, b *bar, exitPx float64, reason strin
 	pnl += p.FundingCollected
 	e.equity += pnl
 	e.equity -= exitPx * p.Amount * e.cfg.FeeRate // 平仓手续费（按成交名义价值）
-	e.marginInUse -= e.cfg.PositionMarginUSDT     // 释放保证金
+	e.marginInUse -= p.Margin                     // 释放保证金
+	e.notionalInUse -= p.Amount * p.EntryPrice    // 释放名义敞口
+	if e.cfg.Mode == "v6" {
+		// 日亏 / 连亏熔断状态更新（净盈亏 = 价格盈亏 - 平仓手续费）
+		net := pnl - exitPx*p.Amount*e.cfg.FeeRate
+		e.dayPnl += net
+		if net < 0 {
+			e.lossStreak++
+		} else {
+			e.lossStreak = 0
+		}
+		if e.lossStreak >= e.cfg.MaxConsecutiveLosses && !e.lossBlocked {
+			e.lossBlocked = true
+			fmt.Printf("[V6] 连续亏损 %d 笔，停止开新仓（赢单重置）\n", e.lossStreak)
+		}
+		if e.dayStartEquity > 0 && e.dayPnl <= -e.cfg.DailyLossPct*e.dayStartEquity && !e.dayBlocked {
+			e.dayBlocked = true
+			fmt.Printf("[V6] 当日净亏损 %.2fU 达 %.1f%% 限制，当日停止开新仓\n",
+				e.dayPnl, e.cfg.DailyLossPct*100)
+		}
+	}
 	e.trades = append(e.trades, &Trade{
 		Symbol:   p.Symbol,
 		Side:     p.Side,
@@ -818,9 +1026,11 @@ func (e *Engine) closePosition(p *Position, b *bar, exitPx float64, reason strin
 		PnLPct:   pnl / (p.EntryPrice * p.Amount) * 100,
 		Reason:   reason,
 		HeldBars: int((b.ts - p.EntryTS) / 300000),
+		ChaseType: p.ChaseType,
 	})
 	if st, ok := e.states[p.Symbol]; ok {
 		st.lastClose = b.ts
+		st.lastCloseReason = reason
 	}
 }
 
@@ -959,6 +1169,46 @@ func (e *Engine) monitorPositions(bars map[string]*bar) {
 				if b.high >= stop {
 					exitPx = max2(b.open, stop)
 					reason = "FUND_SL"
+				}
+			}
+
+		case "v6":
+			// v6 退出层（纯多头）: 硬止损 / 超时 / ATR 衰减 / 费率反转 / 移动止盈
+			st := e.states[p.Symbol]
+			if st != nil && st.atr > p.ATRPeak {
+				p.ATRPeak = st.atr // 波动率衰减基准: 开仓后 ATR14 峰值
+			}
+			if p.Side == "LONG" {
+				stop := p.EntryPrice * (1 - p.SLPct)
+				switch {
+				case b.low <= stop: // 硬止损（片内触发按止损价成交，含滑点）
+					exitPx = min2(b.open, stop) * (1 - p.Slippage)
+					reason = "STOP_LOSS"
+				case p.HoldBars > 0 && held >= p.HoldBars: // 120 分钟超时
+					exitPx = b.close * (1 - p.Slippage)
+					reason = "MAX_HOLD"
+				case st != nil && st.atr > 0 && p.ATRPeak > 0 &&
+					st.atr <= p.ATRPeak*e.cfg.ATRDecayPct && held >= e.cfg.ATRDecayMinHoldBars:
+					exitPx = b.close * (1 - p.Slippage)
+					reason = "ATR_DECAY"
+				case p.Tier != "" && p.EntryFunding > 0 && e.fundRate[p.Symbol] > e.v6Veto(p.Tier) &&
+					e.fundRate[p.Symbol] > p.EntryFunding*e.cfg.FundReversalMult:
+					exitPx = b.close * (1 - p.Slippage)
+					reason = "FUND_REVERSAL"
+				case b.ts > p.EntryTS: // 移动止盈 3% 激活 + 2% 回调
+					if b.high > p.ExtremePrice {
+						p.ExtremePrice = b.high
+					}
+					if !p.TrailingActive && p.ExtremePrice >= p.EntryPrice*(1+p.ActPct) {
+						p.TrailingActive = true
+					}
+					if p.TrailingActive {
+						trail := p.ExtremePrice * (1 - p.CbPct)
+						if b.low <= trail {
+							exitPx = min2(b.open, trail) * (1 - p.Slippage)
+							reason = "TRAILING_STOP"
+						}
+					}
 				}
 			}
 
@@ -1221,9 +1471,31 @@ func (e *Engine) OnBar(bars map[string]*bar, fundings map[string]fundingPoint, t
 	// 1. 成交上一片待开仓单（用当前片开盘价，避免未来函数）
 	e.fillPending(bars, ts)
 
+	// 1.5 资金费率推进（结算点才变化，结算间保持最近值；无费率数据时为空 map 无副作用）
+	for sym, fp := range fundings {
+		e.fundPrev[sym] = e.fundRate[sym]
+		e.fundRate[sym] = fp.rate
+	}
+
 	// 2. 更新状态并评估信号（使用本片收盘数据）
 	var cands []candidate
-	if e.cfg.Mode == "funding" {
+	if e.cfg.Mode == "v6" {
+		// v6 模式: 逐币推进状态并评估 L1→L2→L3 信号链
+		// 日熔断跨天重置（UTC 日）
+		day := ts / 86400000
+		if day != e.lastDay {
+			e.dayStartEquity = e.equity
+			e.dayPnl = 0
+			e.dayBlocked = false
+			e.lastDay = day
+		}
+		for sym, b := range bars {
+			st, ready := e.updateState(sym, b)
+			if side, score, tier, ok := e.v6Signal(sym, st, b, ready); ok {
+				cands = append(cands, candidate{symbol: sym, side: side, volume: b.quoteVol, mode: "v6", score: score, tier: tier})
+			}
+		}
+	} else if e.cfg.Mode == "funding" {
 		// funding 模式: 先推进全部币种状态（资金费开仓依赖 24h 窗口与流动性），
 		// 再处理资金费事件（收取/退出/开仓候选）
 		for sym, b := range bars {
@@ -1240,6 +1512,17 @@ func (e *Engine) OnBar(bars map[string]*bar, fundings map[string]fundingPoint, t
 		for sym, b := range bars {
 			st, ready := e.updateState(sym, b)
 			if side, mode := e.computeSignal(st, b, ready); side != "" {
+				// S01 单因子实验（默认全关）: 费率过热否决 / 成交量 Z 确认 / RSI 趋势带
+				if e.cfg.FundingVetoEnabled && e.fundingVetoed(sym, st.sumVol24) {
+					e.fundingVetoCount++
+					continue
+				}
+				if e.cfg.VolumeZThreshold > 0 && v6VolumeZ(st, e.cfg) < e.cfg.VolumeZThreshold {
+					continue
+				}
+				if e.cfg.RSIFilterEnabled && (st.rsi < e.cfg.RSIMin || st.rsi > e.cfg.RSIMax) {
+					continue
+				}
 				cands = append(cands, candidate{symbol: sym, side: side, volume: b.quoteVol, mode: mode})
 			}
 		}
