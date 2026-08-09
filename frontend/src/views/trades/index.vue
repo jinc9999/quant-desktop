@@ -430,18 +430,17 @@ onUnmounted(() => {
           <template #default="{ row }">{{ formatPrice(row.entryPrice) }}</template>
         </el-table-column>
 
-        <!-- 出场价 -->
-        <el-table-column prop="exitPrice" label="出场价" width="120" align="right" sortable="custom">
-          <template #default="{ row }">{{ formatPrice(row.exitPrice) }}</template>
-        </el-table-column>
-
-        <!-- 数量 -->
-        <el-table-column prop="amount" label="数量" width="120" align="right" sortable="custom">
-          <template #default="{ row }">{{ formatAmount(row.amount) }}</template>
+        <!-- 平仓原因 -->
+        <el-table-column prop="closeReason" label="平仓原因" min-width="110" align="center">
+          <template #default="{ row }">
+            <span :style="{ color: closeReasonColor(row.closeReason) }">
+              {{ closeReasonLabel(row.closeReason) }}
+            </span>
+          </template>
         </el-table-column>
 
         <!-- 净盈亏 -->
-        <el-table-column prop="realizedPnl" label="净盈亏" width="130" align="right" sortable="custom" fixed="right">
+        <el-table-column prop="realizedPnl" label="净盈亏" min-width="120" align="right" sortable="custom">
           <template #default="{ row }">
             <span :style="{ color: pnlColor(row.realizedPnl) }">
               {{ formatSignedUsd(row.realizedPnl) }}
@@ -450,7 +449,7 @@ onUnmounted(() => {
         </el-table-column>
 
         <!-- 盈利% -->
-        <el-table-column prop="profitPct" label="盈利%" width="110" align="right" sortable="custom" fixed="right">
+        <el-table-column prop="profitPct" label="盈利%" min-width="100" align="right" sortable="custom">
           <template #default="{ row }">
             <span :style="{ color: pnlColor(row.profitPct) }">
               {{ formatPct(row.profitPct) }}
@@ -458,23 +457,24 @@ onUnmounted(() => {
           </template>
         </el-table-column>
 
+        <!-- 出场价 -->
+        <el-table-column prop="exitPrice" label="出场价" min-width="120" align="right" sortable="custom">
+          <template #default="{ row }">{{ formatPrice(row.exitPrice) }}</template>
+        </el-table-column>
+
+        <!-- 数量 -->
+        <el-table-column prop="amount" label="数量" min-width="110" align="right" sortable="custom">
+          <template #default="{ row }">{{ formatAmount(row.amount) }}</template>
+        </el-table-column>
+
         <!-- 手续费 -->
-        <el-table-column prop="fee" label="手续费" width="110" align="right" sortable="custom">
+        <el-table-column prop="fee" label="手续费" min-width="100" align="right" sortable="custom">
           <template #default="{ row }">{{ formatUsd(row.fee) }}</template>
         </el-table-column>
 
         <!-- 平仓时间 -->
         <el-table-column prop="closedAt" label="平仓时间" min-width="170" sortable="custom">
           <template #default="{ row }">{{ formatDateTime(row.closedAt) }}</template>
-        </el-table-column>
-
-        <!-- 平仓原因 -->
-        <el-table-column prop="closeReason" label="平仓原因" width="110" align="center">
-          <template #default="{ row }">
-            <span :style="{ color: closeReasonColor(row.closeReason) }">
-              {{ closeReasonLabel(row.closeReason) }}
-            </span>
-          </template>
         </el-table-column>
 
         <template #empty>

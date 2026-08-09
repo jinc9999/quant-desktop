@@ -572,27 +572,21 @@ onUnmounted(() => {
           </template>
         </el-table-column>
 
-        <el-table-column prop="amount" label="数量" width="120" align="right" sortable="custom">
-          <template #default="{ row }">
-            <span class="num">{{ formatAmount(row.amount) }}</span>
-          </template>
-        </el-table-column>
-
-        <el-table-column prop="margin" label="保证金" width="130" align="right" sortable="custom">
+        <el-table-column prop="margin" label="保证金" min-width="120" align="right" sortable="custom">
           <template #default="{ row }">
             <span class="num">{{ formatUsd(row.margin) }}</span>
           </template>
         </el-table-column>
 
         <!-- 标记价格：无行情时显示 "-" -->
-        <el-table-column prop="markPrice" label="标记价格" width="130" align="right" sortable="custom">
+        <el-table-column prop="markPrice" label="标记价格" min-width="120" align="right" sortable="custom">
           <template #default="{ row }">
             <span class="num">{{ row.markPrice > 0 ? formatPrice(row.markPrice) : "-" }}</span>
           </template>
         </el-table-column>
 
         <!-- 盈亏：正=绿 / 负=红 -->
-        <el-table-column prop="unrealizedPnl" label="盈亏" width="140" align="right" sortable="custom">
+        <el-table-column prop="unrealizedPnl" label="盈亏" min-width="120" align="right" sortable="custom">
           <template #default="{ row }">
             <span class="num pnl-cell" :class="pnlClass(row.unrealizedPnl)">
               {{ row.markPrice > 0 ? formatPnl(row.unrealizedPnl) : "-" }}
@@ -601,7 +595,7 @@ onUnmounted(() => {
         </el-table-column>
 
         <!-- 回报率：百分比，正=绿 / 负=红 -->
-        <el-table-column prop="roiPct" label="回报率" width="110" align="right" sortable="custom">
+        <el-table-column prop="roiPct" label="回报率" min-width="100" align="right" sortable="custom">
           <template #default="{ row }">
             <span class="num pnl-cell" :class="pnlClass(row.roiPct)">
               {{ row.markPrice > 0 ? formatRoi(row.roiPct) : "-" }}
@@ -612,7 +606,7 @@ onUnmounted(() => {
         <el-table-column
           prop="currentStopPrice"
           label="止损价"
-          width="130"
+          min-width="120"
           align="right"
           sortable="custom"
         >
@@ -629,6 +623,12 @@ onUnmounted(() => {
               :effect="getStatusMeta(row.orderStatus).effect"
               size="small"
             >{{ getStatusMeta(row.orderStatus).label }}</el-tag>
+          </template>
+        </el-table-column>
+
+        <el-table-column prop="amount" label="数量" min-width="110" align="right" sortable="custom">
+          <template #default="{ row }">
+            <span class="num">{{ formatAmount(row.amount) }}</span>
           </template>
         </el-table-column>
 

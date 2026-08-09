@@ -30,6 +30,7 @@ interface DashboardData {
   topN: number;
   cooldownMin: number;
   marginMode: string;
+  tickerLoadMsg: string;
 }
 
 const data = ref<DashboardData>({
@@ -50,11 +51,19 @@ const data = ref<DashboardData>({
   timeframe: "15m",
   topN: 3,
   cooldownMin: 60,
-  marginMode: "ISOLATED"
+  marginMode: "ISOLATED",
+  tickerLoadMsg: ""
 });
 
 const loading = ref(true);
+/** 每日总结数据 */
+const summary = ref<{
+  market: any;
+  trades: any;
+  suggestions: string[];
+}>({ market: {}, trades: {}, suggestions: [] });
 let timer: ReturnType<typeof setInterval> | null = null;
+let summaryTimer: ReturnType<typeof setInterval> | null = null;
 
 /** 格式化运行时间为 HH:MM:SS */
 const runtimeText = computed(() => {
@@ -90,6 +99,14 @@ const modeText = computed(() => {
 
 /** 运行状态标签类型 */
 const statusType = computed(() => (data.value.running ? "success" : "danger"));
+
+/** 行情加载状态颜色 */
+const loadStatusClass = computed(() => {
+  const m = data.value.tickerLoadMsg || "";
+  if (m.includes("⚠")) return "text-orange";
+  if (m.includes("加载")) return "text-green";
+  return "text-neutral";
+});
 
 /** 今日盈亏颜色类 */
 const pnlClass = computed(() => {
@@ -135,19 +152,55 @@ async function fetchData() {
       timeframe: res.timeframe ?? "15m",
       topN: res.topN ?? 3,
       cooldownMin: res.cooldownMin ?? 60,
-      marginMode: res.marginMode ?? "ISOLATED"
+      marginMode: res.marginMode ?? "ISOLATED",
+      tickerLoadMsg: res.tickerLoadMsg ?? ""
     };
   }
   loading.value = false;
 }
 
+/** 拉取每日总结 */
+async function fetchSummary() {
+  const res = await callService(() => QuantService.GetDailySummary(), { silent: true });
+  if (res) {
+    summary.value = {
+      market: res.market ?? {},
+      trades: res.trades ?? {},
+      suggestions: res.suggestions ?? []
+    };
+  }
+}
+
+/** 格式化成交额（亿/万） */
+function fmtVolume(v: number): string {
+  if (!v || v <= 0) return "--";
+  if (v >= 1e8) return (v / 1e8).toFixed(1) + " 亿";
+  if (v >= 1e4) return (v / 1e4).toFixed(0) + " 万";
+  return v.toFixed(0);
+}
+
+/** 涨跌颜色 */
+function chgClass(v: number): string {
+  if (v > 0) return "text-green";
+  if (v < 0) return "text-red";
+  return "text-neutral";
+}
+
+function fmtChg(v: number): string {
+  if (v === undefined || v === null) return "--";
+  return (v > 0 ? "+" : "") + v.toFixed(2) + "%";
+}
+
 onMounted(() => {
   fetchData();
+  fetchSummary();
   timer = setInterval(fetchData, 2000);
+  summaryTimer = setInterval(fetchSummary, 60000);
 });
 
 onUnmounted(() => {
   if (timer) clearInterval(timer);
+  if (summaryTimer) clearInterval(summaryTimer);
 });
 </script>
 
@@ -292,6 +345,129 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- 行情加载状态 -->
+    <div class="quant-card load-status-card">
+      <div class="card-header">
+        <span class="card-title">行情加载状态</span>
+        <span class="summary-hint">启动后自动全量加载，缺币时告警并 REST 补齐</span>
+      </div>
+      <div class="load-status-body" :class="loadStatusClass">
+        {{ data.tickerLoadMsg || "尚未加载全量行情" }}
+      </div>
+    </div>
+
+    <!-- 每日总结 -->
+    <div class="quant-card summary-panel">
+      <div class="card-header">
+        <span class="card-title">每日总结</span>
+        <span class="summary-hint">每 60 秒自动刷新</span>
+      </div>
+
+      <!-- 市场概况 -->
+      <div class="summary-section">
+        <div class="section-title">市场概况（24h）</div>
+        <div class="summary-grid">
+          <div class="summary-item">
+            <span class="sum-label">上涨 / 下跌</span>
+            <span>
+              <b class="text-green">{{ summary.market.up ?? 0 }}</b>
+              /
+              <b class="text-red">{{ summary.market.down ?? 0 }}</b>
+              <span class="sum-sub">（共 {{ summary.market.total ?? 0 }}）</span>
+            </span>
+          </div>
+          <div class="summary-item">
+            <span class="sum-label">中位涨跌</span>
+            <span :class="chgClass(summary.market.medianChange ?? 0)">{{
+              fmtChg(summary.market.medianChange)
+            }}</span>
+          </div>
+          <div class="summary-item">
+            <span class="sum-label">平均涨跌</span>
+            <span :class="chgClass(summary.market.avgChange ?? 0)">{{
+              fmtChg(summary.market.avgChange)
+            }}</span>
+          </div>
+          <div class="summary-item">
+            <span class="sum-label">总成交额</span>
+            <span>{{ fmtVolume(summary.market.totalQuoteVolume) }} U</span>
+          </div>
+        </div>
+        <div class="mover-row" v-if="summary.market.topGainers && summary.market.topGainers.length">
+          <div class="mover-col">
+            <div class="mover-title text-green">领涨</div>
+            <div v-for="g in summary.market.topGainers.slice(0, 5)" :key="g.symbol" class="mover-item">
+              <span>{{ g.symbol }}</span>
+              <span class="text-green">{{ fmtChg(g.change) }}</span>
+            </div>
+          </div>
+          <div class="mover-col">
+            <div class="mover-title text-red">领跌</div>
+            <div v-for="g in summary.market.topLosers.slice(0, 5)" :key="g.symbol" class="mover-item">
+              <span>{{ g.symbol }}</span>
+              <span class="text-red">{{ fmtChg(g.change) }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 今日交易 -->
+      <div class="summary-section">
+        <div class="section-title">今日交易</div>
+        <div class="summary-grid">
+          <div class="summary-item">
+            <span class="sum-label">平仓笔数</span>
+            <span>{{ summary.trades.closedCount ?? 0 }}</span>
+          </div>
+          <div class="summary-item">
+            <span class="sum-label">今日盈亏</span>
+            <span :class="chgClass(summary.trades.todayPnl ?? 0)">{{
+              fmtNum(summary.trades.todayPnl ?? 0, true)
+            }} U</span>
+          </div>
+          <div class="summary-item">
+            <span class="sum-label">胜率</span>
+            <span>{{ (summary.trades.winRate ?? 0).toFixed(1) }}%</span>
+          </div>
+          <div class="summary-item">
+            <span class="sum-label">止损 / 跟踪止盈</span>
+            <span>{{ summary.trades.stopCount ?? 0 }} / {{ summary.trades.trailCount ?? 0 }}</span>
+          </div>
+        </div>
+        <el-table :data="summary.trades.byCoin ?? []" size="small" stripe class="coin-table">
+          <el-table-column prop="symbol" label="币种" min-width="110" />
+          <el-table-column prop="trades" label="交易次数" min-width="80" align="right" />
+          <el-table-column prop="pnl" label="盈亏(U)" min-width="100" align="right">
+            <template #default="{ row }">
+              <span :class="chgClass(row.pnl)">{{ fmtNum(row.pnl, true) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="winRate" label="胜率" min-width="80" align="right">
+            <template #default="{ row }">{{ row.winRate.toFixed(1) }}%</template>
+          </el-table-column>
+          <el-table-column prop="avgHoldMin" label="平均持仓(分)" min-width="100" align="right" />
+          <el-table-column prop="avgWinPct" label="均盈%" min-width="80" align="right">
+            <template #default="{ row }">
+              <span class="text-green">{{ fmtChg(row.avgWinPct) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="avgLossPct" label="均亏%" min-width="80" align="right">
+            <template #default="{ row }">
+              <span class="text-red">{{ fmtChg(row.avgLossPct) }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+
+      <!-- 改进建议 -->
+      <div class="summary-section" v-if="summary.suggestions.length">
+        <div class="section-title">改进建议</div>
+        <ul class="suggest-list">
+          <li v-for="(s, i) in summary.suggestions" :key="i">{{ s }}</li>
+        </ul>
       </div>
     </div>
   </div>
@@ -453,5 +629,98 @@ onUnmounted(() => {
 
 .text-neutral {
   color: var(--quant-text, #e0e0e0) !important;
+}
+
+.text-orange {
+  color: #f59e0b !important;
+}
+
+/* 行情加载状态 */
+.load-status-card .load-status-body {
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.summary-hint {
+  font-size: 12px;
+  color: var(--quant-text-secondary, #8b8fa3);
+}
+
+/* 每日总结 */
+.summary-panel {
+  width: 100%;
+}
+
+.summary-section {
+  margin-top: 16px;
+}
+
+.section-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--quant-text, #e0e0e0);
+  margin-bottom: 10px;
+  border-left: 3px solid var(--quant-primary, #4068c9);
+  padding-left: 8px;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.summary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--quant-card-sub, #171922);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+.sum-label {
+  font-size: 12px;
+  color: var(--quant-text-secondary, #8b8fa3);
+}
+
+.sum-sub {
+  font-size: 12px;
+  color: var(--quant-text-secondary, #8b8fa3);
+}
+
+.mover-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.mover-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.mover-item {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  padding: 2px 0;
+  color: var(--quant-text, #e0e0e0);
+}
+
+.coin-table {
+  margin-top: 12px;
+}
+
+.suggest-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--quant-text, #e0e0e0);
+  font-size: 13px;
+  line-height: 1.9;
 }
 </style>
