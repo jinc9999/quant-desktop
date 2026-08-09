@@ -73,6 +73,7 @@ type Engine struct {
 	onError        func(context, message string) // 后台错误回调（推送到前端弹窗）
 	lastBreakerDay string            // 上次熔断检查日期（YYYY-MM-DD），跨天时重置日熔断
 	lastTickerRefresh time.Time      // 最近一次 REST 全量行情刷新时间（WS 缺币自愈用）
+	tickerFullLogged bool            // 全量行情加载是否已写入日志（启动首次 + 缺币告警）
 
 	// klineOpenCache: symbol -> 当前 K 线周期开盘价缓存。
 	// K 线开盘价在周期内不变，只需每周期拉取一次，降低 REST 调用量（K 线信号模式用）。
@@ -493,8 +494,27 @@ func (e *Engine) fetchTickers(ctx context.Context) ([]binance.Ticker, error) {
 	// REST 回退并回填 WS 缓存，确保前端 GetPrice 有数据
 	tickers, err := e.client.FetchTickers(ctx)
 	if err == nil && len(tickers) > 0 {
+		cached := len(e.ws.GetTickers())
 		e.ws.BackfillCache(tickers)
 		e.lastTickerRefresh = time.Now()
+		// 可见性：启动首次全量加载与"WS 缓存不完整被 REST 补齐"都写入交易日志，
+		// 缺币问题发生时日志直接可见（实盘漏单事故根因的防线）。
+		if !e.tickerFullLogged || cached < minCacheSymbols {
+			msg := fmt.Sprintf("全量行情加载: REST %d 个币, WS 缓存 %d 个 → 补齐后 %d 个", len(tickers), cached, len(e.ws.GetTickers()))
+			level := "info"
+			if cached < minCacheSymbols {
+				level = "warn"
+				msg = fmt.Sprintf("⚠ 行情缓存不完整(WS %d 个 < %d)，已 REST 补齐至 %d 个", cached, minCacheSymbols, len(e.ws.GetTickers()))
+			}
+			log.Printf("[Strategy] %s", msg)
+			e.db.InsertLog(&storage.TradeLog{
+				Timestamp: time.Now().UnixMilli(),
+				Level:     level,
+				Module:    "strategy",
+				Message:   msg,
+			})
+			e.tickerFullLogged = true
+		}
 	}
 	return tickers, err
 }
