@@ -15,6 +15,10 @@ func main() {
 		fmt.Println("用法: dbdump <db路径>")
 		os.Exit(1)
 	}
+	symbolFilter := ""
+	if len(os.Args) >= 3 {
+		symbolFilter = os.Args[2]
+	}
 	db, err := sql.Open("sqlite3", "file:"+os.Args[1]+"?mode=ro&_journal_mode=WAL")
 	if err != nil {
 		fmt.Println("打开失败:", err)
@@ -233,6 +237,63 @@ func main() {
 				}
 				r.Close()
 			}
+		}
+	}
+
+	// 追加仓跳过原因日志（AddOn 诊断）
+	if hasTable(db, "trade_logs") {
+		fmt.Println("\n=== AddOn 跳过原因日志（最近 50 条）===")
+		r, err := db.Query(`SELECT datetime(timestamp/1000,'unixepoch','localtime'), ifnull(symbol,''), message
+			FROM trade_logs WHERE message LIKE '%AddOn%' ORDER BY timestamp DESC LIMIT 50`)
+		if err != nil {
+			fmt.Println("查询失败:", err)
+		} else {
+			for r.Next() {
+				var ts, sym, msg string
+				r.Scan(&ts, &sym, &msg)
+				fmt.Printf("[%s] %s %s\n", ts, sym, msg)
+			}
+			r.Close()
+		}
+	}
+
+	// OPEN 持仓明细（追加仓诊断）
+	if hasTable(db, "positions") {
+		fmt.Println("\n=== OPEN 持仓（全部）===")
+		r, err := db.Query(`SELECT symbol, side, round(entry_price,8), round(amount,6), trailing_active,
+			round(current_stop_price,8), datetime(opened_at/1000,'unixepoch','localtime')
+			FROM positions WHERE status='OPEN' ORDER BY opened_at DESC`)
+		if err != nil {
+			fmt.Println("查询失败:", err)
+		} else {
+			for r.Next() {
+				var sym, side, ot string
+				var ep, amt, stop float64
+				var ta bool
+				r.Scan(&sym, &side, &ep, &amt, &ta, &stop, &ot)
+				fmt.Printf("%-12s %-4s 入=%v 量=%v 跟踪激活=%v 止损=%v 开=%s\n", sym, side, ep, amt, ta, stop, ot)
+			}
+			r.Close()
+		}
+	}
+
+	// 指定币种的委托明细（追加仓诊断）
+	if symbolFilter != "" && hasTable(db, "orders") {
+		fmt.Printf("\n=== %s 委托明细 ===\n", symbolFilter)
+		r, err := db.Query(`SELECT order_type, status, round(stop_price,8), round(activation_price,8),
+			round(callback_rate,4), round(amount,6), datetime(created_at/1000,'unixepoch','localtime'), algo_id
+			FROM orders WHERE symbol=? ORDER BY created_at DESC LIMIT 20`, symbolFilter)
+		if err != nil {
+			fmt.Println("查询失败:", err)
+		} else {
+			for r.Next() {
+				var typ, st, ct string
+				var sp, ap, cb, amt float64
+				var algo int64
+				r.Scan(&typ, &st, &sp, &ap, &cb, &amt, &ct, &algo)
+				fmt.Printf("  %-22s %-10s stop=%v act=%v cb=%v qty=%v 创建=%s algo=%d\n", typ, st, sp, ap, cb, amt, ct, algo)
+			}
+			r.Close()
 		}
 	}
 }
