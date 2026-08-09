@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -378,6 +380,228 @@ func (s *QuantService) GetProxyConfig() map[string]interface{} {
 	}
 }
 
+// GetTickerLoadStatus 返回全量行情加载状态（供前端展示行情加载信息）
+func (s *QuantService) GetTickerLoadStatus() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	msg := ""
+	if s.engine != nil {
+		msg = s.engine.TickerLoadMsg()
+	}
+	return map[string]string{"message": msg}
+}
+
+func round2(v float64) float64 { return math.Round(v*100) / 100 }
+func round1(v float64) float64 { return math.Round(v*10) / 10 }
+func round0(v float64) float64 { return math.Round(v) }
+func safePct(a, b int) float64 {
+	if b <= 0 {
+		return 0
+	}
+	return float64(a) / float64(b) * 100
+}
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// GetDailySummary 生成「每日总结」：市场趋势 + 单币盈亏 + 改进建议
+func (s *QuantService) GetDailySummary() map[string]interface{} {
+	res := map[string]interface{}{
+		"market":      map[string]interface{}{},
+		"trades":      map[string]interface{}{},
+		"suggestions": []string{},
+	}
+	if s.client == nil {
+		return res
+	}
+
+	// ---- 市场概况（当前全市场 24h 行情快照）----
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	tickers, tErr := s.client.FetchTickers(ctx)
+	if tErr == nil && len(tickers) > 0 {
+		up, down, total := 0, 0, 0
+		var sumChg, sumVol float64
+		chgs := make([]float64, 0, len(tickers))
+		type mv struct {
+			Symbol string
+			Change float64
+			Volume float64
+		}
+		gainers, losers := []mv{}, []mv{}
+		for _, t := range tickers {
+			total++
+			sumChg += t.PriceChange
+			sumVol += t.QuoteVolume
+			chgs = append(chgs, t.PriceChange)
+			if t.PriceChange > 0 {
+				up++
+			} else if t.PriceChange < 0 {
+				down++
+			}
+			if t.QuoteVolume >= 1e7 {
+				if len(gainers) < 8 || t.PriceChange > gainers[len(gainers)-1].Change {
+					gainers = append(gainers, mv{t.Symbol, t.PriceChange, t.QuoteVolume})
+					sort.Slice(gainers, func(i, j int) bool { return gainers[i].Change > gainers[j].Change })
+					if len(gainers) > 8 {
+						gainers = gainers[:8]
+					}
+				}
+				if len(losers) < 8 || t.PriceChange < losers[len(losers)-1].Change {
+					losers = append(losers, mv{t.Symbol, t.PriceChange, t.QuoteVolume})
+					sort.Slice(losers, func(i, j int) bool { return losers[i].Change < losers[j].Change })
+					if len(losers) > 8 {
+						losers = losers[:8]
+					}
+				}
+			}
+		}
+		median := 0.0
+		if len(chgs) > 0 {
+			sort.Float64s(chgs)
+			median = chgs[len(chgs)/2]
+		}
+		gainList := make([]map[string]interface{}, 0, len(gainers))
+		for _, g := range gainers {
+			gainList = append(gainList, map[string]interface{}{"symbol": g.Symbol, "change": round2(g.Change), "volume": round0(g.Volume)})
+		}
+		lossList := make([]map[string]interface{}, 0, len(losers))
+		for _, l := range losers {
+			lossList = append(lossList, map[string]interface{}{"symbol": l.Symbol, "change": round2(l.Change), "volume": round0(l.Volume)})
+		}
+		res["market"] = map[string]interface{}{
+			"total":           total,
+			"up":              up,
+			"down":            down,
+			"medianChange":    round2(median),
+			"avgChange":       round2(sumChg / float64(maxInt(total, 1))),
+			"totalQuoteVolume": round0(sumVol),
+			"topGainers":      gainList,
+			"topLosers":       lossList,
+		}
+	}
+
+	// ---- 今日交易：单币盈亏聚合 ----
+	var positions []storage.Position
+	if s.db != nil {
+		positions, _ = s.db.GetTodayClosedPositions()
+	}
+	type coinAgg struct {
+		Symbol  string
+		Trades  int
+		PnL     float64
+		Wins    int
+		HoldMin float64
+		WinPct  float64
+		LossPct float64
+	}
+	byCoin := map[string]*coinAgg{}
+	order := []string{}
+	for _, p := range positions {
+		pnl := 0.0
+		if p.RealizedPnl != nil {
+			pnl = *p.RealizedPnl
+		}
+		ca, ok := byCoin[p.Symbol]
+		if !ok {
+			ca = &coinAgg{Symbol: p.Symbol}
+			byCoin[p.Symbol] = ca
+			order = append(order, p.Symbol)
+		}
+		ca.Trades++
+		ca.PnL += pnl
+		if pnl > 0 {
+			ca.Wins++
+		}
+		if p.OpenedAt > 0 && p.ClosedAt != nil && *p.ClosedAt > p.OpenedAt {
+			ca.HoldMin += float64(*p.ClosedAt-p.OpenedAt) / 60000
+		}
+		if p.EntryPrice > 0 && p.ExitPrice != nil && *p.ExitPrice > 0 {
+			pct := (*p.ExitPrice - p.EntryPrice) / p.EntryPrice * 100
+			if pnl > 0 {
+				ca.WinPct += pct
+			} else {
+				ca.LossPct += pct
+			}
+		}
+	}
+	sort.Slice(order, func(i, j int) bool { return byCoin[order[i]].PnL > byCoin[order[j]].PnL })
+	coinList := []map[string]interface{}{}
+	for _, sym := range order {
+		ca := byCoin[sym]
+		coinList = append(coinList, map[string]interface{}{
+			"symbol":     ca.Symbol,
+			"trades":     ca.Trades,
+			"pnl":        round2(ca.PnL),
+			"winRate":    round1(safePct(ca.Wins, ca.Trades)),
+			"avgHoldMin": round1(ca.HoldMin / float64(maxInt(ca.Trades, 1))),
+			"avgWinPct":  round2(ca.WinPct / float64(maxInt(ca.Wins, 1))),
+			"avgLossPct": round2(ca.LossPct / float64(maxInt(ca.Trades-ca.Wins, 1))),
+		})
+	}
+
+	totalPnl, winCount, stopCount, trailCount, trailLoss := 0.0, 0, 0, 0, 0
+	for _, p := range positions {
+		pnl := 0.0
+		if p.RealizedPnl != nil {
+			pnl = *p.RealizedPnl
+		}
+		totalPnl += pnl
+		if pnl > 0 {
+			winCount++
+		}
+		if p.CloseReason != nil && *p.CloseReason == "STOP_LOSS" {
+			stopCount++
+		}
+		if p.CloseReason != nil && *p.CloseReason == "TRAILING_STOP" {
+			trailCount++
+			if pnl <= 0 {
+				trailLoss++
+			}
+		}
+	}
+	res["trades"] = map[string]interface{}{
+		"closedCount": len(positions),
+		"todayPnl":    round2(totalPnl),
+		"winRate":     round1(safePct(winCount, len(positions))),
+		"stopCount":   stopCount,
+		"trailCount":  trailCount,
+		"byCoin":      coinList,
+	}
+
+	// ---- 改进建议（规则化）----
+	sugg := []string{}
+	if len(positions) == 0 {
+		sugg = append(sugg, "今日暂无已平仓交易，等待行情与信号即可。")
+	} else {
+		wr := safePct(winCount, len(positions))
+		if wr < 45 {
+			sugg = append(sugg, fmt.Sprintf("今日胜率偏低（%.1f%%），追涨在冲高回落行情中易吃止损；日亏熔断已兜底，建议保持小仓观察。", wr))
+		} else {
+			sugg = append(sugg, fmt.Sprintf("今日胜率 %.1f%%，盈亏结构健康，维持现有 S01 v2 参数。", wr))
+		}
+		if trailCount > 0 && float64(trailLoss)/float64(trailCount) > 0.3 {
+			sugg = append(sugg, fmt.Sprintf("跟踪止盈小亏占比偏高（%d/%d），进场多处于浅冲阶段；请确认行情加载完整（启动日志应显示约 700 币）。", trailLoss, trailCount))
+		}
+		if stopCount > 8 {
+			sugg = append(sugg, fmt.Sprintf("今日止损 %d 笔，检查是否频繁追高；单笔止损 4%% 内为正常成本，避免因单日波动改参数。", stopCount))
+		}
+	}
+	if m, ok := res["market"].(map[string]interface{}); ok {
+		if up, ok := m["up"].(int); ok {
+			if down, ok := m["down"].(int); ok && down > up {
+				sugg = append(sugg, fmt.Sprintf("市场偏弱：上涨 %d / 下跌 %d，追涨胜率通常下降，可考虑适当降低开仓频率。", up, down))
+			}
+		}
+	}
+	sugg = append(sugg, "风险提示：实盘仅用验证过的 S01 v2 参数，任何参数改动必须先回测后实盘。")
+	res["suggestions"] = sugg
+	return res
+}
+
 // TestConnection 测试当前 API Key 认证是否可用（只读，绝不下单）。
 // 直接以标准签名请求账户只读接口，返回完整诊断结果（含 request ip）。
 // 前端「测试连接」按钮调用，用于快速定位 Key 认证问题。
@@ -501,6 +725,7 @@ func (s *QuantService) GetDashboardData() map[string]interface{} {
 	if s.engine != nil {
 		tickCount = s.engine.GetTickCount()
 		tickErrorCount = s.engine.GetTickErrorCount()
+		data["tickerLoadMsg"] = s.engine.TickerLoadMsg()
 		st := s.engine.GetStartTime()
 		if !st.IsZero() {
 			startTimeMs = st.UnixMilli()

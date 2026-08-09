@@ -33,6 +33,9 @@ const openBlockedDuration = 12 * time.Hour
 // 强平模式解除需要时间，每 Tick 重试会刷屏报错；3 分钟重试一次兼顾保护与安静。
 const closeRetryInterval = 3 * time.Minute
 
+// takerFeeRate 手续费兜底费率（单边 0.05% taker，交易所真实佣金优先，查不到时用）
+const takerFeeRate = 0.0005
+
 // structuralOpenErrors 结构性开仓失败错误码集合：
 // 命中任一错误码说明该币种在当前配置（杠杆/保证金/仓位规模）下短期内无法开仓，
 // 命中后拉黑该币种 openBlockedDuration，避免周期性重试刷屏。
@@ -74,6 +77,7 @@ type Engine struct {
 	lastBreakerDay string            // 上次熔断检查日期（YYYY-MM-DD），跨天时重置日熔断
 	lastTickerRefresh time.Time      // 最近一次 REST 全量行情刷新时间（WS 缺币自愈用）
 	tickerFullLogged bool            // 全量行情加载是否已写入日志（启动首次 + 缺币告警）
+	tickerLoadMsg string             // 最近一次全量行情加载信息（供前端展示）
 
 	// klineOpenCache: symbol -> 当前 K 线周期开盘价缓存。
 	// K 线开盘价在周期内不变，只需每周期拉取一次，降低 REST 调用量（K 线信号模式用）。
@@ -513,10 +517,20 @@ func (e *Engine) fetchTickers(ctx context.Context) ([]binance.Ticker, error) {
 				Module:    "strategy",
 				Message:   msg,
 			})
+			e.mu.Lock()
+			e.tickerLoadMsg = msg
+			e.mu.Unlock()
 			e.tickerFullLogged = true
 		}
 	}
 	return tickers, err
+}
+
+// TickerLoadMsg 返回最近一次全量行情加载信息（供前端「行情加载状态」展示）
+func (e *Engine) TickerLoadMsg() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.tickerLoadMsg
 }
 
 // buildKlineOpenMap 为 K 线信号模式构建「当前周期 K 线开盘价」映射。
@@ -1307,10 +1321,11 @@ func (e *Engine) closePosition(ctx context.Context, pos *storage.Position, curre
 
 	// 市价平仓（根据方向选择平多或平空）
 	var closeErr error
+	var closeRes *binance.OrderResult
 	if pos.Side == "SHORT" {
-		_, closeErr = e.client.CloseShort(ctx, pos.Symbol, pos.Amount)
+		closeRes, closeErr = e.client.CloseShort(ctx, pos.Symbol, pos.Amount)
 	} else {
-		_, closeErr = e.client.CloseLong(ctx, pos.Symbol, pos.Amount)
+		closeRes, closeErr = e.client.CloseLong(ctx, pos.Symbol, pos.Amount)
 	}
 	if closeErr != nil {
 		// -2022（ReduceOnly Order is rejected）说明交易所已无此持仓：
@@ -1422,8 +1437,19 @@ func (e *Engine) closePosition(ctx context.Context, pos *storage.Position, curre
 		pnl = (exitPrice - pos.EntryPrice) * pos.Amount
 	}
 
+	// 手续费：优先按真实成交单查询交易所佣金；查不到时按名义价值×费率兜底
+	fee := 0.0
+	if closeRes != nil && closeRes.OrderID > 0 {
+		if f, ferr := e.client.GetOrderFee(ctx, pos.Symbol, closeRes.OrderID); ferr == nil {
+			fee = f
+		}
+	}
+	if fee <= 0 {
+		fee = (pos.Amount*pos.EntryPrice + pos.Amount*exitPrice) * takerFeeRate
+	}
+
 	// 更新数据库
-	_ = e.db.ClosePosition(pos.ID, reason, pnl, &exitPrice, 0)
+	_ = e.db.ClosePosition(pos.ID, reason, pnl, &exitPrice, fee)
 
 	msg := fmt.Sprintf("平仓 %s reason=%s exit=%.6f pnl=%.2f", pos.Symbol, reason, exitPrice, pnl)
 	log.Printf("[Strategy] %s 持仓ID=%d", msg, pos.ID)

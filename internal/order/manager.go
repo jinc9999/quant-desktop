@@ -570,10 +570,22 @@ func (m *Manager) handleFilledOrder(ctx context.Context, localOrder *storage.Ord
 	exitPrice := info.FilledPrice
 
 	// 查询平仓手续费（失败时降级为 0，不阻断平仓）
-	fee, err := m.client.GetOrderFee(ctx, localOrder.Symbol, localOrder.ExchangeOrderID)
-	if err != nil {
-		log.Printf("[ORDER] 查询手续费失败 positionID=%d: %v", localOrder.PositionID, err)
+	// 注意：条件单的 ExchangeOrderID 是算法单 ID，不是真实成交订单 ID，
+	// 必须用 ActualOrderID 查询佣金，否则手续费恒为 0（历史 bug）。
+	feeOrderID := localOrder.ExchangeOrderID
+	if info.ActualOrderID > 0 {
+		feeOrderID = info.ActualOrderID
+	}
+	fee, feeErr := m.client.GetOrderFee(ctx, localOrder.Symbol, feeOrderID)
+	if feeErr != nil || fee <= 0 {
+		if feeErr != nil {
+			log.Printf("[ORDER] 查询手续费失败 positionID=%d: %v", localOrder.PositionID, feeErr)
+		}
+		// 兜底：按开仓+平仓名义价值 × 单边 0.05% taker 估算
 		fee = 0
+		if pos != nil && info.FilledPrice > 0 {
+			fee = (pos.Amount*pos.EntryPrice + pos.Amount*info.FilledPrice) * 0.0005
+		}
 	}
 
 	// 平仓（幂等：仅 OPEN 状态生效）

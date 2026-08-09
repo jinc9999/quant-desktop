@@ -214,3 +214,34 @@ func (db *DB) GetClosedPositions(limit int) ([]Position, error) {
 	}
 	return positions, nil
 }
+
+// GetTodayClosedPositions 返回今日（本地零点起）已平仓记录，供「每日总结」使用
+func (db *DB) GetTodayClosedPositions() ([]Position, error) {
+	now := time.Now()
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	rows, err := db.Conn.Query(
+		`SELECT id, symbol, side, entry_price, amount, leverage,
+		 highest_price, trailing_active, current_stop_price, status,
+		 opened_at, closed_at, close_reason, realized_pnl, exit_price, fee
+		 FROM positions WHERE status = 'CLOSED' AND closed_at >= ?
+		 ORDER BY closed_at DESC`,
+		todayStart.UnixMilli(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	positions := []Position{}
+	for rows.Next() {
+		var p Position
+		if err := rows.Scan(&p.ID, &p.Symbol, &p.Side, &p.EntryPrice,
+			&p.Amount, &p.Leverage, &p.HighestPrice, &p.TrailingActive,
+			&p.CurrentStopPrice, &p.Status, &p.OpenedAt, &p.ClosedAt,
+			&p.CloseReason, &p.RealizedPnl, &p.ExitPrice, &p.Fee); err != nil {
+			return nil, err
+		}
+		positions = append(positions, p)
+	}
+	return positions, nil
+}
