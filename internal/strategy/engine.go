@@ -78,6 +78,7 @@ type Engine struct {
 	lastTickerRefresh time.Time      // 最近一次 REST 全量行情刷新时间（WS 缺币自愈用）
 	tickerFullLogged bool            // 全量行情加载是否已写入日志（启动首次 + 缺币告警）
 	tickerLoadMsg string             // 最近一次全量行情加载信息（供前端展示）
+	mode          string             // 引擎所属模式（SIMULATION/LIVE），自动记录每日总结用
 
 	// klineOpenCache: symbol -> 当前 K 线周期开盘价缓存。
 	// K 线开盘价在周期内不变，只需每周期拉取一次，降低 REST 调用量（K 线信号模式用）。
@@ -371,6 +372,11 @@ func (e *Engine) runOnce(ctx context.Context) {
 	// 跨天时重置日熔断（新的一天重新累计日亏）
 	e.checkBreakerReset(time.Now())
 
+	// 每小时自动记录当日盈亏历史（每日总结趋势图数据源）
+	if e.tickCount%240 == 0 {
+		e.autoSaveDailySummary()
+	}
+
 	// 1. 获取行情（P2：优先 WS 全量缓存，空则回退 REST）
 	fetchStart := time.Now()
 	tickers, err := e.fetchTickers(ctx)
@@ -531,6 +537,49 @@ func (e *Engine) TickerLoadMsg() string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 	return e.tickerLoadMsg
+}
+
+// SetMode 设置引擎所属模式（SIMULATION/LIVE），用于自动记录每日总结历史
+func (e *Engine) SetMode(mode string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.mode = mode
+}
+
+// autoSaveDailySummary 每小时自动记录当日盈亏历史（summary_type=auto，每日总结趋势图数据源）
+func (e *Engine) autoSaveDailySummary() {
+	if e.db == nil || e.mode == "" {
+		return
+	}
+	positions, err := e.db.GetTodayClosedPositions()
+	if err != nil {
+		return
+	}
+	totalPnl, winCount := 0.0, 0
+	for _, p := range positions {
+		if p.RealizedPnl != nil {
+			totalPnl += *p.RealizedPnl
+			if *p.RealizedPnl > 0 {
+				winCount++
+			}
+		}
+	}
+	winRate := 0.0
+	if len(positions) > 0 {
+		winRate = float64(winCount) / float64(len(positions)) * 100
+	}
+	sum := &storage.DailySummary{
+		Mode:        e.mode,
+		SummaryDate: time.Now().Format("2006-01-02"),
+		SummaryType: "auto",
+		TodayPnl:    totalPnl,
+		WinRate:     winRate,
+		TradeCount:  len(positions),
+		FeatureJSON: "{}",
+	}
+	if _, _, err := e.db.SaveDailySummary(sum); err != nil {
+		log.Printf("[Strategy] 自动记录每日盈亏失败: %v", err)
+	}
 }
 
 // buildKlineOpenMap 为 K 线信号模式构建「当前周期 K 线开盘价」映射。

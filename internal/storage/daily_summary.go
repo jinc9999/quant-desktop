@@ -37,8 +37,8 @@ func ValidateDailySummary(s *DailySummary) error {
 	if !dateRe.MatchString(s.SummaryDate) {
 		return fmt.Errorf("日期格式必须为 YYYY-MM-DD: %q", s.SummaryDate)
 	}
-	if s.SummaryType != "daily" && s.SummaryType != "weekly" {
-		return fmt.Errorf("总结类型仅支持 daily/weekly: %q", s.SummaryType)
+	if s.SummaryType != "daily" && s.SummaryType != "weekly" && s.SummaryType != "auto" {
+		return fmt.Errorf("总结类型仅支持 daily/weekly/auto: %q", s.SummaryType)
 	}
 	if s.Mode != "SIMULATION" && s.Mode != "LIVE" {
 		return fmt.Errorf("模式仅支持 SIMULATION/LIVE: %q", s.Mode)
@@ -61,8 +61,8 @@ func ValidateDailySummary(s *DailySummary) error {
 			return fmt.Errorf("feature_json 必须为合法 JSON: %v", err)
 		}
 	}
-	// 内容完整性：日期 + 类型 + 至少一项正文
-	if s.MarketNotes == "" && s.CoinAnalysis == "" && s.Suggestions == "" {
+	// 内容完整性：日期 + 类型 + 至少一项正文（auto=系统自动记录，无正文要求）
+	if s.SummaryType != "auto" && s.MarketNotes == "" && s.CoinAnalysis == "" && s.Suggestions == "" {
 		return fmt.Errorf("市场概况、单币分析、改进建议至少填写一项")
 	}
 	return nil

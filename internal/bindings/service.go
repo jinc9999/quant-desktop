@@ -821,6 +821,7 @@ func (s *QuantService) StartStrategy() string {
 
 	// 创建引擎（集成委托管理器）
 	s.engine = strategy.NewEngine(s.cfg, s.client, s.ws, s.db, s.orderMgr)
+	s.engine.SetMode(s.mode)
 	s.engine.SetOnError(s.emitBackendError)
 
 	// 按最新配置重建熔断器（用户可能已修改 DailyLossLimitPct/MaxDrawdownPct），

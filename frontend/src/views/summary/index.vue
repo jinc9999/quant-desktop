@@ -3,18 +3,17 @@
  * 每日总结 - 系统自动生成（市场概况 + 双模式交易总结 + 改进建议）
  * 手动备注为可选补充，保存后进入历史记录；支持模拟盘/实盘自动切换
  */
-import { ref, reactive, computed, watch, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onUnmounted } from "vue";
 import * as echarts from "echarts";
 import { QuantService } from "../../../bindings/quant-desktop/internal/bindings";
 import { callService } from "../../utils/service";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElMessage } from "element-plus";
 
 defineOptions({ name: "Summary" });
 
 const mode = ref("SIMULATION");
 const activeMode = ref("SIMULATION");
 const loading = ref(false);
-const saving = ref(false);
 const list = ref<any[]>([]);
 const auto = ref<any>({ market: {}, modes: {}, currentMode: "SIMULATION" });
 
@@ -24,23 +23,7 @@ const modeSummary = computed(() => {
   return modes[activeMode.value] || { trades: {}, suggestions: [] };
 });
 
-/** 可选补充备注（非必填） */
-const notes = reactive({
-  summaryDate: new Date().toISOString().slice(0, 10),
-  summaryType: "daily",
-  marketNotes: "",
-  coinAnalysis: "",
-  suggestions: "",
-  todayPnl: 0,
-  winRate: 0,
-  tradeCount: 0,
-  rating: 0,
-  featureJson: "{}"
-});
-
-const draftKey = computed(() => `daily_summary_draft_${mode.value}`);
-const typeLabel = (t: string) => (t === "weekly" ? "周结" : "每日");
-let saveTimer: ReturnType<typeof setTimeout> | null = null;
+const typeLabel = (t: string) => (t === "weekly" ? "周结" : t === "auto" ? "自动" : "每日");
 let listTimer: ReturnType<typeof setInterval> | null = null;
 let chart: echarts.ECharts | null = null;
 
@@ -48,28 +31,6 @@ async function loadMode() {
   const res = await callService(() => QuantService.GetMode(), { silent: true });
   if (res) mode.value = res;
 }
-
-function saveDraft() {
-  try {
-    localStorage.setItem(draftKey.value, JSON.stringify(notes));
-  } catch {}
-}
-
-function restoreDraft() {
-  try {
-    const raw = localStorage.getItem(draftKey.value);
-    if (raw) Object.assign(notes, JSON.parse(raw));
-  } catch {}
-}
-
-watch(
-  notes,
-  () => {
-    if (saveTimer) clearTimeout(saveTimer);
-    saveTimer = setTimeout(saveDraft, 1500);
-  },
-  { deep: true }
-);
 
 /** 拉取系统自动总结（市场全局 + 模拟盘/实盘双模式） */
 async function fetchAuto() {
@@ -116,67 +77,6 @@ function renderChart() {
   );
 }
 
-/** 保存可选备注（写入当前模式库） */
-async function saveNotes() {
-  if (!notes.summaryDate) {
-    ElMessage.warning("请选择日期");
-    return;
-  }
-  saving.value = true;
-  const res = await callService(() => QuantService.SaveDailySummary({ ...notes }), {
-    silent: false
-  });
-  saving.value = false;
-  if (res && res.ok) {
-    ElMessage.success(res.message || "备注已保存");
-    localStorage.removeItem(draftKey.value);
-    await fetchList();
-  } else {
-    ElMessage.error(res?.message || "保存失败");
-  }
-}
-
-async function edit(row: any) {
-  const res = await callService(() => QuantService.GetDailySummaryByID(row.id), {
-    silent: true
-  });
-  if (res && res.ok && res.item) {
-    const it = res.item;
-    Object.assign(notes, {
-      summaryDate: it.summaryDate,
-      summaryType: it.summaryType || "daily",
-      marketNotes: it.marketNotes || "",
-      coinAnalysis: it.coinAnalysis || "",
-      suggestions: it.suggestions || "",
-      todayPnl: it.todayPnl ?? 0,
-      winRate: it.winRate ?? 0,
-      tradeCount: it.tradeCount ?? 0,
-      rating: it.rating ?? 0,
-      featureJson: it.featureJson || "{}"
-    });
-    ElMessage.success("已载入编辑，保存后覆盖该日期记录");
-  }
-}
-
-async function remove(row: any) {
-  try {
-    await ElMessageBox.confirm(`确定删除 ${row.summaryDate} 的备注？`, "删除确认", {
-      type: "warning",
-      confirmButtonText: "删除",
-      cancelButtonText: "取消"
-    });
-  } catch {
-    return;
-  }
-  const res = await callService(() => QuantService.DeleteDailySummary(row.id), {
-    silent: false
-  });
-  if (res && res.ok) {
-    ElMessage.success("已删除");
-    fetchList();
-  }
-}
-
 function fmtNum(v: number, signed = false): string {
   if (v === null || v === undefined || isNaN(v)) return "--";
   const s = Math.abs(v).toFixed(2);
@@ -204,7 +104,6 @@ function chgClass(v: number): string {
 
 onMounted(async () => {
   await loadMode();
-  restoreDraft();
   await fetchAuto();
   await fetchList();
   listTimer = setInterval(() => {
@@ -216,7 +115,6 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (listTimer) clearInterval(listTimer);
-  if (saveTimer) clearTimeout(saveTimer);
   window.removeEventListener("resize", () => chart && chart.resize());
   if (chart) {
     chart.dispose();
@@ -337,63 +235,11 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 可选补充备注 + 历史 -->
-    <div class="quant-card notes-card">
-      <details>
-        <summary class="notes-summary">补充备注（可选）— 手动记录市场观察，保存后进入历史</summary>
-        <div class="notes-body">
-          <div class="notes-grid">
-            <el-date-picker
-              v-model="notes.summaryDate"
-              type="date"
-              value-format="YYYY-MM-DD"
-              placeholder="选择日期"
-              style="width: 160px"
-            />
-            <el-radio-group v-model="notes.summaryType">
-              <el-radio-button value="daily">每日</el-radio-button>
-              <el-radio-button value="weekly">周结</el-radio-button>
-            </el-radio-group>
-            <el-input-number v-model="notes.todayPnl" :precision="2" placeholder="盈亏(U)" />
-            <el-input-number v-model="notes.winRate" :min="0" :max="100" :precision="1" placeholder="胜率%" />
-            <el-input-number v-model="notes.tradeCount" :min="0" placeholder="交易次数" />
-            <el-rate v-model="notes.rating" :max="10" />
-          </div>
-          <el-input
-            v-model="notes.marketNotes"
-            type="textarea"
-            :rows="2"
-            placeholder="市场观察备注（可选）"
-            class="notes-input"
-          />
-          <el-input
-            v-model="notes.coinAnalysis"
-            type="textarea"
-            :rows="2"
-            placeholder="单币分析备注（可选）"
-            class="notes-input"
-          />
-          <el-input
-            v-model="notes.suggestions"
-            type="textarea"
-            :rows="2"
-            placeholder="建议备注（可选）"
-            class="notes-input"
-          />
-          <div class="notes-actions">
-            <el-button type="primary" size="small" :loading="saving" @click="saveNotes">
-              保存备注
-            </el-button>
-            <span class="draft-hint">✎ 自动存草稿到本机</span>
-          </div>
-        </div>
-      </details>
-    </div>
-
     <!-- 历史 + 趋势图 -->
     <div class="quant-card">
       <div class="card-header">
-        <h2 class="card-title">备注历史与盈亏趋势（{{ list.length }}）</h2>
+        <h2 class="card-title">每日盈亏历史（系统自动记录，{{ list.length }} 天）</h2>
+        <span class="summary-hint">运行中每小时自动更新当天记录</span>
       </div>
       <div id="pnl-chart" class="chart-box"></div>
       <el-table :data="list" v-loading="loading" size="small" stripe class="history-table">
@@ -408,15 +254,13 @@ onUnmounted(() => {
         </el-table-column>
         <el-table-column prop="winRate" label="胜率%" min-width="80" align="right" />
         <el-table-column prop="tradeCount" label="交易" min-width="70" align="right" />
-        <el-table-column prop="rating" label="评分" min-width="70" align="center" />
-        <el-table-column label="操作" width="130" align="center" fixed="right">
+        <el-table-column label="更新时间" min-width="160">
           <template #default="{ row }">
-            <el-button link type="primary" size="small" @click="edit(row)">编辑</el-button>
-            <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
+            {{ new Date(row.updatedAt).toLocaleString("zh-CN", { hour12: false }) }}
           </template>
         </el-table-column>
         <template #empty>
-          <div class="empty-state">暂无备注记录</div>
+          <div class="empty-state">暂无历史记录，策略运行约 1 小时后自动生成</div>
         </template>
       </el-table>
     </div>

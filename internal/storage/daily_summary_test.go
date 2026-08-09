@@ -74,3 +74,28 @@ func TestDailySummary_Validate(t *testing.T) {
 		}
 	}
 }
+
+// TestDailySummary_AutoType 系统自动记录（auto）：无正文也可保存，且与 manual 记录互不覆盖
+func TestDailySummary_AutoType(t *testing.T) {
+	db := newTestDB(t)
+	auto := &DailySummary{
+		Mode: "SIMULATION", SummaryDate: "2026-08-09", SummaryType: "auto",
+		TodayPnl: -5.2, WinRate: 40, TradeCount: 12, FeatureJSON: "{}",
+	}
+	id, _, err := db.SaveDailySummary(auto)
+	if err != nil || id <= 0 {
+		t.Fatalf("auto 类型空正文应可保存: id=%d err=%v", id, err)
+	}
+	manual := &DailySummary{
+		Mode: "SIMULATION", SummaryDate: "2026-08-09", SummaryType: "daily",
+		MarketNotes: "手动备注", CoinAnalysis: "x", Suggestions: "x",
+	}
+	id2, _, err := db.SaveDailySummary(manual)
+	if err != nil || id2 <= 0 || id2 == id {
+		t.Fatalf("auto 与 manual 应分别存储: id=%d id2=%d err=%v", id, id2, err)
+	}
+	list, err := db.GetDailySummaries("SIMULATION", "", "", "all")
+	if err != nil || len(list) != 2 {
+		t.Fatalf("应查到 2 条（auto+manual）: len=%d err=%v", len(list), err)
+	}
+}
