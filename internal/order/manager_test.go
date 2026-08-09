@@ -101,7 +101,7 @@ func TestPlaceStopOrders_DryRun(t *testing.T) {
 	pos := insertTestPosition(t, db)
 	cfg := testStrategyConfig()
 
-	err := mgr.PlaceStopOrders(context.Background(), pos, cfg)
+	err := mgr.PlaceStopOrders(context.Background(), pos, cfg, 0)
 	if err != nil {
 		t.Fatalf("PlaceStopOrders 返回错误: %v", err)
 	}
@@ -151,12 +151,12 @@ func TestPlaceStopOrders_Idempotent(t *testing.T) {
 	ctx := context.Background()
 
 	// 第一次挂单
-	if err := mgr.PlaceStopOrders(ctx, pos, cfg); err != nil {
+	if err := mgr.PlaceStopOrders(ctx, pos, cfg, 0); err != nil {
 		t.Fatalf("第一次 PlaceStopOrders 失败: %v", err)
 	}
 
 	// 第二次挂单（应被幂等检查跳过）
-	if err := mgr.PlaceStopOrders(ctx, pos, cfg); err != nil {
+	if err := mgr.PlaceStopOrders(ctx, pos, cfg, 0); err != nil {
 		t.Fatalf("第二次 PlaceStopOrders 失败: %v", err)
 	}
 
@@ -180,7 +180,7 @@ func TestPlaceStopOrders_DBInsertFailureRollsBack(t *testing.T) {
 
 	// 注入第一次 InsertOrder（止损单登记）失败，验证补偿取消 + 回滚路径
 	mgr.insertOrderHook = func() error { return fmt.Errorf("injected db failure") }
-	err := mgr.PlaceStopOrders(context.Background(), pos, cfg)
+	err := mgr.PlaceStopOrders(context.Background(), pos, cfg, 0)
 	if err == nil {
 		t.Fatal("DB 写入失败时 PlaceStopOrders 应返回错误")
 	}
@@ -208,7 +208,7 @@ func TestCancelRelatedOrders(t *testing.T) {
 	cfg := testStrategyConfig()
 	ctx := context.Background()
 
-	if err := mgr.PlaceStopOrders(ctx, pos, cfg); err != nil {
+	if err := mgr.PlaceStopOrders(ctx, pos, cfg, 0); err != nil {
 		t.Fatalf("PlaceStopOrders 失败: %v", err)
 	}
 
@@ -234,7 +234,7 @@ func TestSyncOrders_DryRun(t *testing.T) {
 	cfg := testStrategyConfig()
 	ctx := context.Background()
 
-	if err := mgr.PlaceStopOrders(ctx, pos, cfg); err != nil {
+	if err := mgr.PlaceStopOrders(ctx, pos, cfg, 0); err != nil {
 		t.Fatalf("PlaceStopOrders 失败: %v", err)
 	}
 
@@ -315,7 +315,7 @@ func TestFilledCloseLoop_DryRun(t *testing.T) {
 	ctx := context.Background()
 
 	// 1. 开仓后挂出止损保护委托（STOP_MARKET + TRAILING_STOP_MARKET）
-	if err := mgr.PlaceStopOrders(ctx, pos, cfg); err != nil {
+	if err := mgr.PlaceStopOrders(ctx, pos, cfg, 0); err != nil {
 		t.Fatalf("PlaceStopOrders 失败: %v", err)
 	}
 
@@ -411,7 +411,7 @@ func TestOnCloseFiredOnFilledClose(t *testing.T) {
 		closed = append(closed, [2]string{symbol, reason})
 	}
 
-	if err := mgr.PlaceStopOrders(ctx, pos, cfg); err != nil {
+	if err := mgr.PlaceStopOrders(ctx, pos, cfg, 0); err != nil {
 		t.Fatalf("PlaceStopOrders 失败: %v", err)
 	}
 	orders, err := db.GetActiveOrders()
@@ -451,6 +451,44 @@ func TestOnCloseFiredOnFilledClose(t *testing.T) {
 	}
 }
 
+// TestComputeStopPrices_Clamp 验证止损价/激活价的防 -2021 钳制：
+// 现价已穿越触发价时，将价格钳到现价外侧；无行情（currentPrice=0）时保持原值。
+func TestComputeStopPrices_Clamp(t *testing.T) {
+	approx := func(name string, got, want float64) {
+		t.Helper()
+		if got < want-1e-9 || got > want+1e-9 {
+			t.Fatalf("%s: got=%v want=%v", name, got, want)
+		}
+	}
+	// LONG 正常：入场 100，现价 100 → 止损 96，激活 102
+	sp, ap := computeStopPrices("LONG", 100, 0.04, 0.02, 100)
+	approx("LONG 正常-止损", sp, 96)
+	approx("LONG 正常-激活", ap, 102)
+
+	// LONG 现价已涨 5%（105）：激活价应钳到 105*1.002，止损保持 96
+	sp, ap = computeStopPrices("LONG", 100, 0.04, 0.02, 105)
+	approx("LONG 上涨-激活钳制", ap, 105*1.002)
+	approx("LONG 上涨-止损不变", sp, 96)
+
+	// LONG 现价已跌 5%（95）：止损应钳到 95*0.998，激活保持 102
+	sp, ap = computeStopPrices("LONG", 100, 0.04, 0.02, 95)
+	approx("LONG 下跌-止损钳制", sp, 95*0.998)
+	approx("LONG 下跌-激活不变", ap, 102)
+
+	// SHORT 现价已跌 5%（95）：激活(98)应钳到 95*0.998
+	sp, ap = computeStopPrices("SHORT", 100, 0.04, 0.02, 95)
+	approx("SHORT 下跌-激活钳制", ap, 95*0.998)
+
+	// SHORT 现价已涨 5%（105）：止损(104)应钳到 105*1.002
+	sp, ap = computeStopPrices("SHORT", 100, 0.04, 0.02, 105)
+	approx("SHORT 上涨-止损钳制", sp, 105*1.002)
+
+	// currentPrice=0（无行情）：不钳制，保持原值
+	sp, ap = computeStopPrices("LONG", 100, 0.04, 0.02, 0)
+	approx("无行情-止损", sp, 96)
+	approx("无行情-激活", ap, 102)
+}
+
 // TestPlaceStopOrders_MultiplePositionsSameSymbol 回归 -4130：
 // 同币多仓（追加仓）各挂一张按数量止损单，互不冲突。
 // 修复前 STOP_MARKET 使用 ClosePosition(true)，币安同一方向只允许一张 closePosition 条件单，
@@ -466,10 +504,10 @@ func TestPlaceStopOrders_MultiplePositionsSameSymbol(t *testing.T) {
 	posB := insertTestPosition(t, db)
 	posB.Symbol = "BTCUSDT"
 
-	if err := mgr.PlaceStopOrders(ctx, posA, cfg); err != nil {
+	if err := mgr.PlaceStopOrders(ctx, posA, cfg, 0); err != nil {
 		t.Fatalf("首仓挂止损失败: %v", err)
 	}
-	if err := mgr.PlaceStopOrders(ctx, posB, cfg); err != nil {
+	if err := mgr.PlaceStopOrders(ctx, posB, cfg, 0); err != nil {
 		t.Fatalf("追加仓挂止损失败（-4130 回归）: %v", err)
 	}
 

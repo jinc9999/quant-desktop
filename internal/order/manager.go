@@ -83,6 +83,35 @@ func (m *Manager) insertOrder(order *storage.Order) (int64, error) {
 	return m.db.InsertOrder(order)
 }
 
+// computeStopPrices 计算固定止损触发价与跟踪止盈激活价，并做防 -2021 钳制：
+// 开仓后现价若已穿越止损价/激活价（快速拉升或下杀），触发价必须钳到现价外侧，
+// 否则交易所返回 -2021 "Order would immediately trigger"。
+// - LONG：止损价低于现价（现价下方 0.2%），激活价高于现价（现价上方 0.2%）
+// - SHORT：止损价高于现价，激活价低于现价
+func computeStopPrices(side string, entryPrice, stopLossPct, trailingActivation, currentPrice float64) (stopPrice, activationPrice float64) {
+	if side == "SHORT" {
+		stopPrice = entryPrice * (1 + stopLossPct)
+		if currentPrice > 0 && stopPrice <= currentPrice {
+			stopPrice = currentPrice * 1.002
+		}
+		activationPrice = entryPrice * (1 - trailingActivation)
+		if currentPrice > 0 && activationPrice >= currentPrice {
+			activationPrice = currentPrice * 0.998
+		}
+		return stopPrice, activationPrice
+	}
+	// LONG
+	stopPrice = entryPrice * (1 - stopLossPct)
+	if currentPrice > 0 && stopPrice >= currentPrice {
+		stopPrice = currentPrice * 0.998
+	}
+	activationPrice = entryPrice * (1 + trailingActivation)
+	if currentPrice > 0 && activationPrice <= currentPrice {
+		activationPrice = currentPrice * 1.002
+	}
+	return stopPrice, activationPrice
+}
+
 // PlaceStopOrders 为持仓挂出止损+跟踪止损委托单
 // 同步执行：开仓成功后立即调用，确保止损保护不依赖 Bot 存活
 //
@@ -101,7 +130,7 @@ func (m *Manager) insertOrder(order *storage.Order) (int64, error) {
 //
 // 返回:
 //   - error: nil 表示成功，非 nil 表示挂单或回滚过程中出现错误
-func (m *Manager) PlaceStopOrders(ctx context.Context, pos *storage.Position, cfg binance.StrategyConfig) error {
+func (m *Manager) PlaceStopOrders(ctx context.Context, pos *storage.Position, cfg binance.StrategyConfig, currentPrice float64) error {
 	// 1. 幂等检查：该持仓是否已有活跃委托
 	existingOrders, err := m.db.GetOrdersByPosition(pos.ID)
 	if err != nil {
@@ -114,13 +143,10 @@ func (m *Manager) PlaceStopOrders(ctx context.Context, pos *storage.Position, cf
 		}
 	}
 
-	// 2. 挂 STOP_MARKET 止损单（根据持仓方向计算触发价）
-	var stopPrice float64
-	if pos.Side == "SHORT" {
-		stopPrice = pos.EntryPrice * (1 + cfg.StopLossPct) // 做空：价格上涨触发止损
-	} else {
-		stopPrice = pos.EntryPrice * (1 - cfg.StopLossPct) // 做多：价格下跌触发止损
-	}
+	// 2. 计算固定止损触发价与跟踪止盈激活价（含防 -2021 钳制，见 computeStopPrices）
+	stopPrice, activationPrice := computeStopPrices(
+		pos.Side, pos.EntryPrice, cfg.StopLossPct, cfg.TrailingActivation, currentPrice,
+	)
 	var stopResult *binance.OrderResult
 	err = m.retryWithBackoff(ctx, func() error {
 		var e error
@@ -173,13 +199,7 @@ func (m *Manager) PlaceStopOrders(ctx context.Context, pos *storage.Position, cf
 		Timestamp:       now,
 	})
 
-	// 3. 挂 TRAILING_STOP_MARKET 跟踪止损单（根据持仓方向计算激活价）
-	var activationPrice float64
-	if pos.Side == "SHORT" {
-		activationPrice = pos.EntryPrice * (1 - cfg.TrailingActivation) // 做空：价格下跌激活
-	} else {
-		activationPrice = pos.EntryPrice * (1 + cfg.TrailingActivation) // 做多：价格上涨激活
-	}
+	// 3. 挂 TRAILING_STOP_MARKET 跟踪止损单
 	callbackRate := cfg.TrailingCallback * 100 // API 接受百分比数值，如 3.0 表示 3%
 	var trailResult *binance.OrderResult
 	err = m.retryWithBackoff(ctx, func() error {
@@ -341,7 +361,7 @@ func (m *Manager) EnsureOrdersForOpenPositions(ctx context.Context, cfg binance.
 		}
 		if !hasActive {
 			log.Printf("[ORDER] %s 持仓ID=%d 无活跃委托，补挂止损保护", pos.Symbol, pos.ID)
-			if err := m.PlaceStopOrders(ctx, pos, cfg); err != nil {
+			if err := m.PlaceStopOrders(ctx, pos, cfg, 0); err != nil {
 				log.Printf("[ORDER] %s 补挂止损失败: %v", pos.Symbol, err)
 			}
 		}

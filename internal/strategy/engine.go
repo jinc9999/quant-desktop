@@ -1236,7 +1236,8 @@ func (e *Engine) openOne(ctx context.Context, symbol string, entryPrice, amount 
 	// 这是主保护机制：即使 Bot 崩溃/重启，交易所仍会自动触发止损
 	// 挂单失败时 orderMgr 内部会回滚（平仓 + 取消已挂委托）
 	if e.orderMgr != nil {
-		if err := e.orderMgr.PlaceStopOrders(ctx, pos, e.cfg); err != nil {
+		cur, _ := e.ws.GetPrice(symbol)
+		if err := e.orderMgr.PlaceStopOrders(ctx, pos, e.cfg, cur); err != nil {
 			log.Printf("[Strategy] 挂止损委托失败 %s 持仓ID=%d: %v", symbol, pos.ID, err)
 			e.emitError("挂止损单", fmt.Sprintf("%s 挂止损条件单失败: %v", symbol, err))
 			return nil, err
@@ -1662,7 +1663,8 @@ func (e *Engine) adoptOrphanPosition(ctx context.Context, symbol string) {
 
 		// 补挂交易所止损单
 		if e.orderMgr != nil {
-			if err := e.orderMgr.PlaceStopOrders(ctx, pos, e.cfg); err != nil {
+			cur, _ := e.ws.GetPrice(symbol)
+			if err := e.orderMgr.PlaceStopOrders(ctx, pos, e.cfg, cur); err != nil {
 				log.Printf("[Strategy] 收养孤儿仓位挂止损单失败 %s ID=%d: %v", symbol, id, err)
 				e.emitError("挂止损单", fmt.Sprintf("%s 孤儿仓位补挂止损条件单失败: %v", symbol, err))
 			}
