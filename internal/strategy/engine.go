@@ -83,6 +83,7 @@ type Engine struct {
 	mode              string                        // 引擎所属模式（SIMULATION/LIVE），自动记录每日总结用
 	engineCancel      context.CancelFunc            // engineCtx 的取消函数
 	stopRequested     bool                          // Stop 早于 Start 时记录停止请求，Start 启动前直接退出
+	lastBalanceErrLog atomic.Int64                  // 最近一次余额查询失败日志时间（Unix 毫秒），防刷屏
 
 	// klineOpenCache: symbol -> 当前 K 线周期开盘价缓存。
 	// K 线开盘价在周期内不变，只需每周期拉取一次，降低 REST 调用量（K 线信号模式用）。
@@ -930,14 +931,25 @@ func (e *Engine) openPositions(ctx context.Context, candidates []Candidate, pric
 	// 可用余额不足以支撑本 Tick 最大开仓量（含条件单占用余量）时，
 	// 跳过整个 Tick 开仓并输出明确日志，避免交易所 -2019 报错刷屏
 	// （2026-08-04 用户反馈 -2019 无法根治，此为根治方案）。
-	if bal, balErr := e.client.GetFuturesBalance(ctx); balErr == nil && bal != nil {
-		// 条件单占用系数 3：主仓 1 份 + 止损条件单 1 份 + 移动止盈条件单 1 份
-		need := float64(slots) * e.cfg.PositionMarginUSDT * 3
-		if bal.AvailableBalance < need {
-			log.Printf("[Strategy] ⛔ 可用余额不足，跳过本 Tick 开仓：可用 %.2f U < 需 %.2f U（%d 仓 × 单仓 %.1f U × 条件单系数 3）",
-				bal.AvailableBalance, need, slots, e.cfg.PositionMarginUSDT)
-			return nil
+	// 余额查询本身也加短超时并保守处理：查询失败时无法确认可用保证金，
+	// 继续下单只会把问题抛给交易所（-2019），因此跳过本 Tick 开仓。
+	balCtx, balCancel := context.WithTimeout(ctx, 5*time.Second)
+	bal, balErr := e.client.GetFuturesBalance(balCtx)
+	balCancel()
+	if balErr != nil || bal == nil {
+		now := time.Now().UnixMilli()
+		if last := e.lastBalanceErrLog.Load(); last == 0 || now-last >= 60_000 {
+			e.lastBalanceErrLog.Store(now)
+			log.Printf("[Strategy] ⛔ 可用余额查询失败，跳过本 Tick 开仓（避免交易所 -2019）: %v", balErr)
 		}
+		return nil
+	}
+	// 条件单占用系数 3：主仓 1 份 + 止损条件单 1 份 + 移动止盈条件单 1 份
+	need := float64(slots) * e.cfg.PositionMarginUSDT * 3
+	if bal.AvailableBalance < need {
+		log.Printf("[Strategy] ⛔ 可用余额不足，跳过本 Tick 开仓：可用 %.2f U < 需 %.2f U（%d 仓 × 单仓 %.1f U × 条件单系数 3）",
+			bal.AvailableBalance, need, slots, e.cfg.PositionMarginUSDT)
+		return nil
 	}
 
 	// 熔断检查：日亏/账户回撤达标后停止开新仓（已开仓位仍由 monitorPositions 正常止损）
