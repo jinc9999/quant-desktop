@@ -144,6 +144,37 @@ CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
 CREATE INDEX IF NOT EXISTS idx_orders_exchange ON orders(exchange_order_id);
 CREATE INDEX IF NOT EXISTS idx_order_events_order ON order_events(order_id);
 CREATE INDEX IF NOT EXISTS idx_order_events_time ON order_events(timestamp);
+
+CREATE TABLE IF NOT EXISTS daily_summaries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mode TEXT NOT NULL DEFAULT 'SIMULATION',
+    summary_date TEXT NOT NULL,
+    summary_type TEXT NOT NULL DEFAULT 'daily',
+    market_notes TEXT NOT NULL DEFAULT '',
+    coin_analysis TEXT NOT NULL DEFAULT '',
+    suggestions TEXT NOT NULL DEFAULT '',
+    today_pnl REAL NOT NULL DEFAULT 0,
+    win_rate REAL NOT NULL DEFAULT 0,
+    trade_count INTEGER NOT NULL DEFAULT 0,
+    rating INTEGER NOT NULL DEFAULT 0,
+    feature_json TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    deleted_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_summaries_mode_date_type
+    ON daily_summaries(mode, summary_date, summary_type);
+CREATE INDEX IF NOT EXISTS idx_daily_summaries_date ON daily_summaries(summary_date);
+
+CREATE TABLE IF NOT EXISTS data_audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mode TEXT NOT NULL,
+    action TEXT NOT NULL,
+    target TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_mode_time ON data_audit_log(mode, created_at);
 `
 	_, err := db.Conn.Exec(schema)
 	if err != nil {

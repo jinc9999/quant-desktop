@@ -64,6 +64,15 @@ export default {
         title: "已完成交易",
         icon: "ep/finished"
       }
+    },
+    {
+      path: "/summary",
+      name: "Summary",
+      component: () => import("@/views/summary/index.vue"),
+      meta: {
+        title: "每日总结",
+        icon: "ep/notebook"
+      }
     }
   ]
 } satisfies RouteConfigsTable;

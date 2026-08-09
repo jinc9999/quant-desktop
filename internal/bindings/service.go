@@ -407,6 +407,165 @@ func maxInt(a, b int) int {
 	return b
 }
 
+func strVal(m map[string]interface{}, k string) string {
+	if m == nil {
+		return ""
+	}
+	if v, ok := m[k].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func floatVal(m map[string]interface{}, k string) float64 {
+	if m == nil {
+		return 0
+	}
+	switch v := m[k].(type) {
+	case float64:
+		return v
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case string:
+		var f float64
+		fmt.Sscanf(v, "%f", &f)
+		return f
+	}
+	return 0
+}
+
+func intVal(m map[string]interface{}, k string) int {
+	if m == nil {
+		return 0
+	}
+	switch v := m[k].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case string:
+		var n int
+		fmt.Sscanf(v, "%d", &n)
+		return n
+	}
+	return 0
+}
+
+// SaveDailySummary 保存每日总结（按 模式+日期+类型 幂等，写审计日志）
+func (s *QuantService) SaveDailySummary(input map[string]interface{}) map[string]interface{} {
+	res := map[string]interface{}{"ok": false}
+	s.mu.RLock()
+	mode, db := s.mode, s.db
+	s.mu.RUnlock()
+	if db == nil {
+		res["message"] = "数据库未初始化"
+		return res
+	}
+	sum := &storage.DailySummary{
+		Mode:         mode,
+		SummaryDate:  strVal(input, "summaryDate"),
+		SummaryType:  strVal(input, "summaryType"),
+		MarketNotes:  strVal(input, "marketNotes"),
+		CoinAnalysis: strVal(input, "coinAnalysis"),
+		Suggestions:  strVal(input, "suggestions"),
+		TodayPnl:     floatVal(input, "todayPnl"),
+		WinRate:      floatVal(input, "winRate"),
+		TradeCount:   intVal(input, "tradeCount"),
+		Rating:       intVal(input, "rating"),
+		FeatureJSON:  strVal(input, "featureJson"),
+	}
+	if sum.SummaryType == "" {
+		sum.SummaryType = "daily"
+	}
+	if sum.FeatureJSON == "" {
+		sum.FeatureJSON = "{}"
+	}
+	id, exists, err := db.SaveDailySummary(sum)
+	if err != nil {
+		res["message"] = "保存失败: " + err.Error()
+		return res
+	}
+	action := "CREATE"
+	if exists {
+		action = "UPDATE"
+	}
+	_ = db.InsertAuditLog(mode, action, fmt.Sprintf("daily_summaries/%d", id), sum.SummaryDate)
+	res["ok"] = true
+	res["id"] = id
+	res["message"] = "已保存"
+	return res
+}
+
+// GetDailySummaries 查询每日总结（按时间范围 + 类型，限当前模式）
+func (s *QuantService) GetDailySummaries(dateFrom, dateTo, summaryType string) map[string]interface{} {
+	res := map[string]interface{}{"ok": false, "list": []interface{}{}}
+	s.mu.RLock()
+	mode, db := s.mode, s.db
+	s.mu.RUnlock()
+	if db == nil {
+		res["message"] = "数据库未初始化"
+		return res
+	}
+	list, err := db.GetDailySummaries(mode, dateFrom, dateTo, summaryType)
+	if err != nil {
+		res["message"] = err.Error()
+		return res
+	}
+	items := make([]interface{}, 0, len(list))
+	for i := range list {
+		items = append(items, list[i])
+	}
+	res["ok"] = true
+	res["mode"] = mode
+	res["list"] = items
+	return res
+}
+
+// GetDailySummaryByID 查询单条每日总结（限当前模式）
+func (s *QuantService) GetDailySummaryByID(id int64) map[string]interface{} {
+	res := map[string]interface{}{"ok": false}
+	s.mu.RLock()
+	mode, db := s.mode, s.db
+	s.mu.RUnlock()
+	if db == nil {
+		res["message"] = "数据库未初始化"
+		return res
+	}
+	item, err := db.GetDailySummaryByID(mode, id)
+	if err != nil {
+		res["message"] = "记录不存在或无权访问"
+		return res
+	}
+	res["ok"] = true
+	res["item"] = item
+	return res
+}
+
+// DeleteDailySummary 软删除每日总结（写审计日志）
+func (s *QuantService) DeleteDailySummary(id int64) map[string]interface{} {
+	res := map[string]interface{}{"ok": false}
+	s.mu.RLock()
+	mode, db := s.mode, s.db
+	s.mu.RUnlock()
+	if db == nil {
+		res["message"] = "数据库未初始化"
+		return res
+	}
+	ok, err := db.DeleteDailySummary(mode, id)
+	if err != nil || !ok {
+		res["message"] = "删除失败或记录不存在"
+		return res
+	}
+	_ = db.InsertAuditLog(mode, "DELETE", fmt.Sprintf("daily_summaries/%d", id), "")
+	res["ok"] = true
+	res["message"] = "已删除"
+	return res
+}
+
 // GetDailySummary 生成「每日总结」：市场趋势 + 单币盈亏 + 改进建议
 func (s *QuantService) GetDailySummary() map[string]interface{} {
 	res := map[string]interface{}{
