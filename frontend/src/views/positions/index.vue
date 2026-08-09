@@ -557,21 +557,6 @@ onUnmounted(() => {
           </template>
         </el-table-column>
 
-        <el-table-column prop="entryPrice" label="入场价" width="130" align="right" sortable="custom">
-          <template #default="{ row }">
-            <span class="num">{{ formatPrice(row.entryPrice) }}</span>
-          </template>
-        </el-table-column>
-
-        <!-- 入场时间：悬停显示完整时间戳 -->
-        <el-table-column prop="openedAt" label="入场时间" width="175" sortable="custom">
-          <template #default="{ row }">
-            <el-tooltip :content="fullTimestamp(row.openedAt)" placement="top">
-              <span class="cell-time">{{ formatDateTime(row.openedAt) }}</span>
-            </el-tooltip>
-          </template>
-        </el-table-column>
-
         <el-table-column prop="margin" label="保证金" min-width="120" align="right" sortable="custom">
           <template #default="{ row }">
             <span class="num">{{ formatUsd(row.margin) }}</span>
@@ -623,6 +608,22 @@ onUnmounted(() => {
               :effect="getStatusMeta(row.orderStatus).effect"
               size="small"
             >{{ getStatusMeta(row.orderStatus).label }}</el-tag>
+          </template>
+        </el-table-column>
+
+        <!-- 入场价 -->
+        <el-table-column prop="entryPrice" label="入场价" min-width="120" align="right" sortable="custom">
+          <template #default="{ row }">
+            <span class="num">{{ formatPrice(row.entryPrice) }}</span>
+          </template>
+        </el-table-column>
+
+        <!-- 入场时间：悬停显示完整时间戳 -->
+        <el-table-column prop="openedAt" label="入场时间" min-width="160" sortable="custom">
+          <template #default="{ row }">
+            <el-tooltip :content="fullTimestamp(row.openedAt)" placement="top">
+              <span class="cell-time">{{ formatDateTime(row.openedAt) }}</span>
+            </el-tooltip>
           </template>
         </el-table-column>
 
