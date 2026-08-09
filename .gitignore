@@ -35,6 +35,11 @@ build/windows/quant-desktop/
 # ===== 日志 =====
 *.log
 
+# ===== Python 缓存 / 编辑器备份 =====
+__pycache__/
+*.pyc
+*~
+
 # ===== 系统/IDE =====
 .DS_Store
 # macOS AppleDouble 元数据文件（从 macOS 拷贝/同步到 Windows 时产生）

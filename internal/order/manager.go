@@ -431,7 +431,7 @@ func (m *Manager) SyncOrders(ctx context.Context, priceMap map[string]float64) e
 					// 仅当变动超过 0.1% 时才更新，避免频繁撤挂触发限频
 					oldStop := stopOrder.StopPrice
 					if oldStop == nil || math.Abs(newStop-*oldStop)/newStop > 0.001 {
-					result, updateErr := m.client.UpdateStopMarketPrice(ctx, stopOrder.AlgoID, pos.Symbol, newStop, pos.Amount, pos.Side)
+						result, updateErr := m.client.UpdateStopMarketPrice(ctx, stopOrder.AlgoID, pos.Symbol, newStop, pos.Amount, pos.Side)
 						if updateErr != nil {
 							log.Printf("[ORDER] ❌ %s 动态更新止损价失败 algoId=%d: %v", pos.Symbol, stopOrder.AlgoID, updateErr)
 						} else {
@@ -581,10 +581,10 @@ func (m *Manager) handleFilledOrder(ctx context.Context, localOrder *storage.Ord
 		if feeErr != nil {
 			log.Printf("[ORDER] 查询手续费失败 positionID=%d: %v", localOrder.PositionID, feeErr)
 		}
-		// 兜底：按开仓+平仓名义价值 × 单边 0.05% taker 估算
+		// 兜底：按平仓名义价值 × 0.05% taker 估算（与 GetOrderFee 口径一致：仅平仓侧佣金）
 		fee = 0
 		if pos != nil && info.FilledPrice > 0 {
-			fee = (pos.Amount*pos.EntryPrice + pos.Amount*info.FilledPrice) * 0.0005
+			fee = pos.Amount * info.FilledPrice * 0.0005
 		}
 	}
 

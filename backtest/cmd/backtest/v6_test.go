@@ -279,11 +279,11 @@ func TestV6Sizing(t *testing.T) {
 func TestS01FundingVeto(t *testing.T) {
 	e := testV6Engine()
 	applyS01Experiments(e.cfg, true, 0, false)
-	e.fundRate["BIGUSDT"] = 0.004 // 大币阈值 0.005，未过热
-	e.fundRate["BIGHOTUSDT"] = 0.005 // 大币阈值 0.005，过热
-	e.fundRate["MIDHOTUSDT"] = 0.02 // 中币阈值 0.01，过热
+	e.fundRate["BIGUSDT"] = 0.004     // 大币阈值 0.005，未过热
+	e.fundRate["BIGHOTUSDT"] = 0.005  // 大币阈值 0.005，过热
+	e.fundRate["MIDHOTUSDT"] = 0.02   // 中币阈值 0.01，过热
 	e.fundRate["SMALLHOTUSDT"] = 0.02 // 小币阈值 0.02，过热（>=）
-	e.fundRate["NEGUSDT"] = -0.01 // 负费率放行
+	e.fundRate["NEGUSDT"] = -0.01     // 负费率放行
 
 	if e.fundingVetoed("BIGUSDT", 600000000) {
 		t.Error("大币费率 0.004 < 0.005 不应否决")

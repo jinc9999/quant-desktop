@@ -11,15 +11,15 @@ import (
 
 // chartConfig SVG 图表布局配置
 const (
-	svgWidth   = 1200
-	svgHeight  = 520
-	plotLeft   = 70
-	plotRight  = 1170
-	eqTop      = 30   // 资金曲线面板顶部
-	eqBottom   = 270  // 资金曲线面板底部
-	ddTop      = 320  // 回撤面板顶部
-	ddBottom   = 470  // 回撤面板底部
-	maxPoints  = 2000 // 图表最大描点数（抽样）
+	svgWidth  = 1200
+	svgHeight = 520
+	plotLeft  = 70
+	plotRight = 1170
+	eqTop     = 30   // 资金曲线面板顶部
+	eqBottom  = 270  // 资金曲线面板底部
+	ddTop     = 320  // 回撤面板顶部
+	ddBottom  = 470  // 回撤面板底部
+	maxPoints = 2000 // 图表最大描点数（抽样）
 )
 
 // downsample 对序列等间隔抽样，控制描点数量

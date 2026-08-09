@@ -35,12 +35,12 @@ type QuantService struct {
 	cancel    context.CancelFunc
 	mu        sync.RWMutex
 	started   bool
-	engineWG  sync.WaitGroup // 等待策略引擎 goroutine 退出（Shutdown 时汇合，避免 db.Close 与 runOnce 竞态）
-	mode      string // 运行模式：SIMULATION | LIVE
-	apiKey    string // 币安 API Key（运行时内存）
-	apiSecret string // 币安 API Secret（运行时内存）
-	proxyAddr string // 用户指定的代理地址
-	proxyPort int    // 用户指定的代理端口
+	engineWG  sync.WaitGroup   // 等待策略引擎 goroutine 退出（Shutdown 时汇合，避免 db.Close 与 runOnce 竞态）
+	mode      string           // 运行模式：SIMULATION | LIVE
+	apiKey    string           // 币安 API Key（运行时内存）
+	apiSecret string           // 币安 API Secret（运行时内存）
+	proxyAddr string           // 用户指定的代理地址
+	proxyPort int              // 用户指定的代理端口
 	app       *application.App // Wails 应用引用（用于事件推送）
 }
 
@@ -766,7 +766,7 @@ func (s *QuantService) GetDailySummary() map[string]interface{} {
 	for _, m := range []string{"SIMULATION", "LIVE"} {
 		db := dbCur
 		if m != cur {
-			tmp, err := storage.NewDB(storage.DBPathForMode("data", m))
+			tmp, err := storage.OpenReadOnly(storage.DBPathForMode("data", m))
 			if err != nil {
 				modes[m] = map[string]interface{}{
 					"trades":      map[string]interface{}{"closedCount": 0, "todayPnl": 0, "winRate": 0, "byCoin": []interface{}{}},

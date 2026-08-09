@@ -2,8 +2,9 @@
 // 按时间片驱动策略引擎，输出交易明细、权益曲线、绩效指标与可视化 SVG 图表。
 //
 // 用法:
-//   go run ./cmd/backtest -data ../data -out ../out
-//   go run ./cmd/backtest -data ../data -out ../out -start 2025-01-01 -end 2025-12-31
+//
+//	go run ./cmd/backtest -data ../data -out ../out
+//	go run ./cmd/backtest -data ../data -out ../out -start 2025-01-01 -end 2025-12-31
 package main
 
 import (
@@ -353,34 +354,34 @@ func writeEquityCSV(path string, curve []EquityPoint) error {
 
 // Metrics 回测绩效指标
 type Metrics struct {
-	StartTime      string
-	EndTime        string
-	TotalBars      int
-	TotalTrades    int
-	LongTrades     int
-	ShortTrades    int
-	WinRate        float64
-	AvgWin         float64
-	AvgLoss        float64
-	ProfitFactor   float64
-	TotalPnL       float64
-	TotalReturnPct float64
-	MaxDrawdownPct float64
-	SharpeRatio    float64
-	AvgHoldBars    float64
-	StopLossCount  int
-	TrailingCount  int
-	TakeProfitCount int // 固定止盈平仓数
-	MaxHoldCount   int // 超时平仓数
-	ATRDecayCount  int // 波动率衰减平仓数（v6）
-	FundReversalCount int // 费率反转平仓数（v6）
-	FundingIncome  float64 // funding 模式: 累计资金费收入(USDT)
-	FirstCount     int     // 首笔入场数（追涨/回踩验证）
-	FirstPnl       float64
-	ChaseCount     int
-	ChasePnl       float64
-	PullbackCount  int
-	PullbackPnl    float64
+	StartTime         string
+	EndTime           string
+	TotalBars         int
+	TotalTrades       int
+	LongTrades        int
+	ShortTrades       int
+	WinRate           float64
+	AvgWin            float64
+	AvgLoss           float64
+	ProfitFactor      float64
+	TotalPnL          float64
+	TotalReturnPct    float64
+	MaxDrawdownPct    float64
+	SharpeRatio       float64
+	AvgHoldBars       float64
+	StopLossCount     int
+	TrailingCount     int
+	TakeProfitCount   int     // 固定止盈平仓数
+	MaxHoldCount      int     // 超时平仓数
+	ATRDecayCount     int     // 波动率衰减平仓数（v6）
+	FundReversalCount int     // 费率反转平仓数（v6）
+	FundingIncome     float64 // funding 模式: 累计资金费收入(USDT)
+	FirstCount        int     // 首笔入场数（追涨/回踩验证）
+	FirstPnl          float64
+	ChaseCount        int
+	ChasePnl          float64
+	PullbackCount     int
+	PullbackPnl       float64
 }
 
 // computeMetrics 从交易与权益曲线计算全部绩效指标
@@ -784,7 +785,7 @@ func main() {
 	if *modeFlag == "v6" {
 		V6Defaults(cfg)
 		if *v6rawFlag {
-			cfg.DailyLossPct = 100          // 日亏熔断关闭
+			cfg.DailyLossPct = 100             // 日亏熔断关闭
 			cfg.MaxConsecutiveLosses = 1000000 // 连亏熔断关闭
 		}
 		if *slipoffFlag {

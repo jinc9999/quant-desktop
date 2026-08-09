@@ -53,13 +53,13 @@ func TestUpdate(t *testing.T) {
 	params := testParams()
 
 	tests := []struct {
-		name                string
-		state               State
-		lastPrice           float64
-		wantStopTriggered   bool
-		wantTrailing        bool
-		wantHighest         float64
-		wantStopPrice       float64
+		name              string
+		state             State
+		lastPrice         float64
+		wantStopTriggered bool
+		wantTrailing      bool
+		wantHighest       float64
+		wantStopPrice     float64
 	}{
 		{
 			name:              "初始止损触发_价格等于止损价",

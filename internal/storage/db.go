@@ -63,6 +63,20 @@ func NewDB(dbPath string) (*DB, error) {
 	return db, nil
 }
 
+// OpenReadOnly 以只读方式打开数据库（用于跨模式只读查询，不执行迁移、不创建 WAL）。
+// 每日总结等双模式聚合场景避免对另一模式库做可写打开，降低锁竞争与文件副作用。
+func OpenReadOnly(dbPath string) (*DB, error) {
+	conn, err := sql.Open("sqlite3", dbPath+"?mode=ro&_busy_timeout=5000")
+	if err != nil {
+		return nil, err
+	}
+	if err := conn.Ping(); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return &DB{Conn: conn}, nil
+}
+
 // migrate 执行建表 SQL
 func (db *DB) migrate() error {
 	schema := `

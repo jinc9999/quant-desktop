@@ -487,6 +487,7 @@ func isTransientErr(err error) bool {
 // 网络瞬时错误（如代理/交易所 EOF）最多重试 3 次，避免单次抖动导致行情缺失。
 // 参数:
 //   - ctx: 上下文
+//
 // 返回:
 //   - []Ticker: 过滤后的 USDT 交易对行情列表
 //   - error: 重试耗尽仍失败时返回错误

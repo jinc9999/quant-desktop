@@ -22,6 +22,7 @@ const benchSymbolCount = 400
 // newBenchEngine 创建基准测试用的 Engine（DRY_RUN 模式 + 临时数据库）
 // 参数:
 //   - b: 基准测试实例
+//
 // 返回:
 //   - *Engine: 策略引擎实例
 //   - *storage.DB: 数据库实例（测试结束自动关闭）
@@ -44,7 +45,7 @@ func newBenchEngine(b *testing.B) (*Engine, *storage.DB) {
 		Timeframe:          "5m",
 		MinGainPct:         5.0,
 		MinQuoteVolume:     100000,
-		TopN:               0, // 不限制，基准测试需要全量候选
+		TopN:               0,       // 不限制，基准测试需要全量候选
 		MaxOpenPositions:   1000000, // 放大上限，避免基准测试中槽位耗尽
 		Leverage:           10,
 		PositionMarginUSDT: 5,
@@ -63,6 +64,7 @@ func newBenchEngine(b *testing.B) (*Engine, *storage.DB) {
 // benchSymbols 生成 n 个模拟交易对名称
 // 参数:
 //   - n: 交易对数量
+//
 // 返回:
 //   - []string: 交易对名称列表（如 BENCH000USDT）
 func benchSymbols(n int) []string {

@@ -55,30 +55,30 @@ const orphanScanInterval = 10
 
 // Engine 策略引擎主结构
 type Engine struct {
-	cfg            binance.StrategyConfig
-	client         *binance.Client
-	ws             *binance.WsManager
-	db             *storage.DB
-	orderMgr       *order.Manager
-	breaker        *risk.CircuitBreaker // 熔断器：日亏/回撤达标后停止开新仓
-	window         *SlidingWindow
-	running        bool
-	stopCh         chan struct{}
-	mu             sync.RWMutex
-	tickCount      int64
-	tickErrorCount int64     // Tick 执行失败累计次数
-	startTime      time.Time // 引擎启动时间
-	cooldown       map[string]time.Time // symbol -> 平仓时间，冷却期内不再开仓
-	cooldownReason map[string]string    // symbol -> 最近平仓原因（分原因冷却: 移动止盈可短冷却）
-	failedOpen     map[string]time.Time // symbol -> 开仓失败时间，短期内不再重试
-	openBlocked    map[string]time.Time // symbol -> 结构性开仓失败拉黑截止时间（12h，防反复刷屏）
-	closeRetry     map[int64]time.Time  // positionID -> 平仓失败重试冷却截止时间（3min，防强平模式刷屏）
-	onError        func(context, message string) // 后台错误回调（推送到前端弹窗）
-	lastBreakerDay string            // 上次熔断检查日期（YYYY-MM-DD），跨天时重置日熔断
-	lastTickerRefresh time.Time      // 最近一次 REST 全量行情刷新时间（WS 缺币自愈用）
-	tickerFullLogged bool            // 全量行情加载是否已写入日志（启动首次 + 缺币告警）
-	tickerLoadMsg string             // 最近一次全量行情加载信息（供前端展示）
-	mode          string             // 引擎所属模式（SIMULATION/LIVE），自动记录每日总结用
+	cfg               binance.StrategyConfig
+	client            *binance.Client
+	ws                *binance.WsManager
+	db                *storage.DB
+	orderMgr          *order.Manager
+	breaker           *risk.CircuitBreaker // 熔断器：日亏/回撤达标后停止开新仓
+	window            *SlidingWindow
+	running           bool
+	stopCh            chan struct{}
+	mu                sync.RWMutex
+	tickCount         int64
+	tickErrorCount    int64                         // Tick 执行失败累计次数
+	startTime         time.Time                     // 引擎启动时间
+	cooldown          map[string]time.Time          // symbol -> 平仓时间，冷却期内不再开仓
+	cooldownReason    map[string]string             // symbol -> 最近平仓原因（分原因冷却: 移动止盈可短冷却）
+	failedOpen        map[string]time.Time          // symbol -> 开仓失败时间，短期内不再重试
+	openBlocked       map[string]time.Time          // symbol -> 结构性开仓失败拉黑截止时间（12h，防反复刷屏）
+	closeRetry        map[int64]time.Time           // positionID -> 平仓失败重试冷却截止时间（3min，防强平模式刷屏）
+	onError           func(context, message string) // 后台错误回调（推送到前端弹窗）
+	lastBreakerDay    string                        // 上次熔断检查日期（YYYY-MM-DD），跨天时重置日熔断
+	lastTickerRefresh time.Time                     // 最近一次 REST 全量行情刷新时间（WS 缺币自愈用）
+	tickerFullLogged  bool                          // 全量行情加载是否已写入日志（启动首次 + 缺币告警）
+	tickerLoadMsg     string                        // 最近一次全量行情加载信息（供前端展示）
+	mode              string                        // 引擎所属模式（SIMULATION/LIVE），自动记录每日总结用
 
 	// klineOpenCache: symbol -> 当前 K 线周期开盘价缓存。
 	// K 线开盘价在周期内不变，只需每周期拉取一次，降低 REST 调用量（K 线信号模式用）。
@@ -105,18 +105,18 @@ func NewEngine(cfg binance.StrategyConfig, client *binance.Client, ws *binance.W
 	// 采样间隔取自扫描间隔，用于推导基准匹配容差
 	sampleMs := int64(cfg.ScanIntervalSec) * 1000
 	e := &Engine{
-		cfg:      cfg,
-		client:   client,
-		ws:       ws,
-		db:       db,
-		orderMgr: orderMgr,
-		window:   NewSlidingWindow(ParseTimeframeMs(cfg.Timeframe), sampleMs),
-		stopCh:   make(chan struct{}),
-		cooldown:   make(map[string]time.Time),
+		cfg:            cfg,
+		client:         client,
+		ws:             ws,
+		db:             db,
+		orderMgr:       orderMgr,
+		window:         NewSlidingWindow(ParseTimeframeMs(cfg.Timeframe), sampleMs),
+		stopCh:         make(chan struct{}),
+		cooldown:       make(map[string]time.Time),
 		cooldownReason: make(map[string]string),
-		failedOpen: make(map[string]time.Time),
-		openBlocked: make(map[string]time.Time),
-		closeRetry:  make(map[int64]time.Time),
+		failedOpen:     make(map[string]time.Time),
+		openBlocked:    make(map[string]time.Time),
+		closeRetry:     make(map[int64]time.Time),
 		klineOpenCache: make(map[string]klineOpenEntry),
 		newListLogged:  make(map[string]bool),
 	}
@@ -483,6 +483,7 @@ func (e *Engine) runOnce(ctx context.Context) {
 // 并将 REST 数据回填到 WS 缓存，保证前端 GetPrice 能获取到实时价格。
 // 参数:
 //   - ctx: 上下文
+//
 // 返回:
 //   - []binance.Ticker: 全市场行情列表
 //   - error: 获取失败时返回错误
@@ -639,7 +640,9 @@ func (e *Engine) buildKlineOpenMap(ctx context.Context, tickers []binance.Ticker
 
 // buildNewListingBlocked 计算本 Tick 被新币过滤拦截的交易对集合，并记录过滤日志。
 // 过滤条件（EnableNewListingFilter && NewListingMinDays>0 时生效）：
-//   上市天数 <= NewListingMinDays 的合约被拦截（排除新上市合约）。
+//
+//	上市天数 <= NewListingMinDays 的合约被拦截（排除新上市合约）。
+//
 // 日志去重：每个合约每次进程运行只记录一次（newListLogged），避免每 Tick 刷屏。
 // 上市日期未知（exchangeInfo 未加载/无数据）的合约不拦截（失败放行，与 IsFuturesSymbol 一致）。
 // 参数:
@@ -1486,7 +1489,8 @@ func (e *Engine) closePosition(ctx context.Context, pos *storage.Position, curre
 		pnl = (exitPrice - pos.EntryPrice) * pos.Amount
 	}
 
-	// 手续费：优先按真实成交单查询交易所佣金；查不到时按名义价值×费率兜底
+	// 手续费：优先按真实成交单查询交易所佣金（仅平仓侧佣金，与条件单路径口径一致）；
+	// 查不到时按平仓名义价值×费率兜底。
 	fee := 0.0
 	if closeRes != nil && closeRes.OrderID > 0 {
 		if f, ferr := e.client.GetOrderFee(ctx, pos.Symbol, closeRes.OrderID); ferr == nil {
@@ -1494,7 +1498,7 @@ func (e *Engine) closePosition(ctx context.Context, pos *storage.Position, curre
 		}
 	}
 	if fee <= 0 {
-		fee = (pos.Amount*pos.EntryPrice + pos.Amount*exitPrice) * takerFeeRate
+		fee = pos.Amount * exitPrice * takerFeeRate
 	}
 
 	// 更新数据库

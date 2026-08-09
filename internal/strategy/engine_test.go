@@ -76,21 +76,21 @@ func newTestEngine(t *testing.T) (*Engine, *storage.DB) {
 	orderMgr := order.NewManager(client, db)
 
 	cfg := binance.StrategyConfig{
-		ScanIntervalSec:    1,
-		Timeframe:          "5m",
-		MinGainPct:         5.0,
-		MinQuoteVolume:     100000,
-		TopN:               3,
-		MaxOpenPositions:   5,
-		Leverage:           10,
-		PositionMarginUSDT: 5,
-		CooldownMin:        5,
+		ScanIntervalSec:          1,
+		Timeframe:                "5m",
+		MinGainPct:               5.0,
+		MinQuoteVolume:           100000,
+		TopN:                     3,
+		MaxOpenPositions:         5,
+		Leverage:                 10,
+		PositionMarginUSDT:       5,
+		CooldownMin:              5,
 		CooldownAfterTrailingMin: -1, // 测试默认统一冷却（0=立即再入，避免零值歧义）
-		MaxAddOnsPerSymbol: 1,        // 测试默认 1 次追加（同币最多 2 仓，保持既有测试语义）
-		MarginMode:         binance.MarginModeIsolated,
-		StopLossPct:        0.10,
-		TrailingActivation: 0.05,
-		TrailingCallback:   0.03,
+		MaxAddOnsPerSymbol:       1,  // 测试默认 1 次追加（同币最多 2 仓，保持既有测试语义）
+		MarginMode:               binance.MarginModeIsolated,
+		StopLossPct:              0.10,
+		TrailingActivation:       0.05,
+		TrailingCallback:         0.03,
 	}
 
 	e := NewEngine(cfg, client, ws, db, orderMgr)
@@ -1786,7 +1786,7 @@ func TestOpenPositions_Boundary_CooldownExpired(t *testing.T) {
 // ========== 十四、双触发防护测试（幽灵持仓根因） ==========
 // TestMonitor_SkipWhenActiveStopOrders 验证双触发防护：
 // 开仓后存在活跃止损条件单时，本地 monitorPositions 应跳过平仓
-//（完全交由交易所条件单 + SyncOrders 闭环），防止价格触及止损时本地重复平仓
+// （完全交由交易所条件单 + SyncOrders 闭环），防止价格触及止损时本地重复平仓
 // 遭 -2022（ReduceOnly 无仓可平）产生幽灵持仓。
 // 取消条件单后（模拟条件单失效），本地兜底平仓恢复。
 func TestMonitor_SkipWhenActiveStopOrders(t *testing.T) {
@@ -1963,7 +1963,8 @@ func TestBreaker_NotTriggered_AllowsOpen(t *testing.T) {
 // 背景：此前熔断只在引擎本地平仓（超时/手动）路径更新，交易所条件单平仓从不触发
 // 熔断检查，导致实盘每日 5% 亏损熔断几乎永不生效（2026-08-08 实盘 -35U 无刹车事故根因）。
 // 流程: 注入熔断器(初始权益1000，阈值5%=-50U) → 数据库写入今日已平仓 -60U →
-//       模拟条件单平仓回调 onPositionClosed → 熔断应触发，阻止后续开仓
+//
+//	模拟条件单平仓回调 onPositionClosed → 熔断应触发，阻止后续开仓
 func TestBreaker_OnClose_UpdatesDailyLoss(t *testing.T) {
 	e, db := newTestEngine(t)
 

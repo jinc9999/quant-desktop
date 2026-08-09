@@ -300,8 +300,8 @@ func TestScreenSliding_Boundary_MinVolumeAbove(t *testing.T) {
 func TestScreenSliding_CustomHigherThreshold(t *testing.T) {
 	now := int64(1000000)
 	w := NewSlidingWindow(300000, 10000)
-	feedBaseline(w, "BIGUSDT", now, 100)   // 2500 万 > 2000 万
-	feedBaseline(w, "MIDUSDT", now, 100)   // 1500 万：高于 1000 万但低于 2000 万
+	feedBaseline(w, "BIGUSDT", now, 100) // 2500 万 > 2000 万
+	feedBaseline(w, "MIDUSDT", now, 100) // 1500 万：高于 1000 万但低于 2000 万
 
 	tickers := []binance.Ticker{
 		{Symbol: "BIGUSDT", LastPrice: 106, QuoteVolume: 25000000},
@@ -570,7 +570,7 @@ func TestScreenSliding_24hGainFilterShort(t *testing.T) {
 	feedBaseline(w, "NOSHORT24USDT", now, 100)
 
 	tickers := []binance.Ticker{
-		{Symbol: "SHORT24USDT", LastPrice: 88, QuoteVolume: 200000, PriceChange: -8.0}, // 24h -8%
+		{Symbol: "SHORT24USDT", LastPrice: 88, QuoteVolume: 200000, PriceChange: -8.0},   // 24h -8%
 		{Symbol: "NOSHORT24USDT", LastPrice: 88, QuoteVolume: 200000, PriceChange: -2.0}, // 24h -2%
 	}
 	priceMap := map[string]float64{"SHORT24USDT": 88, "NOSHORT24USDT": 88}
@@ -627,7 +627,7 @@ func TestScreenKlineMode_Basic(t *testing.T) {
 }
 
 // TestScreenKlineMode_MissingOpen 验证 kline 模式下 K 线开盘价缺失的币保守跳过
-//（拉取失败/未拉取时不产生假信号）
+// （拉取失败/未拉取时不产生假信号）
 func TestScreenKlineMode_MissingOpen(t *testing.T) {
 	now := int64(1000000)
 	w := NewSlidingWindow(900000, 10000)
@@ -696,9 +696,11 @@ func TestScreenKlineMode_MaxPullback(t *testing.T) {
 
 // TestScreenKlineMode_VolumeSurge 验证 kline 模式放量确认生效（放量达标 → 入选）
 // 最近 2 分钟每 30 秒累计成交额增加 3000，之前 13 分钟每 30 秒增加 1000：
-//   recentVol = 38000-29000 = 9000（2 分钟）
-//   priorVol  = 29000-5000  = 24000（13 分钟）
-//   surge = (9000/120000) / (24000/780000) ≈ 2.44 >= 1.8 → 放量达标
+//
+//	recentVol = 38000-29000 = 9000（2 分钟）
+//	priorVol  = 29000-5000  = 24000（13 分钟）
+//	surge = (9000/120000) / (24000/780000) ≈ 2.44 >= 1.8 → 放量达标
+//
 // K 线实体涨幅 (107-100)/100 = 7% >= 5%，应入选
 func TestScreenKlineMode_VolumeSurge(t *testing.T) {
 	w := NewSlidingWindow(15*60*1000, 30000)

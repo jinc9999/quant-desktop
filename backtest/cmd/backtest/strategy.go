@@ -60,47 +60,47 @@ type StrategyConfig struct {
 	FundSLPct   float64 // 价格止损比例（0.05 = 5%，保护非中性敞口的突发反向行情）
 
 	// ===== v6 异动币策略参数（定义见 docs/superpowers/plans/2026-08-08-v6-refactor-plan.md）=====
-	MinPrice            float64 // L1: 价格 > 该值（USDT，默认 5）
-	MaxATRPct           float64 // L1: ATR14 / close × 100 ≤ 该值（默认 8%）
-	BBPeriod            int     // 布林带周期（默认 20）
-	BBMult              float64 // 布林带倍数（默认 1.5σ）
-	BBWidthWindow       int     // 布林带宽度分位窗口（默认 288 根 5m = 24h）
-	BBWidthMinPct       float64 // L2 硬门槛: 宽度分位 < 该值（默认 30%）
-	RSIPeriod           int     // RSI 周期（默认 14）
-	RSIMin              float64 // L2 趋势确认下限（默认 40）
-	RSIMax              float64 // L2 趋势确认上限（默认 70）
-	L2VolMult           float64 // L2 量能: (当前+前1根) ≥ 前 N 根均值 × 该值（默认 2.0）
-	L2VolLookback       int     // L2 量能前 N 根（默认 5）
-	L2MinScore          float64 // L2 原始分门槛（默认 60）
-	L3MinScore          float64 // L3 加权总分门槛（默认 70）
-	OIZWindow           int     // ΔOI(Z)/成交量 Z 的窗口（默认 24 根 5m）
-	TierBigVolume       float64 // 大币 24h 成交额下限（默认 5 亿 USDT）
-	TierMidVolume       float64 // 中币 24h 成交额下限（默认 5000 万 USDT）
-	OIZBig              float64 // 大币 ΔOI Z-Score 阈值（默认 2.5）
-	OIZMid              float64 // 中币 ΔOI Z-Score 阈值（默认 2.0）
-	OIZSmall            float64 // 小币 ΔOI Z-Score 阈值（默认 1.5）
-	FundVetoBig         float64 // 大币费率过热否决阈值（小数，默认 0.005 = 0.5%）
-	FundVetoMid         float64 // 中币费率过热否决阈值（默认 0.01 = 1%）
-	FundVetoSmall       float64 // 小币费率过热否决阈值（默认 0.02 = 2%）
-	FactorW1            float64 // L3 因子1 ΔOI 权重（默认 0.35）
-	FactorW2            float64 // L3 因子2 资金费率权重（默认 0.30）
-	FactorW3            float64 // L3 因子3 RSI 权重（默认 0.20）
-	FactorW4            float64 // L3 因子4 盘口深度权重（默认 0.15；回测归零并归一化）
-	RiskPct             float64 // L4 风险预算: 账户×该值（默认 1%）
-	SingleCoinMarginPct float64 // C6 单币保证金上限: 账户×该值（默认 0.5%）
-	MaxLeverageExposure float64 // C6 总敞口上限: 名义价值 ≤ 账户×该值（默认 3x）
-	DailyLossPct        float64 // C6 日亏损熔断（默认 2%）
-	MaxConsecutiveLosses int    // C6 连续亏损熔断（默认 5 单）
-	SlippageBig         float64 // 滑点: 大币（默认 0.05%）
-	SlippageMid         float64 // 滑点: 中币（默认 1%）
-	SlippageSmall       float64 // 滑点: 小币（默认 2%）
-	ATRDecayPct         float64 // L5 波动率衰减: ATR ≤ 开仓后峰值×该值（默认 0.5）
-	ATRDecayMinHoldBars int     // L5 波动率衰减最小持仓（默认 6 根 = 30 分钟）
-	FundReversalMult    float64 // L5 费率反转: 费率 > 入场时×该值（默认 1.5）
-	NewListingMinDays   int     // L1 新币过滤: 上市天数 > 该值（默认 60）
-	CooldownAfterTrailingMin int // 实验: 移动止盈平仓后的冷却分钟数（-1=统一用 CooldownMs；0=立即再入）
-	EnableAddOn              bool // 实验: 启用追加仓位（同币移动止盈激活后再命中信号可加仓）
-	MaxAddOnsPerSymbol       int  // 实验: 单币最大追加次数（默认 1，即同币最多 1+1 两仓）
+	MinPrice                 float64 // L1: 价格 > 该值（USDT，默认 5）
+	MaxATRPct                float64 // L1: ATR14 / close × 100 ≤ 该值（默认 8%）
+	BBPeriod                 int     // 布林带周期（默认 20）
+	BBMult                   float64 // 布林带倍数（默认 1.5σ）
+	BBWidthWindow            int     // 布林带宽度分位窗口（默认 288 根 5m = 24h）
+	BBWidthMinPct            float64 // L2 硬门槛: 宽度分位 < 该值（默认 30%）
+	RSIPeriod                int     // RSI 周期（默认 14）
+	RSIMin                   float64 // L2 趋势确认下限（默认 40）
+	RSIMax                   float64 // L2 趋势确认上限（默认 70）
+	L2VolMult                float64 // L2 量能: (当前+前1根) ≥ 前 N 根均值 × 该值（默认 2.0）
+	L2VolLookback            int     // L2 量能前 N 根（默认 5）
+	L2MinScore               float64 // L2 原始分门槛（默认 60）
+	L3MinScore               float64 // L3 加权总分门槛（默认 70）
+	OIZWindow                int     // ΔOI(Z)/成交量 Z 的窗口（默认 24 根 5m）
+	TierBigVolume            float64 // 大币 24h 成交额下限（默认 5 亿 USDT）
+	TierMidVolume            float64 // 中币 24h 成交额下限（默认 5000 万 USDT）
+	OIZBig                   float64 // 大币 ΔOI Z-Score 阈值（默认 2.5）
+	OIZMid                   float64 // 中币 ΔOI Z-Score 阈值（默认 2.0）
+	OIZSmall                 float64 // 小币 ΔOI Z-Score 阈值（默认 1.5）
+	FundVetoBig              float64 // 大币费率过热否决阈值（小数，默认 0.005 = 0.5%）
+	FundVetoMid              float64 // 中币费率过热否决阈值（默认 0.01 = 1%）
+	FundVetoSmall            float64 // 小币费率过热否决阈值（默认 0.02 = 2%）
+	FactorW1                 float64 // L3 因子1 ΔOI 权重（默认 0.35）
+	FactorW2                 float64 // L3 因子2 资金费率权重（默认 0.30）
+	FactorW3                 float64 // L3 因子3 RSI 权重（默认 0.20）
+	FactorW4                 float64 // L3 因子4 盘口深度权重（默认 0.15；回测归零并归一化）
+	RiskPct                  float64 // L4 风险预算: 账户×该值（默认 1%）
+	SingleCoinMarginPct      float64 // C6 单币保证金上限: 账户×该值（默认 0.5%）
+	MaxLeverageExposure      float64 // C6 总敞口上限: 名义价值 ≤ 账户×该值（默认 3x）
+	DailyLossPct             float64 // C6 日亏损熔断（默认 2%）
+	MaxConsecutiveLosses     int     // C6 连续亏损熔断（默认 5 单）
+	SlippageBig              float64 // 滑点: 大币（默认 0.05%）
+	SlippageMid              float64 // 滑点: 中币（默认 1%）
+	SlippageSmall            float64 // 滑点: 小币（默认 2%）
+	ATRDecayPct              float64 // L5 波动率衰减: ATR ≤ 开仓后峰值×该值（默认 0.5）
+	ATRDecayMinHoldBars      int     // L5 波动率衰减最小持仓（默认 6 根 = 30 分钟）
+	FundReversalMult         float64 // L5 费率反转: 费率 > 入场时×该值（默认 1.5）
+	NewListingMinDays        int     // L1 新币过滤: 上市天数 > 该值（默认 60）
+	CooldownAfterTrailingMin int     // 实验: 移动止盈平仓后的冷却分钟数（-1=统一用 CooldownMs；0=立即再入）
+	EnableAddOn              bool    // 实验: 启用追加仓位（同币移动止盈激活后再命中信号可加仓）
+	MaxAddOnsPerSymbol       int     // 实验: 单币最大追加次数（默认 1，即同币最多 1+1 两仓）
 
 	// ===== S01 单因子实验开关（默认全关，不改变 S01 现有行为）=====
 	FundingVetoEnabled bool    // 实验: 费率过热否决（正费率 ≥ 分级阈值不追）
@@ -135,57 +135,57 @@ type StrategyConfig struct {
 // 返回: *StrategyConfig 策略配置实例
 func DefaultConfig() *StrategyConfig {
 	return &StrategyConfig{
-		MinGainPct:           5.0,
-		Min24hGainPct:        5.0,
-		MinQuoteVolume:       50000,
-		VolumeSurgeThreshold: 1.8,
-		SurgeLookback:        24, // 2 小时基准窗口（24 根 5m）
-		MaxPullbackPct:       9.0,
-		TopN:                 8,
-		MaxOpenPositions:     5,
-		Leverage:             10,
-		PositionMarginUSDT:   20.0,
-		CooldownMs:           20 * 60 * 1000,
-		StopLossPct:          0.08,
-		TrailingActivation:   0.03,
-		TrailingCallback:     0.02,
-		EnableShort:          true,
-		InitialEquity:        1000.0,
-		ClosedBarConfirm:     true,
-		TakeProfitPct:        0,
-		MaxHoldBars:          0,
-		FeeRate:              0.0004,
-		Mode:                 "momentum",
+		MinGainPct:               5.0,
+		Min24hGainPct:            5.0,
+		MinQuoteVolume:           50000,
+		VolumeSurgeThreshold:     1.8,
+		SurgeLookback:            24, // 2 小时基准窗口（24 根 5m）
+		MaxPullbackPct:           9.0,
+		TopN:                     8,
+		MaxOpenPositions:         5,
+		Leverage:                 10,
+		PositionMarginUSDT:       20.0,
+		CooldownMs:               20 * 60 * 1000,
+		StopLossPct:              0.08,
+		TrailingActivation:       0.03,
+		TrailingCallback:         0.02,
+		EnableShort:              true,
+		InitialEquity:            1000.0,
+		ClosedBarConfirm:         true,
+		TakeProfitPct:            0,
+		MaxHoldBars:              0,
+		FeeRate:                  0.0004,
+		Mode:                     "momentum",
 		CooldownAfterTrailingMin: -1, // 统一冷却（分原因冷却实验默认关闭）
-		MRDropPct:            0.03,
-		MRTpPct:              0.02,
-		MRSlPct:              0.015,
-		MRMaxHoldBars:        24,
-		MRMinDrawdownPct:     0.02,
-		MRMaxDrawdownPct:     0.15,
-		TrendFast:            96,
-		TrendSlow:            288,
-		FundTh:               0.0005,
-		FundExitTh:           0.0001,
-		FundMaxHold:          3,
-		FundSLPct:            0.05,
-		AdaptATRTh:           0.02,
-		AdaptBTCEMA:          50,
-		RBPullGain:           5.0,
-		RBEMA:                20,
-		RBShrink:             0.7,
-		RBStable:             3,
-		RBSL:                 0.025,
-		RBTP:                 0.05,
-		RBAct:                0.02,
-		RBCb:                 0.01,
-		RBHold:               24,
-		SSL:                  0.05,
-		STP:                  0.08,
-		SAct:                 0.02,
-		SCb:                  0.015,
-		SHold:                18,
-		DailyMax:             0,
+		MRDropPct:                0.03,
+		MRTpPct:                  0.02,
+		MRSlPct:                  0.015,
+		MRMaxHoldBars:            24,
+		MRMinDrawdownPct:         0.02,
+		MRMaxDrawdownPct:         0.15,
+		TrendFast:                96,
+		TrendSlow:                288,
+		FundTh:                   0.0005,
+		FundExitTh:               0.0001,
+		FundMaxHold:              3,
+		FundSLPct:                0.05,
+		AdaptATRTh:               0.02,
+		AdaptBTCEMA:              50,
+		RBPullGain:               5.0,
+		RBEMA:                    20,
+		RBShrink:                 0.7,
+		RBStable:                 3,
+		RBSL:                     0.025,
+		RBTP:                     0.05,
+		RBAct:                    0.02,
+		RBCb:                     0.01,
+		RBHold:                   24,
+		SSL:                      0.05,
+		STP:                      0.08,
+		SAct:                     0.02,
+		SCb:                      0.015,
+		SHold:                    18,
+		DailyMax:                 0,
 	}
 }
 
@@ -194,41 +194,41 @@ const WindowBars = 288
 
 // symbolState 单币种滚动市场状态（按 5m 片推进，环形缓冲）
 type symbolState struct {
-	closes     [WindowBars]float64 // 环形: 24h 收盘价
-	highs      [WindowBars]float64 // 环形: 24h 最高价
-	lows       [WindowBars]float64 // 环形: 24h 最低价
-	quoteVols  [WindowBars]float64 // 环形: 24h 成交额
-	idx        int                 // 环形写入索引（指向最旧槽位）
-	filled     int                 // 已写入样本数（<288 为预热期）
-	sumVol24   float64             // 24h 累计成交额（滚动维护）
-	periodOpen float64             // 当前 15m 周期开盘价
-	periodTS   int64               // 当前 15m 周期起点
-	hasPeriod  bool                // 15m 周期是否已初始化
-	lastClose  int64               // 该币最近平仓时间（冷却用）
-	lastCloseReason string         // 该币最近平仓原因（分原因冷却用）
-	fastEma    float64             // 趋势模式: 快线 EMA
-	slowEma    float64             // 趋势模式: 慢线 EMA
-	prevFast   float64             // 上一根快线 EMA（交叉检测用）
-	prevSlow   float64             // 上一根慢线 EMA（交叉检测用）
-	emaInit    bool                // EMA 是否已初始化
-	rbEma      float64             // 自适应回踩模式: 支撑 EMA（RBEMA 周期）
-	rbEmaInit  bool                // 回踩 EMA 是否已初始化
-	rbTouched  bool                // 是否已发生过触及 EMA 的回踩
-	rbStableCnt int                // 触及后连续收盘 >= EMA 的片数（企稳计数）
+	closes          [WindowBars]float64 // 环形: 24h 收盘价
+	highs           [WindowBars]float64 // 环形: 24h 最高价
+	lows            [WindowBars]float64 // 环形: 24h 最低价
+	quoteVols       [WindowBars]float64 // 环形: 24h 成交额
+	idx             int                 // 环形写入索引（指向最旧槽位）
+	filled          int                 // 已写入样本数（<288 为预热期）
+	sumVol24        float64             // 24h 累计成交额（滚动维护）
+	periodOpen      float64             // 当前 15m 周期开盘价
+	periodTS        int64               // 当前 15m 周期起点
+	hasPeriod       bool                // 15m 周期是否已初始化
+	lastClose       int64               // 该币最近平仓时间（冷却用）
+	lastCloseReason string              // 该币最近平仓原因（分原因冷却用）
+	fastEma         float64             // 趋势模式: 快线 EMA
+	slowEma         float64             // 趋势模式: 慢线 EMA
+	prevFast        float64             // 上一根快线 EMA（交叉检测用）
+	prevSlow        float64             // 上一根慢线 EMA（交叉检测用）
+	emaInit         bool                // EMA 是否已初始化
+	rbEma           float64             // 自适应回踩模式: 支撑 EMA（RBEMA 周期）
+	rbEmaInit       bool                // 回踩 EMA 是否已初始化
+	rbTouched       bool                // 是否已发生过触及 EMA 的回踩
+	rbStableCnt     int                 // 触及后连续收盘 >= EMA 的片数（企稳计数）
 
 	// v6 指标状态（仅在 Mode=="v6" 时维护）
-	firstTS     int64       // 该币首根 K 线时间（上市日，新币过滤用）
-	rsi         float64     // RSI(14)（Wilder）
-	rsiInit     bool        // RSI 是否已初始化
-	rsiSeedSumG float64     // RSI 种子期涨幅累计
-	rsiSeedSumL float64     // RSI 种子期跌幅累计
-	rsiSeedCnt  int         // RSI 种子期计数
-	rsiAvgGain  float64     // Wilder 平均涨幅
-	rsiAvgLoss  float64     // Wilder 平均跌幅
-	trRing      [14]float64 // TR 环形缓冲（ATR14）
-	trIdx       int         // TR 环形写入索引
-	trFilled    int         // TR 已写入数
-	atr         float64     // ATR14
+	firstTS      int64        // 该币首根 K 线时间（上市日，新币过滤用）
+	rsi          float64      // RSI(14)（Wilder）
+	rsiInit      bool         // RSI 是否已初始化
+	rsiSeedSumG  float64      // RSI 种子期涨幅累计
+	rsiSeedSumL  float64      // RSI 种子期跌幅累计
+	rsiSeedCnt   int          // RSI 种子期计数
+	rsiAvgGain   float64      // Wilder 平均涨幅
+	rsiAvgLoss   float64      // Wilder 平均跌幅
+	trRing       [14]float64  // TR 环形缓冲（ATR14）
+	trIdx        int          // TR 环形写入索引
+	trFilled     int          // TR 已写入数
+	atr          float64      // ATR14
 	bbWidths     [288]float64 // 布林带宽度历史（分位计算）
 	bbIdx        int          // 宽度环形写入索引
 	bbFilled     int          // 宽度已写入数
@@ -268,13 +268,13 @@ type Position struct {
 
 // btcState BTC 市场状态（自适应融合模式用）: EMA 判断牛熊 + ATR 判断波动
 type btcState struct {
-	ema     float64 // BTC EMA（AdaptBTCEMA 周期）
-	emaInit bool    // EMA 是否已初始化
-	close   float64 // 最近收盘价
-	atr     float64 // ATR14（绝对值）
-	tr      [14]float64 // TR 环形缓冲
-	trIdx   int
-	trCnt   int
+	ema        float64     // BTC EMA（AdaptBTCEMA 周期）
+	emaInit    bool        // EMA 是否已初始化
+	close      float64     // 最近收盘价
+	atr        float64     // ATR14（绝对值）
+	tr         [14]float64 // TR 环形缓冲
+	trIdx      int
+	trCnt      int
 	closes     [WindowBars]float64 // 24h 收盘环形（btc24h 市场过滤用）
 	cIdx       int                 // 环形写入位置
 	cCnt       int                 // 已写入根数
@@ -291,18 +291,18 @@ type fundingPoint struct {
 
 // Trade 一笔已完成的交易记录
 type Trade struct {
-	Symbol   string
-	Side     string
-	EntryTS  int64
-	EntryPx  float64
-	ExitTS   int64
-	ExitPx   float64
-	Amount   float64
-	PnL      float64
-	PnLPct   float64 // 相对名义价值的收益率(%)
-	Reason   string  // STOP_LOSS / TRAILING_STOP
-	HeldBars int     // 持仓 K 线数
-	ChaseType string // 追涨/回踩分类
+	Symbol    string
+	Side      string
+	EntryTS   int64
+	EntryPx   float64
+	ExitTS    int64
+	ExitPx    float64
+	Amount    float64
+	PnL       float64
+	PnLPct    float64 // 相对名义价值的收益率(%)
+	Reason    string  // STOP_LOSS / TRAILING_STOP
+	HeldBars  int     // 持仓 K 线数
+	ChaseType string  // 追涨/回踩分类
 }
 
 // EquityPoint 权益曲线采样点
@@ -322,23 +322,23 @@ type Engine struct {
 	marginInUse   float64 // 占用保证金（开仓增加/平仓释放，用于破产保护）
 	fundingIncome float64 // funding 模式: 全部资金费收入（USDT，报告用）
 	equityCurve   []EquityPoint
-	lastTS        int64 // 上一片时间
-	btc           *btcState       // 自适应模式: BTC 市场状态
-	dailyCount    map[int64]int   // 单日开仓计数（DailyMax 限制用）
+	lastTS        int64         // 上一片时间
+	btc           *btcState     // 自适应模式: BTC 市场状态
+	dailyCount    map[int64]int // 单日开仓计数（DailyMax 限制用）
 
 	// v6 运行状态
-	fundRate       map[string]float64 // 最近已知资金费率（结算间保持）
-	fundPrev       map[string]float64 // 上一结算费率（负转正判定）
-	notionalInUse  float64            // 当前名义敞口总和（总敞口限制）
-	dayStartEquity float64            // 当日零点权益（日亏基准）
-	dayPnl         float64            // 当日已实现盈亏（含手续费）
-	dayBlocked     bool               // 日亏熔断: 当日停止开新仓
-	lastDay        int64              // 上一个 UTC 日（跨天重置日熔断）
-	lossStreak     int                // 连续亏损计数
-	lossBlocked    bool               // 连亏熔断: 赢单前停止开新仓
-	v6Gates        [8]int64           // v6 信号漏斗各阶段通过数（诊断用）
-	v6Skip         [4]int64           // v6 开仓拦截原因统计: 0=熔断拦截 1=仓位/敞口/破产 2=已持仓去重 3=实际成交数
-	fundingVetoCount int64            // S01 实验: 费率过热否决的信号数
+	fundRate         map[string]float64 // 最近已知资金费率（结算间保持）
+	fundPrev         map[string]float64 // 上一结算费率（负转正判定）
+	notionalInUse    float64            // 当前名义敞口总和（总敞口限制）
+	dayStartEquity   float64            // 当日零点权益（日亏基准）
+	dayPnl           float64            // 当日已实现盈亏（含手续费）
+	dayBlocked       bool               // 日亏熔断: 当日停止开新仓
+	lastDay          int64              // 上一个 UTC 日（跨天重置日熔断）
+	lossStreak       int                // 连续亏损计数
+	lossBlocked      bool               // 连亏熔断: 赢单前停止开新仓
+	v6Gates          [8]int64           // v6 信号漏斗各阶段通过数（诊断用）
+	v6Skip           [4]int64           // v6 开仓拦截原因统计: 0=熔断拦截 1=仓位/敞口/破产 2=已持仓去重 3=实际成交数
+	fundingVetoCount int64              // S01 实验: 费率过热否决的信号数
 	lastEntry        map[string]float64 // 追涨/回踩分类: 每币上一笔入场价
 }
 
@@ -678,13 +678,14 @@ func (e *Engine) signalPullback(st *symbolState, b *bar) string {
 
 // computeSignal 评估当前片是否产生开仓信号
 // 条件（全部满足才开仓）:
-//   1. 24h 窗口已满（预热期跳过）
-//   2. 15m K 线实体涨幅 >= MinGainPct
-//   3. 24h 涨幅 >= Min24hGainPct
-//   4. 24h 成交额 >= MinQuoteVolume
-//   5. 放量倍数 >= VolumeSurgeThreshold
-//   6. 山顶过滤: 距 24h 极值回撤 <= MaxPullbackPct
-//   7. 冷却期已过
+//  1. 24h 窗口已满（预热期跳过）
+//  2. 15m K 线实体涨幅 >= MinGainPct
+//  3. 24h 涨幅 >= Min24hGainPct
+//  4. 24h 成交额 >= MinQuoteVolume
+//  5. 放量倍数 >= VolumeSurgeThreshold
+//  6. 山顶过滤: 距 24h 极值回撤 <= MaxPullbackPct
+//  7. 冷却期已过
+//
 // 参数:
 //   - st: 币种状态
 //   - b: 当前 K 线
@@ -1101,17 +1102,17 @@ func (e *Engine) closePosition(p *Position, b *bar, exitPx float64, reason strin
 		}
 	}
 	e.trades = append(e.trades, &Trade{
-		Symbol:   p.Symbol,
-		Side:     p.Side,
-		EntryTS:  p.EntryTS,
-		EntryPx:  p.EntryPrice,
-		ExitTS:   b.ts,
-		ExitPx:   exitPx,
-		Amount:   p.Amount,
-		PnL:      pnl,
-		PnLPct:   pnl / (p.EntryPrice * p.Amount) * 100,
-		Reason:   reason,
-		HeldBars: int((b.ts - p.EntryTS) / 300000),
+		Symbol:    p.Symbol,
+		Side:      p.Side,
+		EntryTS:   p.EntryTS,
+		EntryPx:   p.EntryPrice,
+		ExitTS:    b.ts,
+		ExitPx:    exitPx,
+		Amount:    p.Amount,
+		PnL:       pnl,
+		PnLPct:    pnl / (p.EntryPrice * p.Amount) * 100,
+		Reason:    reason,
+		HeldBars:  int((b.ts - p.EntryTS) / 300000),
 		ChaseType: p.ChaseType,
 	})
 	if st, ok := e.states[p.Symbol]; ok {
