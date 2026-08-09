@@ -4,6 +4,7 @@ package strategy
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,41 @@ import (
 	"quant-desktop/internal/risk"
 	"quant-desktop/internal/storage"
 )
+
+// TestFetchTickers_PartialCacheFallsBackToREST 验证行情缓存不完整时回退 REST 全量刷新
+// 背景：实盘主网 !ticker@arr 大帧经代理截断/丢帧，缓存可能只剩部分币种；
+// 旧逻辑只检查"非空+新鲜"，导致缺失币种永不被筛选（实盘漏单根因）。
+func TestFetchTickers_PartialCacheFallsBackToREST(t *testing.T) {
+	e, _ := newTestEngine(t)
+
+	// 构造"新鲜但不完整"的缓存：只有 10 个币，lastUpdate 为刚刚
+	partial := make([]binance.Ticker, 0, 10)
+	for i := 0; i < 10; i++ {
+		partial = append(partial, binance.Ticker{
+			Symbol:      fmt.Sprintf("TEST%02dUSDT", i),
+			LastPrice:   1.0,
+			PriceChange: 5.0,
+			QuoteVolume: 1e8,
+		})
+	}
+	e.ws.BackfillCache(partial)
+	if e.ws.CacheAge() > 30*time.Second {
+		t.Fatal("测试前置失败：缓存应新鲜")
+	}
+
+	tickers, err := e.fetchTickers(context.Background())
+	if err != nil {
+		t.Fatalf("fetchTickers 失败: %v", err)
+	}
+	if len(tickers) < 100 {
+		t.Fatalf("部分缓存(10个)应回退 REST 全量刷新，实际返回 %d 个", len(tickers))
+	}
+
+	// REST 回填后 WS 缓存应补齐到全量（缺币自愈）
+	if ts := e.ws.GetTickers(); len(ts) < 100 {
+		t.Fatalf("BackfillCache 后 WS 缓存应补齐到全量，实际 %d 个", len(ts))
+	}
+}
 
 // newTestEngine 创建测试用 Engine 及关联的临时数据库
 // 使用 t.TempDir() 创建临时 SQLite 数据库，DRY_RUN 模式的币安客户端与 WsManager，

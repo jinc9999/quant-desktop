@@ -72,6 +72,7 @@ type Engine struct {
 	closeRetry     map[int64]time.Time  // positionID -> 平仓失败重试冷却截止时间（3min，防强平模式刷屏）
 	onError        func(context, message string) // 后台错误回调（推送到前端弹窗）
 	lastBreakerDay string            // 上次熔断检查日期（YYYY-MM-DD），跨天时重置日熔断
+	lastTickerRefresh time.Time      // 最近一次 REST 全量行情刷新时间（WS 缺币自愈用）
 
 	// klineOpenCache: symbol -> 当前 K 线周期开盘价缓存。
 	// K 线开盘价在周期内不变，只需每周期拉取一次，降低 REST 调用量（K 线信号模式用）。
@@ -475,17 +476,25 @@ func (e *Engine) runOnce(ctx context.Context) {
 //   - []binance.Ticker: 全市场行情列表
 //   - error: 获取失败时返回错误
 func (e *Engine) fetchTickers(ctx context.Context) ([]binance.Ticker, error) {
-	// 仅当缓存存在且足够新鲜（30s 内更新过）时才信任缓存。
+	// 仅当缓存存在、足够新鲜（30s 内更新过）且覆盖足够全量币种时才信任缓存。
 	// 否则说明 WS 行情流断线/卡死，缓存价格已冻结，必须走 REST 刷新，
 	// 否则策略会用死价格计算涨幅，导致永远筛不出候选。
 	const cacheTTL = 30 * time.Second
-	if ts := e.ws.GetTickers(); len(ts) > 0 && e.ws.CacheAge() < cacheTTL {
+	// 完整性门槛：主网 !ticker@arr 推送为大帧（~1MB），经代理可能被截断/丢帧，
+	// 缓存只剩部分币种（demo WS 帧完整不受影响；实盘曾漏掉 IOTX/SAGA/PIXEL 等
+	// 强势币，整段行情完全缺席，导致漏单）。REST 回填会把缓存补齐到全量。
+	const minCacheSymbols = 500 // 全市场约 700 个 USDT 合约，低于此数视为推送不完整
+	// 周期性强制全量刷新：即使缓存看似完整，每 5 分钟用 REST 复核一次，自愈任何漂移
+	const fullRefreshEvery = 5 * time.Minute
+	if ts := e.ws.GetTickers(); len(ts) >= minCacheSymbols && e.ws.CacheAge() < cacheTTL &&
+		time.Since(e.lastTickerRefresh) < fullRefreshEvery {
 		return ts, nil
 	}
 	// REST 回退并回填 WS 缓存，确保前端 GetPrice 有数据
 	tickers, err := e.client.FetchTickers(ctx)
 	if err == nil && len(tickers) > 0 {
 		e.ws.BackfillCache(tickers)
+		e.lastTickerRefresh = time.Now()
 	}
 	return tickers, err
 }
