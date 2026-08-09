@@ -20,7 +20,7 @@ type DailySummary struct {
 	TodayPnl     float64 `json:"todayPnl"`
 	WinRate      float64 `json:"winRate"`
 	TradeCount   int     `json:"tradeCount"`
-	Rating       int     `json:"rating"` // 0-10 市场/策略体验分
+	Rating       int     `json:"rating"`      // 0-10 市场/策略体验分
 	FeatureJSON  string  `json:"featureJson"` // ML 特征扩展字段（JSON）
 	CreatedAt    int64   `json:"createdAt"`
 	UpdatedAt    int64   `json:"updatedAt"`
