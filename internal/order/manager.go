@@ -615,10 +615,10 @@ func (m *Manager) handleFilledOrder(ctx context.Context, localOrder *storage.Ord
 		if feeErr != nil {
 			log.Printf("[ORDER] 查询手续费失败 positionID=%d: %v", localOrder.PositionID, feeErr)
 		}
-		// 兜底：按开仓+平仓名义价值 × 单边 0.05% taker 估算
+		// 兜底：按平仓名义价值 × 0.05% taker 估算（与 GetOrderFee 口径一致：仅平仓侧佣金）
 		fee = 0
 		if pos != nil && info.FilledPrice > 0 {
-			fee = (pos.Amount*pos.EntryPrice + pos.Amount*info.FilledPrice) * 0.0005
+			fee = pos.Amount * info.FilledPrice * 0.0005
 		}
 	}
 

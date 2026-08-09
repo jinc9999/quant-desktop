@@ -1548,7 +1548,8 @@ func (e *Engine) closePosition(ctx context.Context, pos *storage.Position, curre
 		pnl = (exitPrice - pos.EntryPrice) * pos.Amount
 	}
 
-	// 手续费：优先按真实成交单查询交易所佣金；查不到时按名义价值×费率兜底
+	// 手续费：优先按真实成交单查询交易所佣金（仅平仓侧佣金，与条件单路径口径一致）；
+	// 查不到时按平仓名义价值×费率兜底。
 	fee := 0.0
 	if closeRes != nil && closeRes.OrderID > 0 {
 		if f, ferr := e.client.GetOrderFee(ctx, pos.Symbol, closeRes.OrderID); ferr == nil {
@@ -1556,7 +1557,7 @@ func (e *Engine) closePosition(ctx context.Context, pos *storage.Position, curre
 		}
 	}
 	if fee <= 0 {
-		fee = (pos.Amount*pos.EntryPrice + pos.Amount*exitPrice) * takerFeeRate
+		fee = pos.Amount * exitPrice * takerFeeRate
 	}
 
 	// 更新数据库

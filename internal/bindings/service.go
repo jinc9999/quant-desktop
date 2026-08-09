@@ -796,18 +796,16 @@ func (s *QuantService) GetDailySummary() map[string]interface{} {
 			modes[m] = computeModeSummary(s.db, m, market)
 			continue
 		}
-		{
-			tmp, err := storage.NewDB(storage.DBPathForMode("data", m))
-			if err != nil {
-				modes[m] = map[string]interface{}{
-					"trades":      map[string]interface{}{"closedCount": 0, "todayPnl": 0, "winRate": 0, "byCoin": []interface{}{}},
-					"suggestions": []string{"该模式数据库不可用"},
-				}
-				continue
+		tmp, err := storage.OpenReadOnly(storage.DBPathForMode("data", m))
+		if err != nil {
+			modes[m] = map[string]interface{}{
+				"trades":      map[string]interface{}{"closedCount": 0, "todayPnl": 0, "winRate": 0, "byCoin": []interface{}{}},
+				"suggestions": []string{"该模式数据库不可用"},
 			}
-			modes[m] = computeModeSummary(tmp, m, market)
-			tmp.Close()
+			continue
 		}
+		modes[m] = computeModeSummary(tmp, m, market)
+		tmp.Close()
 	}
 	return map[string]interface{}{
 		"currentMode": cur,
