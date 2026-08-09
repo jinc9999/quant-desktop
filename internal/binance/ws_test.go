@@ -2,6 +2,8 @@
 package binance
 
 import (
+	"encoding/json"
+	"net/url"
 	"sync"
 	"testing"
 )
@@ -32,4 +34,59 @@ func TestWsManagerStopConcurrent(t *testing.T) {
 		})
 	}
 	wg.Wait()
+}
+
+// TestWsMarketTickerUnmarshalMixedTypes 验证全量行情流可解析真实推送。
+// Binance 的 !ticker@arr 每条都带 C/L/O/E/n/st 等数字字段，Go 标准库会把
+// 数字字段 C 误匹配到价格字段 c，导致整条流解析失败；自定义反序列化应只
+// 精确读取需要的字段，且兼容字段偶发为数字的情况。
+func TestWsMarketTickerUnmarshalMixedTypes(t *testing.T) {
+	raw := []byte(`[{"e":"24hrTicker","E":1786261855766,"s":"BTCUSDT","ps":"BTCUSDT","p":"0.0040100","P":"6.754","w":"0.0613222","c":"0.0633800","Q":"85","o":"0.0593700","h":"0.0651700","l":"0.0582600","v":"21979663668","q":"216168740.5","O":1786261850000,"C":1786261855766,"F":1,"L":2,"n":3,"st":4}]`)
+	var events []wsMarketTicker
+	if err := json.Unmarshal(raw, &events); err != nil {
+		t.Fatalf("全量行情流解析失败: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("期望 1 个 ticker，实际 %d", len(events))
+	}
+	got := events[0]
+	if got.Symbol != "BTCUSDT" || got.ClosePrice != "0.0633800" || got.PriceChangePercent != "6.754" || got.QuoteVolume != "216168740.5" {
+		t.Errorf("字段提取错误: %+v", got)
+	}
+}
+
+// TestWsMarketTickerUnmarshalNumeric 验证个别字段偶发为数字时也能解析。
+func TestWsMarketTickerUnmarshalNumeric(t *testing.T) {
+	raw := []byte(`[{"s":"ETHUSDT","c":0.3125,"P":2.1,"q":12345.6,"C":999}]`)
+	var events []wsMarketTicker
+	if err := json.Unmarshal(raw, &events); err != nil {
+		t.Fatalf("数字字段解析失败: %v", err)
+	}
+	got := events[0]
+	if got.ClosePrice != "0.3125" || got.PriceChangePercent != "2.1" || got.QuoteVolume != "12345.6" {
+		t.Errorf("数字字段提取错误: %+v", got)
+	}
+}
+
+// TestWsMarketEndpointSimulation 验证模拟盘使用 Binance demo 域名。
+// Windows 侧与 Mac 侧行情不一致时，先确认两边是否连到了同一行情源。
+func TestWsMarketEndpointSimulation(t *testing.T) {
+	if got := wsMarketEndpoint("SIMULATION"); got != "wss://demo-fstream.binance.com/market/ws" {
+		t.Errorf("SIMULATION 应使用 demo 域名，实际 %s", got)
+	}
+	if got := wsMarketEndpoint("LIVE"); got != "wss://fstream.binance.com/market/ws" {
+		t.Errorf("LIVE 应使用主网域名，实际 %s", got)
+	}
+}
+
+// TestNewWsManagerWithProxy 验证代理配置被 WS 管理器保存。
+func TestNewWsManagerWithProxy(t *testing.T) {
+	pu, err := url.Parse("socks5://127.0.0.1:10808")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := NewWsManagerWithProxy("SIMULATION", pu)
+	if ws.proxyURL == nil || ws.proxyURL.String() != "socks5://127.0.0.1:10808" {
+		t.Errorf("代理未保存: %v", ws.proxyURL)
+	}
 }

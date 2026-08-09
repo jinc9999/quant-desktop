@@ -33,7 +33,7 @@ type Client struct {
 	mode          string // DRY_RUN | SIMULATION | LIVE
 
 	// 实际选中的代理 URL（NewClient 候选链探测后的最终结果，nil=直连）。
-	// 仅供「测试连接」诊断报告使用，不参与请求逻辑。
+	// 同时供「测试连接」诊断报告与 WS 行情流拨号使用。
 	proxyURL *url.URL
 
 	// 精度缓存：symbol -> SymbolPrecision
@@ -56,6 +56,11 @@ type Client struct {
 
 	// DRY_RUN 模式模拟 OrderID 生成器（时间戳×1000+计数器，避免同毫秒重复）
 	dryRunOrderID atomic.Int64
+}
+
+// ProxyURL 返回客户端实际使用的代理 URL（nil 表示直连）。
+func (c *Client) ProxyURL() *url.URL {
+	return c.proxyURL
 }
 
 // localProxyPorts 常见本地代理端口（按优先级）：

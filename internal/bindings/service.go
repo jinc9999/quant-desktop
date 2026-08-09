@@ -217,7 +217,7 @@ func (s *QuantService) Init() error {
 
 	// 初始化币安客户端（按当前模式 + 代理配置）
 	s.client = binance.NewClient(s.apiKey, s.apiSecret, s.mode, s.proxyAddr, s.proxyPort)
-	s.ws = binance.NewWsManager(s.mode)
+	s.ws = binance.NewWsManagerWithProxy(s.mode, s.client.ProxyURL())
 
 	// 初始化委托管理器
 	s.orderMgr = order.NewManager(s.client, db)
@@ -301,7 +301,7 @@ func (s *QuantService) SetCredentials(mode, apiKey, apiSecret string) string {
 
 	// 按新模式重建客户端与 WS 管理器（带代理配置）
 	s.client = binance.NewClient(apiKey, apiSecret, mode, s.proxyAddr, s.proxyPort)
-	s.ws = binance.NewWsManager(mode)
+	s.ws = binance.NewWsManagerWithProxy(mode, s.client.ProxyURL())
 	// 重建委托管理器（使用新 client）
 	s.orderMgr = order.NewManager(s.client, s.db)
 

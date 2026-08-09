@@ -4,17 +4,24 @@ package binance
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
+	"net"
+	"net/http"
+	"net/url"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/net/proxy"
 )
 
 // WsManager WebSocket 行情管理器
 type WsManager struct {
 	mode        string
+	proxyURL    *url.URL
 	stopCh      chan struct{}
 	mu          sync.RWMutex
 	priceCache  map[string]float64 // symbol -> last price
@@ -26,8 +33,14 @@ type WsManager struct {
 
 // NewWsManager 创建 WebSocket 管理器
 func NewWsManager(mode string) *WsManager {
+	return NewWsManagerWithProxy(mode, nil)
+}
+
+// NewWsManagerWithProxy 创建 WebSocket 管理器，并为行情流拨号指定代理。
+func NewWsManagerWithProxy(mode string, proxyURL *url.URL) *WsManager {
 	return &WsManager{
 		mode:        mode,
+		proxyURL:    proxyURL,
 		stopCh:      make(chan struct{}),
 		priceCache:  make(map[string]float64),
 		tickerCache: make(map[string]Ticker),
@@ -38,17 +51,60 @@ func NewWsManager(mode string) *WsManager {
 // SIMULATION 使用 demo 域名，LIVE/DRY_RUN 使用主网域名（DRY_RUN 实际不发起连接）。
 func wsMarketEndpoint(mode string) string {
 	if mode == "SIMULATION" {
-		return "wss://fstream.binancefuture.com/market/ws"
+		return "wss://demo-fstream.binance.com/market/ws"
 	}
 	return "wss://fstream.binance.com/market/ws"
 }
 
 // wsMarketTicker 全市场 !ticker@arr 推送中的单币字段（仅取客户端需要的字段）。
+// 自定义反序列化：Binance 推送里还有 C/L/O/E/n/st 等数字字段，Go 标准库的
+// 字段匹配会把 C 误判为 c（收盘价），导致整条全量流解析失败；这里只精确取
+// 需要的四个字段，并兼容个别字段偶发为数字的情况。
 type wsMarketTicker struct {
-	Symbol             string `json:"s"`
-	ClosePrice         string `json:"c"`
-	PriceChangePercent string `json:"P"`
-	QuoteVolume        string `json:"q"`
+	Symbol             string
+	ClosePrice         string
+	PriceChangePercent string
+	QuoteVolume        string
+}
+
+func (t *wsMarketTicker) UnmarshalJSON(data []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	fieldString := func(key string) (string, error) {
+		raw, ok := fields[key]
+		if !ok || string(raw) == "null" {
+			return "", nil
+		}
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			return s, nil
+		}
+		var f float64
+		if err := json.Unmarshal(raw, &f); err == nil {
+			return strconv.FormatFloat(f, 'f', -1, 64), nil
+		}
+		var i int64
+		if err := json.Unmarshal(raw, &i); err == nil {
+			return strconv.FormatInt(i, 10), nil
+		}
+		return "", fmt.Errorf("字段 %s 既不是字符串也不是数字: %s", key, raw)
+	}
+	var err error
+	if t.Symbol, err = fieldString("s"); err != nil {
+		return err
+	}
+	if t.ClosePrice, err = fieldString("c"); err != nil {
+		return err
+	}
+	if t.PriceChangePercent, err = fieldString("P"); err != nil {
+		return err
+	}
+	if t.QuoteVolume, err = fieldString("q"); err != nil {
+		return err
+	}
+	return nil
 }
 
 // GetPrice 获取缓存的最新价格
@@ -70,12 +126,34 @@ func (ws *WsManager) StartAllMarketTicker(ctx context.Context) {
 	})
 }
 
+// wsDialer 为行情流拨号创建 Dialer：HTTP(S) 代理走 Proxy，SOCKS5 代理走拨号器。
+func wsDialer(proxyURL *url.URL) *websocket.Dialer {
+	dialer := *websocket.DefaultDialer
+	if proxyURL == nil {
+		return &dialer
+	}
+	switch proxyURL.Scheme {
+	case "socks5", "socks5h":
+		if pd, err := proxy.SOCKS5("tcp", proxyURL.Host, nil, proxy.Direct); err == nil {
+			if cd, ok := pd.(proxy.ContextDialer); ok {
+				dialer.NetDialContext = cd.DialContext
+			} else {
+				dialer.NetDial = func(network, addr string) (net.Conn, error) {
+					return pd.Dial(network, addr)
+				}
+			}
+		}
+	default:
+		dialer.Proxy = http.ProxyURL(proxyURL)
+	}
+	return &dialer
+}
+
 // wsMarketTickerServe 连接全市场行情流，收到数组推送时调用 handler。
 // 返回 doneC（连接断开或主动停止后关闭）与 stopC（调用方用于主动关闭连接）。
 // 不读取 go-binance 的包级 UseDemo 全局，避免与运行时模式切换产生数据竞态；
 // 且 stopC 被关闭时真正断开底层连接，避免停止策略后残留读 goroutine。
-func wsMarketTickerServe(endpoint string, handler func([]wsMarketTicker)) (doneC, stopC chan struct{}, err error) {
-	dialer := *websocket.DefaultDialer
+func wsMarketTickerServe(endpoint string, dialer *websocket.Dialer, handler func([]wsMarketTicker)) (doneC, stopC chan struct{}, err error) {
 	conn, _, err := dialer.Dial(endpoint, nil)
 	if err != nil {
 		return nil, nil, err
@@ -125,7 +203,7 @@ func (ws *WsManager) runAllMarketTickerLoop(ctx context.Context) {
 		default:
 		}
 
-		doneC, stopC, err := wsMarketTickerServe(endpoint, func(events []wsMarketTicker) {
+		doneC, stopC, err := wsMarketTickerServe(endpoint, wsDialer(ws.proxyURL), func(events []wsMarketTicker) {
 			// 一次推送为全市场数组，单次加锁批量更新，降低锁竞争
 			ws.mu.Lock()
 			for _, e := range events {
