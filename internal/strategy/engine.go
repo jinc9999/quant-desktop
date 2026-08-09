@@ -1315,6 +1315,21 @@ func (e *Engine) closePosition(ctx context.Context, pos *storage.Position, curre
 				})
 				return
 			}
+			// -2022 但确认查询失败（网络抖动）：仓位极可能已被交易所条件单平掉，
+			// 用 30 秒短重试尽快再次确认，而不是等 3 分钟长重试；
+			// 不弹错误窗（避免 -2022 无仓位可平刷屏）。
+			e.closeRetry[pos.ID] = time.Now().Add(30 * time.Second)
+			log.Printf("[Strategy] 幽灵持仓待确认 %s 持仓ID=%d reason=%s: 交易所无仓(-2022)但确认查询失败，30s 后复查", pos.Symbol, pos.ID, reason)
+			e.db.InsertLog(&storage.TradeLog{
+				Timestamp: time.Now().UnixMilli(),
+				Level:     "warn",
+				Module:    "strategy",
+				Message:   fmt.Sprintf("幽灵持仓待确认 %s reason=%s: -2022 无仓但确认查询失败，30s 后复查", pos.Symbol, reason),
+				Symbol:    pos.Symbol,
+				Price:     currentPrice,
+				Amount:    pos.Amount,
+			})
+			return
 		}
 
 		// -4131（市价单被 PERCENT_PRICE filter 拒绝）：测试网薄盘/高波动下常见，
