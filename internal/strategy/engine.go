@@ -126,13 +126,38 @@ func NewEngine(cfg binance.StrategyConfig, client *binance.Client, ws *binance.W
 }
 
 // onPositionClosed 平仓回调（引擎注册给订单管理器）：
-// 写冷却期 + 更新日亏/回撤熔断。条件单平仓是实盘主路径，必须与本地平仓同权。
+// 写冷却期 + 轻量日亏检查。条件单平仓是实盘主路径，回调在 tick goroutine 内同步触发，
+// 绝不能在回调内发起网络请求（会拖慢扫描循环）——日亏只用本地 DB 检查，
+// 账户回撤熔断改由 runOnce 周期性检查（每 60 tick 一次，约 15 分钟）。
 func (e *Engine) onPositionClosed(symbol, reason string) {
 	e.cooldown[symbol] = time.Now()
 	e.cooldownReason[symbol] = reason
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	e.updateBreaker(ctx)
+	e.checkDailyLossBreaker()
+}
+
+// checkDailyLossBreaker 仅用本地数据库检查日亏熔断（无网络调用，可安全用于平仓回调/tick）
+func (e *Engine) checkDailyLossBreaker() {
+	if e.isBreakerNil() {
+		return
+	}
+	todayPnl, _, err := e.db.GetTodayPnl()
+	if err != nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.breaker == nil {
+		return
+	}
+	if e.breaker.CheckDailyLoss(todayPnl) {
+		log.Printf("[Strategy] ⛔ 日亏熔断触发：当日盈亏 %.2f USDT，达到日损限制，停止开新仓", todayPnl)
+		e.db.InsertLog(&storage.TradeLog{
+			Timestamp: time.Now().UnixMilli(),
+			Level:     "warn",
+			Module:    "strategy",
+			Message:   fmt.Sprintf("日亏熔断触发：当日盈亏 %.2f USDT，停止开新仓", todayPnl),
+		})
+	}
 }
 
 // SetOnError 设置后台错误回调（用于推送错误到前端弹窗）
@@ -408,6 +433,13 @@ func (e *Engine) runOnce(ctx context.Context) {
 		if err := e.orderMgr.SyncOrders(ctx, priceMap); err != nil {
 			log.Printf("[Strategy] Tick %d 同步委托状态失败: %v", e.tickCount, err)
 		}
+	}
+
+	// 4.62 周期性完整熔断检查（日亏 + 账户回撤）：余额接口是网络请求，不能放在每次
+	// 平仓回调里（会拖慢 tick 循环，实盘网络慢时被放大）——每 60 tick（约 15 分钟）
+	// 检查一次即可；日亏在平仓回调里已用本地 DB 实时检查。
+	if e.tickCount%60 == 0 {
+		e.updateBreaker(ctx)
 	}
 
 	// 4.65 定期扫描孤儿仓位（交易所有但本地 DB 无的持仓），自动收养
