@@ -25,6 +25,7 @@ backtest/backtest
 
 # 回测输出与覆盖率（生成物）
 backtest/out_*/
+backtest/out/
 coverage.out
 
 # ===== 编译产物 =====
