@@ -62,6 +62,12 @@ const summary = ref<{
   trades: any;
   suggestions: string[];
 }>({ market: {}, trades: {}, suggestions: [] });
+/** 当前展示的总结模式（默认跟随程序当前模式，可手动切换） */
+const activeMode = ref("SIMULATION");
+const modeSummary = computed(() => {
+  const modes = (summary.value as any).modes || {};
+  return modes[activeMode.value] || { trades: {}, suggestions: [] };
+});
 let timer: ReturnType<typeof setInterval> | null = null;
 let summaryTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -168,6 +174,8 @@ async function fetchSummary() {
       trades: res.trades ?? {},
       suggestions: res.suggestions ?? []
     };
+    // 自动跟随当前模式（模拟盘/实盘），同时保留手动切换能力
+    if (res.currentMode) activeMode.value = res.currentMode;
   }
 }
 
@@ -363,7 +371,13 @@ onUnmounted(() => {
     <div class="quant-card summary-panel">
       <div class="card-header">
         <span class="card-title">每日总结</span>
-        <span class="summary-hint">每 60 秒自动刷新</span>
+        <div class="summary-tools">
+          <el-radio-group v-model="activeMode" size="small">
+            <el-radio-button value="SIMULATION">模拟盘</el-radio-button>
+            <el-radio-button value="LIVE">实盘</el-radio-button>
+          </el-radio-group>
+          <span class="summary-hint">每 60 秒自动刷新</span>
+        </div>
       </div>
 
       <!-- 市场概况 -->
@@ -420,24 +434,24 @@ onUnmounted(() => {
         <div class="summary-grid">
           <div class="summary-item">
             <span class="sum-label">平仓笔数</span>
-            <span>{{ summary.trades.closedCount ?? 0 }}</span>
+            <span>{{ modeSummary.trades.closedCount ?? 0 }}</span>
           </div>
           <div class="summary-item">
             <span class="sum-label">今日盈亏</span>
-            <span :class="chgClass(summary.trades.todayPnl ?? 0)">{{
-              fmtNum(summary.trades.todayPnl ?? 0, true)
+            <span :class="chgClass(modeSummary.trades.todayPnl ?? 0)">{{
+              fmtNum(modeSummary.trades.todayPnl ?? 0, true)
             }} U</span>
           </div>
           <div class="summary-item">
             <span class="sum-label">胜率</span>
-            <span>{{ (summary.trades.winRate ?? 0).toFixed(1) }}%</span>
+            <span>{{ (modeSummary.trades.winRate ?? 0).toFixed(1) }}%</span>
           </div>
           <div class="summary-item">
             <span class="sum-label">止损 / 跟踪止盈</span>
-            <span>{{ summary.trades.stopCount ?? 0 }} / {{ summary.trades.trailCount ?? 0 }}</span>
+            <span>{{ modeSummary.trades.stopCount ?? 0 }} / {{ modeSummary.trades.trailCount ?? 0 }}</span>
           </div>
         </div>
-        <el-table :data="summary.trades.byCoin ?? []" size="small" stripe class="coin-table">
+        <el-table :data="modeSummary.trades.byCoin ?? []" size="small" stripe class="coin-table">
           <el-table-column prop="symbol" label="币种" min-width="110" />
           <el-table-column prop="trades" label="交易次数" min-width="80" align="right" />
           <el-table-column prop="pnl" label="盈亏(U)" min-width="100" align="right">
@@ -463,10 +477,10 @@ onUnmounted(() => {
       </div>
 
       <!-- 改进建议 -->
-      <div class="summary-section" v-if="summary.suggestions.length">
+      <div class="summary-section" v-if="modeSummary.suggestions.length">
         <div class="section-title">改进建议</div>
         <ul class="suggest-list">
-          <li v-for="(s, i) in summary.suggestions" :key="i">{{ s }}</li>
+          <li v-for="(s, i) in modeSummary.suggestions" :key="i">{{ s }}</li>
         </ul>
       </div>
     </div>
@@ -645,6 +659,12 @@ onUnmounted(() => {
 .summary-hint {
   font-size: 12px;
   color: var(--quant-text-secondary, #8b8fa3);
+}
+
+.summary-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 /* 每日总结 */

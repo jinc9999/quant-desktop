@@ -567,86 +567,84 @@ func (s *QuantService) DeleteDailySummary(id int64) map[string]interface{} {
 }
 
 // GetDailySummary 生成「每日总结」：市场趋势 + 单币盈亏 + 改进建议
-func (s *QuantService) GetDailySummary() map[string]interface{} {
-	res := map[string]interface{}{
-		"market":      map[string]interface{}{},
-		"trades":      map[string]interface{}{},
-		"suggestions": []string{},
-	}
+// computeMarketSummary 计算全市场 24h 概况（模拟盘/实盘共用）
+func (s *QuantService) computeMarketSummary() map[string]interface{} {
+	m := map[string]interface{}{}
 	if s.client == nil {
-		return res
+		return m
 	}
-
-	// ---- 市场概况（当前全市场 24h 行情快照）----
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	tickers, tErr := s.client.FetchTickers(ctx)
-	if tErr == nil && len(tickers) > 0 {
-		up, down, total := 0, 0, 0
-		var sumChg, sumVol float64
-		chgs := make([]float64, 0, len(tickers))
-		type mv struct {
-			Symbol string
-			Change float64
-			Volume float64
+	if tErr != nil || len(tickers) == 0 {
+		return m
+	}
+	up, down, total := 0, 0, 0
+	var sumChg, sumVol float64
+	chgs := make([]float64, 0, len(tickers))
+	type mv struct {
+		Symbol string
+		Change float64
+		Volume float64
+	}
+	gainers, losers := []mv{}, []mv{}
+	for _, t := range tickers {
+		total++
+		sumChg += t.PriceChange
+		sumVol += t.QuoteVolume
+		chgs = append(chgs, t.PriceChange)
+		if t.PriceChange > 0 {
+			up++
+		} else if t.PriceChange < 0 {
+			down++
 		}
-		gainers, losers := []mv{}, []mv{}
-		for _, t := range tickers {
-			total++
-			sumChg += t.PriceChange
-			sumVol += t.QuoteVolume
-			chgs = append(chgs, t.PriceChange)
-			if t.PriceChange > 0 {
-				up++
-			} else if t.PriceChange < 0 {
-				down++
-			}
-			if t.QuoteVolume >= 1e7 {
-				if len(gainers) < 8 || t.PriceChange > gainers[len(gainers)-1].Change {
-					gainers = append(gainers, mv{t.Symbol, t.PriceChange, t.QuoteVolume})
-					sort.Slice(gainers, func(i, j int) bool { return gainers[i].Change > gainers[j].Change })
-					if len(gainers) > 8 {
-						gainers = gainers[:8]
-					}
-				}
-				if len(losers) < 8 || t.PriceChange < losers[len(losers)-1].Change {
-					losers = append(losers, mv{t.Symbol, t.PriceChange, t.QuoteVolume})
-					sort.Slice(losers, func(i, j int) bool { return losers[i].Change < losers[j].Change })
-					if len(losers) > 8 {
-						losers = losers[:8]
-					}
+		if t.QuoteVolume >= 1e7 {
+			if len(gainers) < 8 || t.PriceChange > gainers[len(gainers)-1].Change {
+				gainers = append(gainers, mv{t.Symbol, t.PriceChange, t.QuoteVolume})
+				sort.Slice(gainers, func(i, j int) bool { return gainers[i].Change > gainers[j].Change })
+				if len(gainers) > 8 {
+					gainers = gainers[:8]
 				}
 			}
-		}
-		median := 0.0
-		if len(chgs) > 0 {
-			sort.Float64s(chgs)
-			median = chgs[len(chgs)/2]
-		}
-		gainList := make([]map[string]interface{}, 0, len(gainers))
-		for _, g := range gainers {
-			gainList = append(gainList, map[string]interface{}{"symbol": g.Symbol, "change": round2(g.Change), "volume": round0(g.Volume)})
-		}
-		lossList := make([]map[string]interface{}, 0, len(losers))
-		for _, l := range losers {
-			lossList = append(lossList, map[string]interface{}{"symbol": l.Symbol, "change": round2(l.Change), "volume": round0(l.Volume)})
-		}
-		res["market"] = map[string]interface{}{
-			"total":           total,
-			"up":              up,
-			"down":            down,
-			"medianChange":    round2(median),
-			"avgChange":       round2(sumChg / float64(maxInt(total, 1))),
-			"totalQuoteVolume": round0(sumVol),
-			"topGainers":      gainList,
-			"topLosers":       lossList,
+			if len(losers) < 8 || t.PriceChange < losers[len(losers)-1].Change {
+				losers = append(losers, mv{t.Symbol, t.PriceChange, t.QuoteVolume})
+				sort.Slice(losers, func(i, j int) bool { return losers[i].Change < losers[j].Change })
+				if len(losers) > 8 {
+					losers = losers[:8]
+				}
+			}
 		}
 	}
+	median := 0.0
+	if len(chgs) > 0 {
+		sort.Float64s(chgs)
+		median = chgs[len(chgs)/2]
+	}
+	gainList := make([]map[string]interface{}, 0, len(gainers))
+	for _, g := range gainers {
+		gainList = append(gainList, map[string]interface{}{"symbol": g.Symbol, "change": round2(g.Change), "volume": round0(g.Volume)})
+	}
+	lossList := make([]map[string]interface{}, 0, len(losers))
+	for _, l := range losers {
+		lossList = append(lossList, map[string]interface{}{"symbol": l.Symbol, "change": round2(l.Change), "volume": round0(l.Volume)})
+	}
+	return map[string]interface{}{
+		"total":            total,
+		"up":               up,
+		"down":             down,
+		"medianChange":     round2(median),
+		"avgChange":        round2(sumChg / float64(maxInt(total, 1))),
+		"totalQuoteVolume": round0(sumVol),
+		"topGainers":       gainList,
+		"topLosers":        lossList,
+	}
+}
 
-	// ---- 今日交易：单币盈亏聚合 ----
-	var positions []storage.Position
-	if s.db != nil {
-		positions, _ = s.db.GetTodayClosedPositions()
+// computeModeSummary 计算指定模式的今日交易总结（单币聚合 + 规则化建议）
+func computeModeSummary(db *storage.DB, mode string, market map[string]interface{}) map[string]interface{} {
+	positions := []storage.Position{}
+	if db != nil {
+		positions, _ = db.GetTodayClosedPositions()
 	}
 	type coinAgg struct {
 		Symbol  string
@@ -701,7 +699,6 @@ func (s *QuantService) GetDailySummary() map[string]interface{} {
 			"avgLossPct": round2(ca.LossPct / float64(maxInt(ca.Trades-ca.Wins, 1))),
 		})
 	}
-
 	totalPnl, winCount, stopCount, trailCount, trailLoss := 0.0, 0, 0, 0, 0
 	for _, p := range positions {
 		pnl := 0.0
@@ -722,16 +719,6 @@ func (s *QuantService) GetDailySummary() map[string]interface{} {
 			}
 		}
 	}
-	res["trades"] = map[string]interface{}{
-		"closedCount": len(positions),
-		"todayPnl":    round2(totalPnl),
-		"winRate":     round1(safePct(winCount, len(positions))),
-		"stopCount":   stopCount,
-		"trailCount":  trailCount,
-		"byCoin":      coinList,
-	}
-
-	// ---- 改进建议（规则化）----
 	sugg := []string{}
 	if len(positions) == 0 {
 		sugg = append(sugg, "今日暂无已平仓交易，等待行情与信号即可。")
@@ -749,16 +736,56 @@ func (s *QuantService) GetDailySummary() map[string]interface{} {
 			sugg = append(sugg, fmt.Sprintf("今日止损 %d 笔，检查是否频繁追高；单笔止损 4%% 内为正常成本，避免因单日波动改参数。", stopCount))
 		}
 	}
-	if m, ok := res["market"].(map[string]interface{}); ok {
-		if up, ok := m["up"].(int); ok {
-			if down, ok := m["down"].(int); ok && down > up {
-				sugg = append(sugg, fmt.Sprintf("市场偏弱：上涨 %d / 下跌 %d，追涨胜率通常下降，可考虑适当降低开仓频率。", up, down))
-			}
+	if up, ok := market["up"].(int); ok {
+		if down, ok := market["down"].(int); ok && down > up {
+			sugg = append(sugg, fmt.Sprintf("市场偏弱：上涨 %d / 下跌 %d，追涨胜率通常下降，可考虑适当降低开仓频率。", up, down))
 		}
 	}
 	sugg = append(sugg, "风险提示：实盘仅用验证过的 S01 v2 参数，任何参数改动必须先回测后实盘。")
-	res["suggestions"] = sugg
-	return res
+	return map[string]interface{}{
+		"trades": map[string]interface{}{
+			"closedCount": len(positions),
+			"todayPnl":    round2(totalPnl),
+			"winRate":     round1(safePct(winCount, len(positions))),
+			"stopCount":   stopCount,
+			"trailCount":  trailCount,
+			"byCoin":      coinList,
+		},
+		"suggestions": sugg,
+	}
+}
+
+// GetDailySummary 生成「每日总结」：市场概况（全局）+ 模拟盘/实盘双模式交易总结与建议
+func (s *QuantService) GetDailySummary() map[string]interface{} {
+	s.mu.RLock()
+	cur := s.mode
+	dbCur := s.db
+	s.mu.RUnlock()
+	market := s.computeMarketSummary()
+	modes := map[string]interface{}{}
+	for _, m := range []string{"SIMULATION", "LIVE"} {
+		db := dbCur
+		if m != cur {
+			tmp, err := storage.NewDB(storage.DBPathForMode("data", m))
+			if err != nil {
+				modes[m] = map[string]interface{}{
+					"trades":      map[string]interface{}{"closedCount": 0, "todayPnl": 0, "winRate": 0, "byCoin": []interface{}{}},
+					"suggestions": []string{"该模式数据库不可用"},
+				}
+				continue
+			}
+			db = tmp
+		}
+		modes[m] = computeModeSummary(db, m, market)
+		if m != cur && db != nil {
+			db.Close()
+		}
+	}
+	return map[string]interface{}{
+		"currentMode": cur,
+		"market":      market,
+		"modes":       modes,
+	}
 }
 
 // TestConnection 测试当前 API Key 认证是否可用（只读，绝不下单）。
