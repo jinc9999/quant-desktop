@@ -3,12 +3,13 @@ package binance
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/adshao/go-binance/v2/futures"
+	"github.com/gorilla/websocket"
 )
 
 // WsManager WebSocket 行情管理器
@@ -33,6 +34,23 @@ func NewWsManager(mode string) *WsManager {
 	}
 }
 
+// wsMarketEndpoint 返回指定模式的全市场行情流地址。
+// SIMULATION 使用 demo 域名，LIVE/DRY_RUN 使用主网域名（DRY_RUN 实际不发起连接）。
+func wsMarketEndpoint(mode string) string {
+	if mode == "SIMULATION" {
+		return "wss://fstream.binancefuture.com/market/ws"
+	}
+	return "wss://fstream.binance.com/market/ws"
+}
+
+// wsMarketTicker 全市场 !ticker@arr 推送中的单币字段（仅取客户端需要的字段）。
+type wsMarketTicker struct {
+	Symbol             string `json:"s"`
+	ClosePrice         string `json:"c"`
+	PriceChangePercent string `json:"P"`
+	QuoteVolume        string `json:"q"`
+}
+
 // GetPrice 获取缓存的最新价格
 func (ws *WsManager) GetPrice(symbol string) (float64, bool) {
 	ws.mu.RLock()
@@ -52,12 +70,51 @@ func (ws *WsManager) StartAllMarketTicker(ctx context.Context) {
 	})
 }
 
+// wsMarketTickerServe 连接全市场行情流，收到数组推送时调用 handler。
+// 返回 doneC（连接断开或主动停止后关闭）与 stopC（调用方用于主动关闭连接）。
+// 不读取 go-binance 的包级 UseDemo 全局，避免与运行时模式切换产生数据竞态；
+// 且 stopC 被关闭时真正断开底层连接，避免停止策略后残留读 goroutine。
+func wsMarketTickerServe(endpoint string, handler func([]wsMarketTicker)) (doneC, stopC chan struct{}, err error) {
+	dialer := *websocket.DefaultDialer
+	conn, _, err := dialer.Dial(endpoint, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	doneC = make(chan struct{})
+	stopC = make(chan struct{})
+	go func() {
+		defer close(doneC)
+		defer conn.Close()
+		go func() {
+			select {
+			case <-stopC:
+				conn.Close()
+			case <-doneC:
+			}
+		}()
+		for {
+			_, message, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			var events []wsMarketTicker
+			if err := json.Unmarshal(message, &events); err != nil {
+				log.Printf("[WS] 全量行情流解析失败: %v", err)
+				continue
+			}
+			handler(events)
+		}
+	}()
+	return doneC, stopC, nil
+}
+
 // runAllMarketTickerLoop 全量行情流重连循环。
 // 连接断开或启动失败时按指数退避（1s→30s 封顶）自动重连，
 // 直到 stopCh 关闭或 ctx 取消才退出。每次成功写入缓存会刷新 lastUpdate。
 func (ws *WsManager) runAllMarketTickerLoop(ctx context.Context) {
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
+	endpoint := wsMarketEndpoint(ws.mode) + "/!ticker@arr"
 	for {
 		// 启动前检查停止信号
 		select {
@@ -68,10 +125,10 @@ func (ws *WsManager) runAllMarketTickerLoop(ctx context.Context) {
 		default:
 		}
 
-		doneC, _, err := futures.WsAllMarketTickerServe(func(event futures.WsAllMarketTickerEvent) {
+		doneC, stopC, err := wsMarketTickerServe(endpoint, func(events []wsMarketTicker) {
 			// 一次推送为全市场数组，单次加锁批量更新，降低锁竞争
 			ws.mu.Lock()
-			for _, e := range event {
+			for _, e := range events {
 				last := mustParseFloat(e.ClosePrice)
 				ws.priceCache[e.Symbol] = last
 				ws.tickerCache[e.Symbol] = Ticker{
@@ -83,8 +140,6 @@ func (ws *WsManager) runAllMarketTickerLoop(ctx context.Context) {
 			}
 			ws.mu.Unlock()
 			ws.lastUpdate.Store(time.Now().UnixMilli())
-		}, func(err error) {
-			log.Printf("[WS] 全量行情流错误: %v", err)
 		})
 
 		if err != nil {
@@ -97,8 +152,10 @@ func (ws *WsManager) runAllMarketTickerLoop(ctx context.Context) {
 			case <-doneC:
 				log.Printf("[WS] 全量行情流断开，%v 后重连", backoff)
 			case <-ws.stopCh:
+				close(stopC)
 				return
 			case <-ctx.Done():
+				close(stopC)
 				return
 			}
 		}

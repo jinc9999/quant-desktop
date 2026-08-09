@@ -120,35 +120,35 @@ const (
 
 // StrategyConfig 策略配置参数
 type StrategyConfig struct {
-	ScanIntervalSec        int     `json:"scanIntervalSec"`
-	Timeframe              string  `json:"timeframe"`
-	MinGainPct             float64 `json:"minGainPct"`
-	Min24hGainPct          float64 `json:"min24hGainPct"` // 24h 涨幅门槛（%），双条件筛选：同时满足 15m 与 24h 涨幅才入选
-	MinQuoteVolume         float64 `json:"minQuoteVolume"`
-	TopN                   int     `json:"topN"` // 候选数量上限，按成交额排序后只取前 N（0=不限制）
-	MaxOpenPositions       int     `json:"maxOpenPositions"`
-	Leverage               int     `json:"leverage"`
-	PositionMarginUSDT     float64 `json:"positionMarginUsdt"`
-	CooldownMin            int     `json:"cooldownMin"` // 冷却期（分钟），平仓后 N 分钟内不再开同一币
-	MarginMode             string  `json:"marginMode"`  // 保证金模式：ISOLATED（逐仓）/ CROSSED（全仓）
-	StopLossPct            float64 `json:"stopLossPct"`
-	TrailingActivation     float64 `json:"trailingActivation"`
-	TrailingCallback       float64 `json:"trailingCallback"`
-	DailyLossLimitPct      float64 `json:"dailyLossLimitPct"`      // 日损限制（%）：当日累计亏损达到此比例后停止开新仓
-	MaxDrawdownPct         float64 `json:"maxDrawdownPct"`         // 最大回撤（%）：账户从近期高点回撤达到此比例后全面熔断
-	EnableShort            bool    `json:"enableShort"`            // 是否启用做空
-	EnableAddOn            bool    `json:"enableAddOn"`            // 是否启用追加仓位：持仓币移动止盈激活（现价>=首仓入场价*(1+TrailingActivation)）且再次命中信号时追加 1 张独立新单
-	MaxAddOnsPerSymbol     int     `json:"maxAddOnsPerSymbol"`     // 单币最大追加次数（默认 2 = 同币最多 1+2=3 仓；0=关闭追加）
-	ConfirmWindowMin       float64 `json:"confirmWindowMin"`       // 短窗口确认时长（分钟），0=关闭
-	ConfirmThreshold       float64 `json:"confirmThreshold"`       // 短窗口涨幅确认阈值（%），0=关闭
-	VolumeSurgeThreshold   float64 `json:"volumeSurgeThreshold"`   // 成交量放大倍数阈值，0=关闭
-	SignalMode             string  `json:"signalMode"`             // 信号模式：kline=15m K线实体实时检测（当前价相对K线开盘价），sliding=滑动窗口过程涨幅
-	MaxPullbackPct         float64 `json:"maxPullbackPct"`         // 山顶过滤器（%）：当前价距 24h 最高/最低价回撤超过该值不追（0=关闭）
-	TakeProfitPct          float64 `json:"takeProfitPct"`          // 固定止盈比例（0=关闭）：价格达到入场价*(1+该比例)先止盈，与跟踪止盈先到先平
-	MaxHoldMin             int     `json:"maxHoldMin"`             // 最长持仓分钟数（0=关闭）：超过后按当前价市价平仓，防止仓位长期滞留
-	EnableNewListingFilter bool    `json:"enableNewListingFilter"` // 新币过滤开关：过滤上市天数 <= NewListingMinDays 的新上市合约（默认开启）
-	NewListingMinDays      int     `json:"newListingMinDays"`      // 新币过滤天数阈值（天）：上市天数小于等于该值的合约不参与任何开仓（默认 60，0=关闭）
-	CooldownAfterTrailingMin int   `json:"cooldownAfterTrailingMin"` // 移动止盈平仓后的冷却分钟数（<0=统一用 CooldownMin；0=立即再入；默认 15）
+	ScanIntervalSec          int     `json:"scanIntervalSec"`
+	Timeframe                string  `json:"timeframe"`
+	MinGainPct               float64 `json:"minGainPct"`
+	Min24hGainPct            float64 `json:"min24hGainPct"` // 24h 涨幅门槛（%），双条件筛选：同时满足 15m 与 24h 涨幅才入选
+	MinQuoteVolume           float64 `json:"minQuoteVolume"`
+	TopN                     int     `json:"topN"` // 候选数量上限，按成交额排序后只取前 N（0=不限制）
+	MaxOpenPositions         int     `json:"maxOpenPositions"`
+	Leverage                 int     `json:"leverage"`
+	PositionMarginUSDT       float64 `json:"positionMarginUsdt"`
+	CooldownMin              int     `json:"cooldownMin"` // 冷却期（分钟），平仓后 N 分钟内不再开同一币
+	MarginMode               string  `json:"marginMode"`  // 保证金模式：ISOLATED（逐仓）/ CROSSED（全仓）
+	StopLossPct              float64 `json:"stopLossPct"`
+	TrailingActivation       float64 `json:"trailingActivation"`
+	TrailingCallback         float64 `json:"trailingCallback"`
+	DailyLossLimitPct        float64 `json:"dailyLossLimitPct"`        // 日损限制（%）：当日累计亏损达到此比例后停止开新仓
+	MaxDrawdownPct           float64 `json:"maxDrawdownPct"`           // 最大回撤（%）：账户从近期高点回撤达到此比例后全面熔断
+	EnableShort              bool    `json:"enableShort"`              // 是否启用做空
+	EnableAddOn              bool    `json:"enableAddOn"`              // 是否启用追加仓位：持仓币移动止盈激活（现价>=首仓入场价*(1+TrailingActivation)）且再次命中信号时追加 1 张独立新单
+	MaxAddOnsPerSymbol       int     `json:"maxAddOnsPerSymbol"`       // 单币最大追加次数（默认 2 = 同币最多 1+2=3 仓；0=关闭追加）
+	ConfirmWindowMin         float64 `json:"confirmWindowMin"`         // 短窗口确认时长（分钟），0=关闭
+	ConfirmThreshold         float64 `json:"confirmThreshold"`         // 短窗口涨幅确认阈值（%），0=关闭
+	VolumeSurgeThreshold     float64 `json:"volumeSurgeThreshold"`     // 成交量放大倍数阈值，0=关闭
+	SignalMode               string  `json:"signalMode"`               // 信号模式：kline=15m K线实体实时检测（当前价相对K线开盘价），sliding=滑动窗口过程涨幅
+	MaxPullbackPct           float64 `json:"maxPullbackPct"`           // 山顶过滤器（%）：当前价距 24h 最高/最低价回撤超过该值不追（0=关闭）
+	TakeProfitPct            float64 `json:"takeProfitPct"`            // 固定止盈比例（0=关闭）：价格达到入场价*(1+该比例)先止盈，与跟踪止盈先到先平
+	MaxHoldMin               int     `json:"maxHoldMin"`               // 最长持仓分钟数（0=关闭）：超过后按当前价市价平仓，防止仓位长期滞留
+	EnableNewListingFilter   bool    `json:"enableNewListingFilter"`   // 新币过滤开关：过滤上市天数 <= NewListingMinDays 的新上市合约（默认开启）
+	NewListingMinDays        int     `json:"newListingMinDays"`        // 新币过滤天数阈值（天）：上市天数小于等于该值的合约不参与任何开仓（默认 60，0=关闭）
+	CooldownAfterTrailingMin int     `json:"cooldownAfterTrailingMin"` // 移动止盈平仓后的冷却分钟数（<0=统一用 CooldownMin；0=立即再入；默认 15）
 }
 
 // DefaultStrategyConfig 返回默认策略配置（S01 v2 纯追涨，2026-08-08 全参数矩阵定稿）
@@ -175,13 +175,13 @@ func DefaultStrategyConfig() StrategyConfig {
 		ScanIntervalSec:        15,
 		Timeframe:              "15m",
 		MinGainPct:             4.0,
-		Min24hGainPct:          4.0, // 双条件筛选：24h 涨幅 >= 4% 且 15m K 线涨幅 >= 4%
+		Min24hGainPct:          4.0,      // 双条件筛选：24h 涨幅 >= 4% 且 15m K 线涨幅 >= 4%
 		MinQuoteVolume:         10000000, // 24h 成交额下限 1000 万 USDT（2026-08-07 用户要求 10 万→1000 万，过滤小市值低流动性币）
 		TopN:                   10,
 		MaxOpenPositions:       10,   // 最大同时持仓 10（2026-08-04 用户要求 5→10）
 		Leverage:               10,   // 10x 杠杆
 		PositionMarginUSDT:     10.0, // 每仓保证金 10U
-		CooldownMin:            30, // 止损/超时平仓后冷却 30 分钟（S01 v2，2026-08-08 矩阵定稿）
+		CooldownMin:            30,   // 止损/超时平仓后冷却 30 分钟（S01 v2，2026-08-08 矩阵定稿）
 		MarginMode:             MarginModeIsolated,
 		StopLossPct:            0.04,    // 4% 固定止损（S01 v2：紧止损取小亏，回撤 10.2%→6.4%）
 		TrailingActivation:     0.02,    // 2% 涨幅激活移动止损（S01 v2：更早激活锁定利润）

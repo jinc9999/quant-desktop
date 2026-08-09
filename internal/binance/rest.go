@@ -62,6 +62,10 @@ type Client struct {
 // Clash Verge(7897), Clash(7890/7891), V2Ray(1087/1080), SS(1080), 用户设定 V2Ray(10808)
 var localProxyPorts = []int{7897, 7890, 7891, 1087, 1080, 8118, 10808}
 
+// demoModeMu 串行化 go-binance 包级 UseDemo 全局变量的写入。
+// 模式切换与客户端重建可能在 WS 连接建立期间发生，必须避免与库内并发读取竞态。
+var demoModeMu sync.Mutex
+
 // remoteProxyCandidates 远端兜底代理（用户设定 2026-08-05）：
 // 仅当本机无可用代理时才尝试；每级都做 HTTP 实测，转发不可用的不会误选。
 var remoteProxyCandidates = []struct {
@@ -191,6 +195,7 @@ func (s *socks5Dialer) DialContext(ctx context.Context, network, addr string) (n
 // proxyAddr: 用户指定的代理地址（为空则自动检测）
 // proxyPort: 用户指定的代理端口（0 则自动检测）
 func NewClient(apiKey, apiSecret, mode string, proxyAddr string, proxyPort int) *Client {
+	demoModeMu.Lock()
 	if mode == "SIMULATION" {
 		// 币安已将 testnet 迁移到 demo 平台（2025-11 起）
 		futures.UseDemo = true
@@ -209,6 +214,7 @@ func NewClient(apiKey, apiSecret, mode string, proxyAddr string, proxyPort int) 
 	}
 
 	fut := futures.NewClient(apiKey, apiSecret)
+	demoModeMu.Unlock()
 
 	// 代理解析优先级（每个候选都做 TCP+HTTP/SOCKS5 实测，转发不可用的"死代理"不会误选）：
 	//   1. 用户指定代理（前端设置/数据库保存，最高优先）
@@ -272,6 +278,9 @@ func NewClient(apiKey, apiSecret, mode string, proxyAddr string, proxyPort int) 
 // ctx: 请求上下文
 // 返回 error 错误信息
 func (c *Client) LoadExchangeInfo(ctx context.Context) error {
+	if c.isDryRun() {
+		return nil // DRY_RUN 不发起真实网络请求，精度规则由 EnsurePrecision 降级兜底
+	}
 	info, err := c.futuresClient.NewExchangeInfoService().Do(ctx)
 	if err != nil {
 		return fmt.Errorf("获取 exchangeInfo 失败: %w", err)
@@ -487,6 +496,7 @@ func isTransientErr(err error) bool {
 // 网络瞬时错误（如代理/交易所 EOF）最多重试 3 次，避免单次抖动导致行情缺失。
 // 参数:
 //   - ctx: 上下文
+//
 // 返回:
 //   - []Ticker: 过滤后的 USDT 交易对行情列表
 //   - error: 重试耗尽仍失败时返回错误

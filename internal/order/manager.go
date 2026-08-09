@@ -17,13 +17,14 @@ import (
 // Manager 委托生命周期管理器
 // 职责：委托创建（含重试）、状态同步、崩溃恢复、关联取消
 type Manager struct {
-	client        *binance.Client
-	db            *storage.DB
-	maxRetries    int           // 最大重试次数，默认 3
-	retryDelay    time.Duration // 初始重试间隔，默认 1s
-	mu            sync.Mutex    // 保护并发同步
-	lastSyncTime  int64         // 上次同步时间（Unix 毫秒）
-	lastSyncError string        // 上次同步错误信息
+	client          *binance.Client
+	db              *storage.DB
+	maxRetries      int           // 最大重试次数，默认 3
+	retryDelay      time.Duration // 初始重试间隔，默认 1s
+	mu              sync.Mutex    // 保护并发同步
+	lastSyncTime    int64         // 上次同步时间（Unix 毫秒）
+	lastSyncError   string        // 上次同步错误信息
+	insertOrderHook func() error  // 测试用：注入 InsertOrder 失败，模拟 DB 写入异常
 	// OnClose 平仓回调（引擎注册，用于写冷却期）。
 	// 触发时机：条件单触发平仓 / 回滚平仓 / 幽灵清理 完成 DB 关闭后，传入平仓币种。
 	// 传入 reason 供引擎按平仓原因区分冷却（如移动止盈后允许快速再入）。
@@ -48,11 +49,38 @@ func NewManager(client *binance.Client, db *storage.DB) *Manager {
 	}
 }
 
+// cancelPlacedOrder 取消一条刚从交易所挂出、尚未登记到本地 DB 的委托。
+// 用于 DB 写入失败后的补偿清理，避免交易所侧残留无人管理的条件单。
+func (m *Manager) cancelPlacedOrder(ctx context.Context, res *binance.OrderResult) {
+	if res == nil {
+		return
+	}
+	if res.AlgoID > 0 {
+		if err := m.client.CancelAlgoOrder(ctx, res.AlgoID); err != nil {
+			log.Printf("[ORDER] 补偿取消条件单失败 algoId=%d: %v", res.AlgoID, err)
+		}
+		return
+	}
+	if res.OrderID > 0 {
+		if err := m.client.CancelOrder(ctx, res.Symbol, res.OrderID); err != nil {
+			log.Printf("[ORDER] 补偿取消委托失败 orderId=%d: %v", res.OrderID, err)
+		}
+	}
+}
+
 // notifyClosed 平仓成功后通知引擎（幂等；OnClose 未注册时为空操作）
 func (m *Manager) notifyClosed(symbol, reason string) {
 	if m.OnClose != nil {
 		m.OnClose(symbol, reason)
 	}
+}
+
+// insertOrder 包装 DB 写入，测试时可注入失败。
+func (m *Manager) insertOrder(order *storage.Order) (int64, error) {
+	if m.insertOrderHook != nil {
+		return 0, m.insertOrderHook()
+	}
+	return m.db.InsertOrder(order)
 }
 
 // PlaceStopOrders 为持仓挂出止损+跟踪止损委托单
@@ -124,9 +152,13 @@ func (m *Manager) PlaceStopOrders(ctx context.Context, pos *storage.Position, cf
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-	stopOrderID, err := m.db.InsertOrder(stopOrder)
+	stopOrderID, err := m.insertOrder(stopOrder)
 	if err != nil {
-		return fmt.Errorf("保存止损委托记录失败: %w", err)
+		// 条件单已在交易所挂出但本地登记失败：先取消该条件单，再回滚持仓，
+		// 否则会留下"交易所有止损单、本地无记录"的无人管理状态。
+		m.cancelPlacedOrder(ctx, stopResult)
+		m.rollbackPosition(ctx, pos, "保存止损委托记录失败: "+err.Error())
+		return fmt.Errorf("保存止损委托记录失败（已取消条件单并回滚）: %w", err)
 	}
 
 	// 写入 EventCreated 事件
@@ -181,9 +213,11 @@ func (m *Manager) PlaceStopOrders(ctx context.Context, pos *storage.Position, cf
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-	trailOrderID, err := m.db.InsertOrder(trailOrder)
+	trailOrderID, err := m.insertOrder(trailOrder)
 	if err != nil {
-		return fmt.Errorf("保存跟踪止损委托记录失败: %w", err)
+		m.cancelPlacedOrder(ctx, trailResult)
+		m.rollbackPosition(ctx, pos, "保存跟踪止损委托记录失败: "+err.Error())
+		return fmt.Errorf("保存跟踪止损委托记录失败（已取消条件单并回滚）: %w", err)
 	}
 
 	// 写入 EventCreated 事件
@@ -245,7 +279,7 @@ func (m *Manager) PlaceStopOrders(ctx context.Context, pos *storage.Position, cf
 				CreatedAt:       tpNow,
 				UpdatedAt:       tpNow,
 			}
-			tpOrderID, err := m.db.InsertOrder(tpOrder)
+			tpOrderID, err := m.insertOrder(tpOrder)
 			if err != nil {
 				log.Printf("[ORDER] 保存固定止盈委托记录失败: %v", err)
 			} else {
@@ -431,7 +465,7 @@ func (m *Manager) SyncOrders(ctx context.Context, priceMap map[string]float64) e
 					// 仅当变动超过 0.1% 时才更新，避免频繁撤挂触发限频
 					oldStop := stopOrder.StopPrice
 					if oldStop == nil || math.Abs(newStop-*oldStop)/newStop > 0.001 {
-					result, updateErr := m.client.UpdateStopMarketPrice(ctx, stopOrder.AlgoID, pos.Symbol, newStop, pos.Amount, pos.Side)
+						result, updateErr := m.client.UpdateStopMarketPrice(ctx, stopOrder.AlgoID, pos.Symbol, newStop, pos.Amount, pos.Side)
 						if updateErr != nil {
 							log.Printf("[ORDER] ❌ %s 动态更新止损价失败 algoId=%d: %v", pos.Symbol, stopOrder.AlgoID, updateErr)
 						} else {
@@ -1003,7 +1037,7 @@ func (m *Manager) PlaceCloseLimitOrder(ctx context.Context, pos *storage.Positio
 		side = "BUY"
 	}
 	now := time.Now().UnixMilli()
-	_, err = m.db.InsertOrder(&storage.Order{
+	_, err = m.insertOrder(&storage.Order{
 		PositionID:      pos.ID,
 		ExchangeOrderID: result.OrderID,
 		Symbol:          pos.Symbol,
@@ -1014,5 +1048,10 @@ func (m *Manager) PlaceCloseLimitOrder(ctx context.Context, pos *storage.Positio
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	})
+	if err != nil {
+		// 交易所 LIMIT 平仓单已挂出但本地登记失败：取消该挂单，避免后续重复挂单与无人跟踪。
+		m.cancelPlacedOrder(ctx, result)
+		return fmt.Errorf("保存降级平仓委托记录失败（已取消 LIMIT 单）: %w", err)
+	}
 	return err
 }

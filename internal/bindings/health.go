@@ -101,19 +101,25 @@ func (s *QuantService) runHealthCheck() {
 // 先标记停止，再重新创建引擎并启动，全程写入日志
 func (s *QuantService) restartEngine() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	// 清理旧引擎
 	if s.engine != nil {
 		s.engine.Stop()
 	}
-	s.started = false
+	// 等待旧引擎 goroutine 完全退出（Stop 会取消引擎子上下文，正常应在数秒内返回）
+	if !s.waitForEngineExit(10 * time.Second) {
+		log.Printf("[HealthMonitor] 旧引擎在 10 秒内未完全退出，继续创建新引擎")
+	}
 
 	// 重新创建并启动引擎
 	s.engine = strategy.NewEngine(s.cfg, s.client, s.ws, s.db, s.orderMgr)
-	go s.engine.Start(s.ctx)
+	s.engineWG.Add(1)
+	go func() {
+		defer s.engineWG.Done()
+		s.engine.Start(s.ctx)
+	}()
 	s.started = true
-
-	s.mu.Unlock()
 
 	s.logHealthEvent("info", "策略引擎已自动重启")
 	log.Printf("[HealthMonitor] 引擎自动重启完成")

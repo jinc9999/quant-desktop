@@ -99,3 +99,42 @@ func TestDailySummary_AutoType(t *testing.T) {
 		t.Fatalf("应查到 2 条（auto+manual）: len=%d err=%v", len(list), err)
 	}
 }
+
+// TestDailySummary_ResaveAfterDelete 验证软删除后再次保存同一 (mode, date, type) 可复活原记录。
+// 回归背景：daily_summaries 唯一索引包含软删除行，旧实现先查 deleted_at=0 再 INSERT，
+// 删除后重新保存会撞唯一约束失败。
+func TestDailySummary_ResaveAfterDelete(t *testing.T) {
+	db := newTestDB(t)
+	s := &DailySummary{
+		Mode: "SIMULATION", SummaryDate: "2026-08-09", SummaryType: "daily",
+		MarketNotes: "旧备注", CoinAnalysis: "x", Suggestions: "x",
+		TodayPnl: 3.5, WinRate: 50, TradeCount: 2, Rating: 5, FeatureJSON: "{}",
+	}
+	id, _, err := db.SaveDailySummary(s)
+	if err != nil || id <= 0 {
+		t.Fatalf("首次保存失败: id=%d err=%v", id, err)
+	}
+	if ok, err := db.DeleteDailySummary("SIMULATION", id); err != nil || !ok {
+		t.Fatalf("删除失败: ok=%v err=%v", ok, err)
+	}
+
+	s.MarketNotes = "复活后的新备注"
+	s.TodayPnl = 9.5
+	id2, exists, err := db.SaveDailySummary(s)
+	if err != nil {
+		t.Fatalf("删除后重新保存应成功（修复唯一索引冲突）: %v", err)
+	}
+	if id2 != id {
+		t.Errorf("复活应复用原记录 ID: 期望 %d, 实际 %d", id, id2)
+	}
+	if !exists {
+		t.Error("复活已有记录应返回 exists=true")
+	}
+	got, err := db.GetDailySummaryByID("SIMULATION", id)
+	if err != nil || got == nil {
+		t.Fatalf("复活后按 ID 查询失败: %v", err)
+	}
+	if got.MarketNotes != "复活后的新备注" || got.TodayPnl != 9.5 {
+		t.Errorf("复活后内容未更新: notes=%q pnl=%f", got.MarketNotes, got.TodayPnl)
+	}
+}

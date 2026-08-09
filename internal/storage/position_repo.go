@@ -2,6 +2,8 @@
 package storage
 
 import (
+	"database/sql"
+	"errors"
 	"time"
 )
 
@@ -99,7 +101,10 @@ func (db *DB) GetPositionByID(id int64) (*Position, error) {
 		&p.CurrentStopPrice, &p.Status, &p.OpenedAt, &p.ClosedAt,
 		&p.CloseReason, &p.RealizedPnl, &p.ExitPrice, &p.Fee)
 	if err != nil {
-		return nil, nil // 不存在时返回 nil
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
 	}
 	return &p, nil
 }

@@ -35,12 +35,12 @@ type QuantService struct {
 	cancel    context.CancelFunc
 	mu        sync.RWMutex
 	started   bool
-	engineWG  sync.WaitGroup // 等待策略引擎 goroutine 退出（Shutdown 时汇合，避免 db.Close 与 runOnce 竞态）
-	mode      string // 运行模式：SIMULATION | LIVE
-	apiKey    string // 币安 API Key（运行时内存）
-	apiSecret string // 币安 API Secret（运行时内存）
-	proxyAddr string // 用户指定的代理地址
-	proxyPort int    // 用户指定的代理端口
+	engineWG  sync.WaitGroup   // 等待策略引擎 goroutine 退出（Shutdown 时汇合，避免 db.Close 与 runOnce 竞态）
+	mode      string           // 运行模式：SIMULATION | LIVE
+	apiKey    string           // 币安 API Key（运行时内存）
+	apiSecret string           // 币安 API Secret（运行时内存）
+	proxyAddr string           // 用户指定的代理地址
+	proxyPort int              // 用户指定的代理端口
 	app       *application.App // Wails 应用引用（用于事件推送）
 }
 
@@ -247,38 +247,56 @@ func (s *QuantService) SetCredentials(mode, apiKey, apiSecret string) string {
 	if s.started {
 		return "策略运行中，请先停止再切换模式"
 	}
+	if s.db == nil {
+		return "服务未初始化"
+	}
 	if mode != "SIMULATION" && mode != "LIVE" {
 		return "无效的运行模式"
 	}
 
-	modeChanged := s.mode != mode
-	s.mode = mode
-	// 清理首尾空白字符（Windows 复制粘贴易带入空格/换行，币安视为格式无效 -2014）
-	s.apiKey = strings.TrimSpace(apiKey)
-	s.apiSecret = strings.TrimSpace(apiSecret)
+	// 策略虽已标记停止，但旧引擎 goroutine 可能仍在退出（StopStrategy 不再阻塞等待）。
+	// 切换数据库前必须等其完全退出，避免引擎并发读写被关闭的旧库。
+	if !s.waitForEngineExit(5 * time.Second) {
+		log.Printf("[Binding] 旧策略引擎在 5 秒内未完全退出，继续切换模式")
+	}
 
-	// 模式切换时：关闭旧数据库，打开新模式对应的独立数据库
+	modeChanged := s.mode != mode
+	// 清理首尾空白字符（Windows 复制粘贴易带入空格/换行，币安视为格式无效 -2014）
+	apiKey = strings.TrimSpace(apiKey)
+	apiSecret = strings.TrimSpace(apiSecret)
+
+	// 模式切换时：先打开新模式数据库，成功后再切换，避免打开失败后旧库被关闭、
+	// 模式字段已变更导致服务处于不一致状态。
 	if modeChanged {
-		if s.db != nil {
-			s.db.Close()
-		}
 		dbPath := storage.DBPathForMode("data", mode)
 		newDB, err := storage.NewDB(dbPath)
 		if err != nil {
 			log.Printf("[Binding] 切换数据库失败: %v", err)
 			return "切换数据库失败: " + err.Error()
 		}
+		if s.db != nil {
+			if closeErr := s.db.Close(); closeErr != nil {
+				log.Printf("[Binding] 关闭旧数据库失败: %v", closeErr)
+			}
+		}
 		s.db = newDB
-		// 重建委托管理器（依赖 db）
-		s.orderMgr = order.NewManager(s.client, newDB)
 		log.Printf("[Binding] 已切换数据库: %s", dbPath)
 	}
+
+	s.mode = mode
+	s.apiKey = apiKey
+	s.apiSecret = apiSecret
 
 	// 持久化凭据到当前模式的数据库（加密存储）
 	if apiKey != "" || apiSecret != "" {
 		if err := s.db.SaveCredentials(mode, apiKey, apiSecret); err != nil {
 			log.Printf("[Binding] 保存凭据失败: %v", err)
 		}
+	}
+
+	// 停止旧 WS 行情循环（旧引擎已停止时才允许切换模式，这里不会影响新引擎）
+	if s.ws != nil {
+		s.ws.Stop()
 	}
 
 	// 按新模式重建客户端与 WS 管理器（带代理配置）
@@ -347,6 +365,9 @@ func (s *QuantService) SetProxyConfig(address string, port int) string {
 
 	if s.started {
 		return "策略运行中，请先停止再修改代理配置"
+	}
+	if s.db == nil {
+		return "服务未初始化"
 	}
 
 	s.proxyAddr = address
@@ -459,12 +480,12 @@ func intVal(m map[string]interface{}, k string) int {
 func (s *QuantService) SaveDailySummary(input map[string]interface{}) map[string]interface{} {
 	res := map[string]interface{}{"ok": false}
 	s.mu.RLock()
-	mode, db := s.mode, s.db
-	s.mu.RUnlock()
-	if db == nil {
+	defer s.mu.RUnlock()
+	if s.db == nil {
 		res["message"] = "数据库未初始化"
 		return res
 	}
+	mode, db := s.mode, s.db
 	sum := &storage.DailySummary{
 		Mode:         mode,
 		SummaryDate:  strVal(input, "summaryDate"),
@@ -504,12 +525,12 @@ func (s *QuantService) SaveDailySummary(input map[string]interface{}) map[string
 func (s *QuantService) GetDailySummaries(dateFrom, dateTo, summaryType string) map[string]interface{} {
 	res := map[string]interface{}{"ok": false, "list": []interface{}{}}
 	s.mu.RLock()
-	mode, db := s.mode, s.db
-	s.mu.RUnlock()
-	if db == nil {
+	defer s.mu.RUnlock()
+	if s.db == nil {
 		res["message"] = "数据库未初始化"
 		return res
 	}
+	mode, db := s.mode, s.db
 	list, err := db.GetDailySummaries(mode, dateFrom, dateTo, summaryType)
 	if err != nil {
 		res["message"] = err.Error()
@@ -529,12 +550,12 @@ func (s *QuantService) GetDailySummaries(dateFrom, dateTo, summaryType string) m
 func (s *QuantService) GetDailySummaryByID(id int64) map[string]interface{} {
 	res := map[string]interface{}{"ok": false}
 	s.mu.RLock()
-	mode, db := s.mode, s.db
-	s.mu.RUnlock()
-	if db == nil {
+	defer s.mu.RUnlock()
+	if s.db == nil {
 		res["message"] = "数据库未初始化"
 		return res
 	}
+	mode, db := s.mode, s.db
 	item, err := db.GetDailySummaryByID(mode, id)
 	if err != nil {
 		res["message"] = "记录不存在或无权访问"
@@ -549,12 +570,12 @@ func (s *QuantService) GetDailySummaryByID(id int64) map[string]interface{} {
 func (s *QuantService) DeleteDailySummary(id int64) map[string]interface{} {
 	res := map[string]interface{}{"ok": false}
 	s.mu.RLock()
-	mode, db := s.mode, s.db
-	s.mu.RUnlock()
-	if db == nil {
+	defer s.mu.RUnlock()
+	if s.db == nil {
 		res["message"] = "数据库未初始化"
 		return res
 	}
+	mode, db := s.mode, s.db
 	ok, err := db.DeleteDailySummary(mode, id)
 	if err != nil || !ok {
 		res["message"] = "删除失败或记录不存在"
@@ -757,15 +778,25 @@ func computeModeSummary(db *storage.DB, mode string, market map[string]interface
 
 // GetDailySummary 生成「每日总结」：市场概况（全局）+ 模拟盘/实盘双模式交易总结与建议
 func (s *QuantService) GetDailySummary() map[string]interface{} {
-	s.mu.RLock()
-	cur := s.mode
-	dbCur := s.db
-	s.mu.RUnlock()
 	market := s.computeMarketSummary()
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cur := s.mode
+	if s.db == nil {
+		return map[string]interface{}{
+			"currentMode": cur,
+			"market":      market,
+			"modes":       map[string]interface{}{},
+		}
+	}
 	modes := map[string]interface{}{}
 	for _, m := range []string{"SIMULATION", "LIVE"} {
-		db := dbCur
-		if m != cur {
+		if m == cur {
+			modes[m] = computeModeSummary(s.db, m, market)
+			continue
+		}
+		{
 			tmp, err := storage.NewDB(storage.DBPathForMode("data", m))
 			if err != nil {
 				modes[m] = map[string]interface{}{
@@ -774,11 +805,8 @@ func (s *QuantService) GetDailySummary() map[string]interface{} {
 				}
 				continue
 			}
-			db = tmp
-		}
-		modes[m] = computeModeSummary(db, m, market)
-		if m != cur && db != nil {
-			db.Close()
+			modes[m] = computeModeSummary(tmp, m, market)
+			tmp.Close()
 		}
 	}
 	return map[string]interface{}{
@@ -817,6 +845,14 @@ func (s *QuantService) StartStrategy() string {
 
 	if s.started {
 		return "策略已在运行中"
+	}
+	if s.db == nil || s.client == nil || s.ws == nil {
+		return "服务未初始化"
+	}
+	// 前一个引擎可能刚被 Stop，但 goroutine 尚未退出（例如正在等待网络调用返回）。
+	// 等待其完全退出后再创建新引擎，避免新旧引擎并发运行导致 DB/行情竞态。
+	if !s.waitForEngineExit(5 * time.Second) {
+		return "上一策略引擎仍在退出，请稍后重试"
 	}
 
 	// 创建引擎（集成委托管理器）
@@ -954,7 +990,7 @@ func (s *QuantService) GetDashboardData() map[string]interface{} {
 	}
 
 	// 账户余额：调用交易所 API（带超时保护）
-	{
+	if s.client != nil {
 		ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
 		defer cancel()
 		balance, err := s.client.GetFuturesBalance(ctx)
@@ -970,6 +1006,11 @@ func (s *QuantService) GetDashboardData() map[string]interface{} {
 			data["totalMarginBalance"] = balance.TotalMarginBalance
 			data["availableBalance"] = balance.AvailableBalance
 		}
+	} else {
+		data["totalWalletBalance"] = float64(0)
+		data["totalUnrealizedPnl"] = float64(0)
+		data["totalMarginBalance"] = float64(0)
+		data["availableBalance"] = float64(0)
 	}
 
 	return data
@@ -1136,6 +1177,8 @@ func (s *QuantService) CancelOrder(orderID int64) string {
 // GetOrderSyncStatus 获取委托同步状态摘要
 // 返回: {activeCount, lastSyncTime, lastSyncError}
 func (s *QuantService) GetOrderSyncStatus() map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.orderMgr == nil {
 		return map[string]interface{}{
 			"activeCount":   0,
@@ -1144,6 +1187,22 @@ func (s *QuantService) GetOrderSyncStatus() map[string]interface{} {
 		}
 	}
 	return s.orderMgr.GetSyncStatus()
+}
+
+// waitForEngineExit 等待所有策略引擎 goroutine 退出，超时返回 false。
+// 不持有 s.mu 的引擎 goroutine 不需要该锁，因此可在持有锁时调用。
+func (s *QuantService) waitForEngineExit(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		s.engineWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // strPtr 返回字符串指针（辅助函数）

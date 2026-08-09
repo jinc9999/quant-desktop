@@ -170,6 +170,37 @@ func TestPlaceStopOrders_Idempotent(t *testing.T) {
 	}
 }
 
+// TestPlaceStopOrders_DBInsertFailureRollsBack 验证交易所条件单已挂出但本地 DB 写入失败时，
+// 会取消已挂条件单并回滚，而不是留下"交易所有止损单、本地无记录"的无人管理状态。
+// 测试用不存在的 positionID 触发外键约束失败，模拟 DB 写入失败路径。
+func TestPlaceStopOrders_DBInsertFailureRollsBack(t *testing.T) {
+	mgr, db := setupTestEnv(t)
+	cfg := testStrategyConfig()
+	pos := insertTestPosition(t, db)
+
+	// 注入第一次 InsertOrder（止损单登记）失败，验证补偿取消 + 回滚路径
+	mgr.insertOrderHook = func() error { return fmt.Errorf("injected db failure") }
+	err := mgr.PlaceStopOrders(context.Background(), pos, cfg)
+	if err == nil {
+		t.Fatal("DB 写入失败时 PlaceStopOrders 应返回错误")
+	}
+
+	orders, getErr := db.GetActiveOrders()
+	if getErr != nil {
+		t.Fatalf("GetActiveOrders 失败: %v", getErr)
+	}
+	if len(orders) != 0 {
+		t.Errorf("回滚后应无活跃委托，实际 %d 条", len(orders))
+	}
+	open, getErr := db.GetOpenPositions()
+	if getErr != nil {
+		t.Fatalf("GetOpenPositions 失败: %v", getErr)
+	}
+	if len(open) != 0 {
+		t.Errorf("回滚后应无 OPEN 持仓，实际 %d 条", len(open))
+	}
+}
+
 // TestCancelRelatedOrders 验证取消关联委托后活跃委托数为 0
 func TestCancelRelatedOrders(t *testing.T) {
 	mgr, db := setupTestEnv(t)

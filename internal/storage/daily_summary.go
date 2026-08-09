@@ -3,6 +3,7 @@ package storage
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"time"
@@ -20,7 +21,7 @@ type DailySummary struct {
 	TodayPnl     float64 `json:"todayPnl"`
 	WinRate      float64 `json:"winRate"`
 	TradeCount   int     `json:"tradeCount"`
-	Rating       int     `json:"rating"` // 0-10 市场/策略体验分
+	Rating       int     `json:"rating"`      // 0-10 市场/策略体验分
 	FeatureJSON  string  `json:"featureJson"` // ML 特征扩展字段（JSON）
 	CreatedAt    int64   `json:"createdAt"`
 	UpdatedAt    int64   `json:"updatedAt"`
@@ -76,17 +77,18 @@ func (db *DB) SaveDailySummary(s *DailySummary) (int64, bool, error) {
 	now := time.Now().UnixMilli()
 	var id int64
 	err := db.Conn.QueryRow(
-		`SELECT id FROM daily_summaries WHERE mode=? AND summary_date=? AND summary_type=? AND deleted_at=0`,
+		`SELECT id FROM daily_summaries WHERE mode=? AND summary_date=? AND summary_type=?`,
 		s.Mode, s.SummaryDate, s.SummaryType,
 	).Scan(&id)
-	if err != nil && err != sql.ErrNoRows {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, false, err
 	}
 	exists := err == nil
 	if exists {
+		// 软删除后重新保存 = 复活原记录（唯一索引含删除行，不能走 INSERT）。
 		_, err = db.Conn.Exec(
 			`UPDATE daily_summaries SET market_notes=?, coin_analysis=?, suggestions=?,
-			 today_pnl=?, win_rate=?, trade_count=?, rating=?, feature_json=?, updated_at=?
+			 today_pnl=?, win_rate=?, trade_count=?, rating=?, feature_json=?, deleted_at=0, updated_at=?
 			 WHERE id=?`,
 			s.MarketNotes, s.CoinAnalysis, s.Suggestions, s.TodayPnl, s.WinRate,
 			s.TradeCount, s.Rating, s.FeatureJSON, now, id,

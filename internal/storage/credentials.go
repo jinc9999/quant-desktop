@@ -8,7 +8,9 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -98,7 +100,7 @@ func (db *DB) GetKeyValue(key string) (string, error) {
 	var value string
 	err := db.Conn.QueryRow(`SELECT value FROM strategy_config WHERE key = ?`, key).Scan(&value)
 	if err != nil {
-		if err.Error() == "sql: no rows in result set" {
+		if errors.Is(err, sql.ErrNoRows) {
 			return "", nil
 		}
 		return "", err
@@ -166,12 +168,12 @@ func (db *DB) LoadCredentials(mode string) (string, string, error) {
 	var encKey, encSecret string
 
 	err := db.Conn.QueryRow(`SELECT value FROM strategy_config WHERE key = ?`, "cred:"+mode+":apiKey").Scan(&encKey)
-	if err != nil && err.Error() != "sql: no rows in result set" {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", "", fmt.Errorf("查询 API Key 失败: %w", err)
 	}
 
 	err = db.Conn.QueryRow(`SELECT value FROM strategy_config WHERE key = ?`, "cred:"+mode+":apiSecret").Scan(&encSecret)
-	if err != nil && err.Error() != "sql: no rows in result set" {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", "", fmt.Errorf("查询 API Secret 失败: %w", err)
 	}
 

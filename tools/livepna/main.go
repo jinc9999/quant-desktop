@@ -87,13 +87,12 @@ func main() {
 
 	// ===== 每币汇总 =====
 	type coinStat struct {
-		symbol      string
-		count       int
-		wins        int
-		losses      int
-		pnl         float64
-		first, last string
-		reasons     map[string]int
+		symbol  string
+		count   int
+		wins    int
+		losses  int
+		pnl     float64
+		reasons map[string]int
 	}
 	coins := map[string]*coinStat{}
 	for _, t := range trades {
@@ -171,7 +170,6 @@ func main() {
 
 	// ===== 持仓时长分布 =====
 	fmt.Printf("\n===== 持仓时长分布（按 15 分钟桶）=====\n")
-	type bucket struct{ min int }
 	buckets := map[int]*[2]int{} // 桶 -> [笔数, 盈亏*100]
 	for _, t := range trades {
 		b := t.HeldMin / 15 * 15

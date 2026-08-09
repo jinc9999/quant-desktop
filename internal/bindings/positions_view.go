@@ -3,6 +3,8 @@
 package bindings
 
 import (
+	"fmt"
+
 	"quant-desktop/internal/binance"
 	"quant-desktop/internal/storage"
 )
@@ -48,6 +50,11 @@ type PositionDetail struct {
 // 数据流：positions 表 → 批量查询关联委托（单次 SQL）→ WS 行情缓存补充标记价格
 // 返回: 持仓明细列表；无持仓时返回空数组
 func (s *QuantService) GetPositionDetails() ([]PositionDetail, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.db == nil {
+		return nil, fmt.Errorf("服务已关闭")
+	}
 	positions, err := s.db.GetOpenPositions()
 	if err != nil {
 		return nil, err

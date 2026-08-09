@@ -102,6 +102,10 @@ function chgClass(v: number): string {
   return "text-neutral";
 }
 
+function onResize() {
+  if (chart) chart.resize();
+}
+
 onMounted(async () => {
   await loadMode();
   await fetchAuto();
@@ -110,12 +114,12 @@ onMounted(async () => {
     fetchAuto();
     fetchList();
   }, 60000);
-  window.addEventListener("resize", () => chart && chart.resize());
+  window.addEventListener("resize", onResize);
 });
 
 onUnmounted(() => {
   if (listTimer) clearInterval(listTimer);
-  window.removeEventListener("resize", () => chart && chart.resize());
+  window.removeEventListener("resize", onResize);
   if (chart) {
     chart.dispose();
     chart = null;

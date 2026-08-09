@@ -471,6 +471,22 @@ func TestShutdown_DoubleCall(t *testing.T) {
 	}
 }
 
+// TestMethodsAfterShutdown 验证 Shutdown 后调用查询方法返回"服务已关闭"而非 panic。
+func TestMethodsAfterShutdown(t *testing.T) {
+	svc := newTestService(t)
+	svc.Shutdown()
+
+	if _, err := svc.GetLogs(10); err == nil {
+		t.Error("Shutdown 后 GetLogs 应返回错误")
+	}
+	if _, err := svc.GetPositions(); err == nil {
+		t.Error("Shutdown 后 GetPositions 应返回错误")
+	}
+	if _, err := svc.GetPositionDetails(); err == nil {
+		t.Error("Shutdown 后 GetPositionDetails 应返回错误")
+	}
+}
+
 // ==================== 九、健康监控测试 ====================
 
 // TestHealthCheck_Normal 验证正常运行时健康检查不触发修复
@@ -523,6 +539,27 @@ func TestHealthCheck_EngineCrash(t *testing.T) {
 	}
 	if !engineAlive {
 		t.Error("自动重启后引擎应处于运行状态")
+	}
+}
+
+// TestHealthRestartShutdown 验证自动重启后的引擎也纳入 engineWG，
+// Shutdown 时不会出现 DB 先关闭、新引擎仍运行的竞态。
+func TestHealthRestartShutdown(t *testing.T) {
+	svc := newTestService(t)
+
+	svc.StartStrategy()
+	svc.mu.Lock()
+	if svc.engine != nil {
+		svc.engine.Stop()
+	}
+	svc.mu.Unlock()
+
+	svc.runHealthCheck()
+
+	// 不应 panic，且 Shutdown 后 db 置空
+	svc.Shutdown()
+	if svc.db != nil {
+		t.Error("Shutdown 后 db 应为 nil")
 	}
 }
 

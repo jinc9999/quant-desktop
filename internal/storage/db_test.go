@@ -963,6 +963,23 @@ func TestGetPositionByID(t *testing.T) {
 	}
 }
 
+// TestGetPositionByID_DBError 验证 DB 故障时返回错误而不是被误判为"记录不存在"。
+// 回归背景：旧实现把除 ErrNoRows 外的所有查询错误都吞掉并返回 nil, nil，
+// 调用方（如委托同步）会把 DB 故障当成持仓不存在，静默跳过风控闭环。
+func TestGetPositionByID_DBError(t *testing.T) {
+	db := newTestDB(t)
+	if err := db.Close(); err != nil {
+		t.Fatalf("关闭测试数据库失败: %v", err)
+	}
+	pos, err := db.GetPositionByID(1)
+	if err == nil {
+		t.Fatal("数据库已关闭时 GetPositionByID 应返回错误")
+	}
+	if pos != nil {
+		t.Error("查询失败时不应返回持仓记录")
+	}
+}
+
 // TestUpdateRiskState_ClosedGuard 测试 UpdateRiskState 对已平仓持仓无效
 // 验证点: 平仓后调用 UpdateRiskState 不修改任何字段
 func TestUpdateRiskState_ClosedGuard(t *testing.T) {

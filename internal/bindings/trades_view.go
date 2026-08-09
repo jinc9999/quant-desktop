@@ -2,6 +2,8 @@
 // 盈利百分比等展示字段，供前端「已完成交易」表格一次性获取全部列数据
 package bindings
 
+import "fmt"
+
 // ClosedTradeDetail 已完成交易明细视图（前端已完成交易表格行数据模型）
 type ClosedTradeDetail struct {
 	ID          int64    `json:"id"`          // 持仓 ID
@@ -25,6 +27,11 @@ type ClosedTradeDetail struct {
 //
 // 返回: 已完成交易明细列表（按平仓时间降序）；无记录时返回空数组
 func (s *QuantService) GetClosedTradeDetails(limit int) ([]ClosedTradeDetail, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.db == nil {
+		return nil, fmt.Errorf("服务已关闭")
+	}
 	positions, err := s.db.GetClosedPositions(limit)
 	if err != nil {
 		return nil, err

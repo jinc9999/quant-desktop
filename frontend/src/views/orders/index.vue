@@ -246,7 +246,7 @@ function handleManualRefresh() {
  */
 function toggleAutoRefresh(val: boolean | string | number) {
   if (val) {
-    refreshTimer = setInterval(() => refreshOrders(false), 3000);
+    if (!refreshTimer) refreshTimer = setInterval(() => refreshOrders(false), 3000);
   } else if (refreshTimer) {
     clearInterval(refreshTimer);
     refreshTimer = null;

@@ -65,7 +65,7 @@ func TestRegimeOK_Breadth(t *testing.T) {
 
 	// 构造 3 个 24h 窗口已满的币: 2 涨 1 跌
 	for _, v := range []struct {
-		sym     string
+		sym      string
 		old, cur float64
 	}{
 		{"AAAUSDT", 100, 110},
