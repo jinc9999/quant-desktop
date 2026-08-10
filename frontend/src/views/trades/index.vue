@@ -92,20 +92,32 @@ const pagedRows = computed(() => {
 });
 
 // ===== 摘要统计 =====
-/** 总平仓笔数 */
-const totalCount = computed(() => trades.value.length);
-/** 总净盈亏 */
-const totalPnl = computed(() => trades.value.reduce((s, t) => s + t.realizedPnl, 0));
-/** 总手续费 */
-const totalFee = computed(() => trades.value.reduce((s, t) => s + t.fee, 0));
-/** 盈利笔数 */
-const profitCount = computed(() => trades.value.filter(t => t.realizedPnl > 0).length);
-/** 亏损笔数 */
-const lossCount = computed(() => trades.value.filter(t => t.realizedPnl < 0).length);
-/** 胜率（盈利笔数 / 总笔数 × 100） */
-const winRate = computed(() =>
-  totalCount.value > 0 ? (profitCount.value / totalCount.value) * 100 : 0
-);
+// 全量统计来自后端 GetTradeStats（数据库全部已平仓记录聚合），
+// 不再用最近 200 条列表在端上计算，避免"总"数字随列表截断失真。
+interface TradeStats {
+  count: number;
+  netPnl: number;
+  wins: number;
+  losses: number;
+  zeros: number;
+  totalFee: number;
+  winRate: number;
+}
+
+const tradeStats = ref<TradeStats>({ count: 0, netPnl: 0, wins: 0, losses: 0, zeros: 0, totalFee: 0, winRate: 0 });
+
+/** 总平仓笔数（全量） */
+const totalCount = computed(() => tradeStats.value.count);
+/** 总净盈亏（全量） */
+const totalPnl = computed(() => tradeStats.value.netPnl);
+/** 总手续费（全量） */
+const totalFee = computed(() => tradeStats.value.totalFee);
+/** 盈利笔数（全量） */
+const profitCount = computed(() => tradeStats.value.wins);
+/** 亏损笔数（全量） */
+const lossCount = computed(() => tradeStats.value.losses);
+/** 胜率：盈利 /（盈利 + 亏损），零盈亏（多为对账幽灵单）不计入分母 */
+const winRate = computed(() => tradeStats.value.winRate);
 
 // ===== 格式化工具 =====
 /**
@@ -291,6 +303,19 @@ async function refreshTrades(showErrorFlag = false) {
   );
   if (list !== null) {
     trades.value = (list || []) as ClosedTradeRow[];
+  }
+  // 顶部卡片用全量统计（与列表分开获取，避免 200 条窗口导致"总"数字失真）
+  const stats = await callService(() => QuantService.GetTradeStats(), { silent: true });
+  if (stats) {
+    tradeStats.value = {
+      count: stats.count ?? 0,
+      netPnl: stats.netPnl ?? 0,
+      wins: stats.wins ?? 0,
+      losses: stats.losses ?? 0,
+      zeros: stats.zeros ?? 0,
+      totalFee: stats.totalFee ?? 0,
+      winRate: stats.winRate ?? 0
+    };
   }
   loading.value = false;
 }

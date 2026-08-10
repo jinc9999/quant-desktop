@@ -220,6 +220,36 @@ func (db *DB) GetClosedPositions(limit int) ([]Position, error) {
 	return positions, nil
 }
 
+// ClosedStats 已平仓持仓的全量汇总统计（供「已完成交易」页顶部卡片使用）
+type ClosedStats struct {
+	Count    int64   // 总平仓笔数（含零盈亏/对账幽灵单）
+	NetPnl   float64 // 净盈亏合计（USDT）
+	Wins     int64   // 盈利笔数（realized_pnl > 0）
+	Losses   int64   // 亏损笔数（realized_pnl < 0）
+	Zeros    int64   // 零盈亏笔数（realized_pnl = 0，多为对账幽灵单/数据缺失）
+	TotalFee float64 // 手续费合计（USDT）
+}
+
+// GetClosedStats 汇总所有已平仓持仓（不做条数截断）。
+// 背景：成交页此前只取最近 200 条在端上统计，卡片显示的"总"实际是窗口数，
+// 与全量数据不符（如 A 库全量 745 笔 +776.61U，最近 200 笔仅 +65.57U）。
+func (db *DB) GetClosedStats() (ClosedStats, error) {
+	var s ClosedStats
+	err := db.Conn.QueryRow(
+		`SELECT COUNT(*),
+		        COALESCE(SUM(realized_pnl), 0),
+		        COALESCE(SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END), 0),
+		        COALESCE(SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END), 0),
+		        COALESCE(SUM(CASE WHEN realized_pnl = 0 THEN 1 ELSE 0 END), 0),
+		        COALESCE(SUM(fee), 0)
+		 FROM positions WHERE status = 'CLOSED'`,
+	).Scan(&s.Count, &s.NetPnl, &s.Wins, &s.Losses, &s.Zeros, &s.TotalFee)
+	if err != nil {
+		return s, err
+	}
+	return s, nil
+}
+
 // GetTodayClosedPositions 返回今日（本地零点起）已平仓记录，供「每日总结」使用
 func (db *DB) GetTodayClosedPositions() ([]Position, error) {
 	now := time.Now()

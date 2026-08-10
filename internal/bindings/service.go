@@ -1074,6 +1074,41 @@ func (s *QuantService) GetClosedPositions(limit int) ([]storage.Position, error)
 	return s.db.GetClosedPositions(limit)
 }
 
+// GetTradeStats 获取已平仓持仓的全量汇总统计（当前模式数据库）。
+// 背景：成交页此前用最近 200 条列表在端上计算"总"卡片，数字随窗口截断失真；
+// 本接口由数据库直接聚合全部已平仓记录，保证"总平仓/总净盈亏/总手续费"真实。
+// 胜率口径：盈利 /（盈利+亏损），零盈亏（多为对账幽灵单）不计入分母。
+func (s *QuantService) GetTradeStats() map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.db == nil {
+		return map[string]interface{}{
+			"count": 0, "netPnl": 0.0, "wins": 0, "losses": 0, "zeros": 0, "totalFee": 0.0, "winRate": 0.0,
+		}
+	}
+	stats, err := s.db.GetClosedStats()
+	if err != nil {
+		log.Printf("[Binding] 查询成交统计失败: %v", err)
+		return map[string]interface{}{
+			"count": 0, "netPnl": 0.0, "wins": 0, "losses": 0, "zeros": 0, "totalFee": 0.0, "winRate": 0.0,
+		}
+	}
+	decided := stats.Wins + stats.Losses
+	winRate := 0.0
+	if decided > 0 {
+		winRate = float64(stats.Wins) / float64(decided) * 100
+	}
+	return map[string]interface{}{
+		"count":    stats.Count,
+		"netPnl":   round2(stats.NetPnl),
+		"wins":     stats.Wins,
+		"losses":   stats.Losses,
+		"zeros":    stats.Zeros,
+		"totalFee": round2(stats.TotalFee),
+		"winRate":  round1(winRate),
+	}
+}
+
 // GetConfig 获取当前策略配置
 func (s *QuantService) GetConfig() binance.StrategyConfig {
 	s.mu.RLock()
