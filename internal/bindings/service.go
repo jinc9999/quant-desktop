@@ -939,14 +939,17 @@ func (s *QuantService) GetStrategyStatus() map[string]interface{} {
 	defer s.mu.RUnlock()
 
 	tick := int64(0)
+	warmup := int64(0)
 	if s.engine != nil {
 		tick = s.engine.GetTickCount()
+		warmup = s.engine.GetWarmupRemainingSec()
 	}
-	log.Printf("[Binding] GetStrategyStatus called: running=%v tick=%d", s.started, tick)
+	log.Printf("[Binding] GetStrategyStatus called: running=%v tick=%d warmup=%ds", s.started, tick, warmup)
 
 	status := map[string]interface{}{
-		"running":   s.started,
-		"tickCount": tick,
+		"running":            s.started,
+		"tickCount":          tick,
+		"warmupRemainingSec": warmup, // 启动预热剩余秒数（0=不在预热期）
 	}
 	return status
 }

@@ -1792,3 +1792,16 @@ func (e *Engine) GetStartTime() time.Time {
 	defer e.mu.RUnlock()
 	return e.startTime
 }
+
+// GetWarmupRemainingSec 返回启动预热剩余秒数（0 = 不在预热期）
+// 预热期内禁止开仓（放量窗口未满），前端据此显示"预热中"状态点。
+func (e *Engine) GetWarmupRemainingSec() int64 {
+	if e.cfg.WarmupMin <= 0 {
+		return 0
+	}
+	remain := time.Duration(e.cfg.WarmupMin)*time.Minute - time.Since(e.startTime)
+	if remain <= 0 {
+		return 0
+	}
+	return int64(remain.Seconds())
+}

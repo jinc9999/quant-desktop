@@ -21,6 +21,9 @@ html.dark {
   /* 常用border-color 需要时可取用 */
   --pure-border-color: rgb(253 253 253 / 12%);
 
+  /* 等宽数字：价格/盈亏/金额刷新时原地跳变，不左右晃动（专业交易终端规范） */
+  font-variant-numeric: tabular-nums;
+
   /* switch关闭状态下的color 需要时可取用 */
   --pure-switch-off-color: #ffffff3f;
 

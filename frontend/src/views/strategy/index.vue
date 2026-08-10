@@ -58,6 +58,7 @@ const strategyParams = ref({
 // 运行状态
 const isRunning = ref(false);
 const statusText = ref("已停止");
+const warming = ref(false); // 启动预热中（放量窗口未满，禁止开仓）
 // 已运行 Tick 数
 const tickCount = ref(0);
 // 启动/停止操作进行中标记（防止重复点击）
@@ -177,7 +178,14 @@ async function fetchStatus() {
   const status = await callService(() => QuantService.GetStrategyStatus(), { silent: true });
   if (status) {
     isRunning.value = !!status.running;
-    statusText.value = status.running ? "运行中" : "已停止";
+    const warmup = status.warmupRemainingSec || 0;
+    if (status.running && warmup > 0) {
+      warming.value = true;
+      statusText.value = `预热中（约 ${Math.ceil(warmup / 60)} 分钟）`;
+    } else {
+      warming.value = false;
+      statusText.value = status.running ? "运行中" : "已停止";
+    }
     tickCount.value = status.tickCount || 0;
   }
 }
@@ -381,7 +389,7 @@ onUnmounted(() => {
   <div class="strategy-panel">
     <div class="panel-header">
       <h2>策略配置</h2>
-      <div class="status-badge" :class="isRunning ? 'running' : 'stopped'">
+      <div class="status-badge" :class="warming ? 'warming' : isRunning ? 'running' : 'stopped'">
         {{ statusText }}
       </div>
       <span class="tick-count">已运行 Tick：{{ tickCount }}</span>
@@ -737,6 +745,20 @@ onUnmounted(() => {
 .status-badge.stopped {
   background: rgba(239, 68, 68, 0.15);
   color: #ef4444;
+}
+.status-badge.warming {
+  background: rgba(240, 169, 59, 0.15);
+  color: #f0a93b;
+  animation: warming-pulse 1.6s ease-in-out infinite;
+}
+@keyframes warming-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
 }
 .tick-count {
   font-size: 13px;
