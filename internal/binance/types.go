@@ -1,6 +1,11 @@
 // Package binance 币安接口数据类型定义
 package binance
 
+import (
+	"strconv"
+	"strings"
+)
+
 // Candle K线数据
 type Candle struct {
 	Timestamp int64   `json:"timestamp"`
@@ -176,9 +181,29 @@ type StrategyConfig struct {
 // （-X quant-desktop/internal/binance.defaultRankMode=1 -X ...defaultRankParam=10），
 // 使 B 版新库开箱即用「24h 涨幅排名前 10%」，A 版默认行为不受影响。
 var (
-	defaultRankMode  = 0
-	defaultRankParam = 20.0
+	// 构建期覆盖示例（B 版）：
+	//   -X quant-desktop/internal/binance.defaultRankMode=1
+	//   -X quant-desktop/internal/binance.defaultRankParam=10
+	// 注意：-X 只能写入字符串变量，故此处用字符串承载，构造默认配置时再解析。
+	defaultRankMode  = "0"
+	defaultRankParam = "20"
 )
+
+// parseIntDefault 解析字符串为 int，失败时返回默认值（供 -X 覆盖的默认参数使用）
+func parseIntDefault(s string, def int) int {
+	if v, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+		return v
+	}
+	return def
+}
+
+// parseFloatDefault 解析字符串为 float64，失败时返回默认值
+func parseFloatDefault(s string, def float64) float64 {
+	if v, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
+		return v
+	}
+	return def
+}
 
 func DefaultStrategyConfig() StrategyConfig {
 	return StrategyConfig{
@@ -186,8 +211,8 @@ func DefaultStrategyConfig() StrategyConfig {
 		Timeframe:              "15m",
 		MinGainPct:             4.0,
 		Min24hGainPct:          4.0,      // 双条件筛选：24h 涨幅 >= 4% 且 15m K 线涨幅 >= 4%
-		RankMode:               defaultRankMode,  // 排名过滤：0=关闭 1=前N% 2=前M名（B 版构建默认 1）
-		RankParam:              defaultRankParam, // 排名参数（B 版构建默认 10 = 前 10%）
+		RankMode:               parseIntDefault(defaultRankMode, 0),  // 排名过滤：0=关闭 1=前N% 2=前M名（B 版构建默认 1）
+		RankParam:              parseFloatDefault(defaultRankParam, 20), // 排名参数（B 版构建默认 10 = 前 10%）
 		MinQuoteVolume:         10000000, // 24h 成交额下限 1000 万 USDT（2026-08-07 用户要求 10 万→1000 万，过滤小市值低流动性币）
 		TopN:                   10,
 		MaxOpenPositions:       10,   // 最大同时持仓 10（2026-08-04 用户要求 5→10）
