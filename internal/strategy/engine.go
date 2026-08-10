@@ -69,6 +69,7 @@ type Engine struct {
 	tickCount         atomic.Int64
 	tickErrorCount    atomic.Int64                  // Tick 执行失败累计次数
 	startTime         time.Time                     // 引擎启动时间
+	warmupLogged      bool                          // 预热期提示是否已打印（避免每 tick 刷屏）
 	cooldown          map[string]time.Time          // symbol -> 平仓时间，冷却期内不再开仓
 	cooldownReason    map[string]string             // symbol -> 最近平仓原因（分原因冷却: 移动止盈可短冷却）
 	failedOpen        map[string]time.Time          // symbol -> 开仓失败时间，短期内不再重试
@@ -880,6 +881,18 @@ func (e *Engine) openBlockedActive(symbol string) bool {
 // 返回: 本 Tick 成功开仓的持仓列表
 func (e *Engine) openPositions(ctx context.Context, candidates []Candidate, priceMap map[string]float64, openPositions []storage.Position) []storage.Position {
 	if len(candidates) == 0 {
+		return nil
+	}
+	// 启动预热保护：放量确认（最近 2 分钟 vs 前 13 分钟成交量速率）依赖本地滑动窗口，
+	// 该窗口从启动后才开始逐 tick 采样，需约 13~15 分钟才有完整前窗；窗口未满时放量检查
+	// fail-open（算不出就放行），等于少一道过滤。预热期内禁止一切开仓（含加仓）。
+	if e.cfg.WarmupMin > 0 && time.Since(e.startTime) < time.Duration(e.cfg.WarmupMin)*time.Minute {
+		if !e.warmupLogged {
+			e.warmupLogged = true
+			remain := time.Duration(e.cfg.WarmupMin)*time.Minute - time.Since(e.startTime)
+			log.Printf("[Strategy] 启动预热中（%d 分钟）：放量窗口未满暂不开仓，剩余 %v",
+				e.cfg.WarmupMin, remain.Round(time.Second))
+		}
 		return nil
 	}
 

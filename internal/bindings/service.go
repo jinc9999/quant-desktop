@@ -93,6 +93,14 @@ func migratePersistedStrategyConfig(raw string) (bool, binance.StrategyConfig, e
 		saved.RankParam = dft.RankParam
 		migrated = true
 	}
+	// 启动预热字段迁移：旧持久化配置缺少 warmupMin 键时补默认值（15 分钟）。
+	// 放量确认依赖启动后本地成交量采样窗口（前 13+2 分钟），窗口未满时放量检查 fail-open；
+	// 预热保护可避免启动初期少一道放量过滤（A/B 策略共用）。
+	if !bytes.Contains([]byte(raw), []byte(`"warmupMin"`)) {
+		dft := binance.DefaultStrategyConfig()
+		saved.WarmupMin = dft.WarmupMin
+		migrated = true
+	}
 	// 最小成交额参数迁移：旧持久化配置中 24h 成交额下限仍为旧的 10 万 USDT 时，
 	// 升级为 1000 万 USDT（2026-08-07 用户要求）；用户显式保存的其他值不会被覆盖。
 	if saved.MinQuoteVolume == 100000 {

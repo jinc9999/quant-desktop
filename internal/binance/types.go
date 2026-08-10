@@ -156,6 +156,7 @@ type StrategyConfig struct {
 	EnableNewListingFilter   bool    `json:"enableNewListingFilter"`   // 新币过滤开关：过滤上市天数 <= NewListingMinDays 的新上市合约（默认开启）
 	NewListingMinDays        int     `json:"newListingMinDays"`        // 新币过滤天数阈值（天）：上市天数小于等于该值的合约不参与任何开仓（默认 60，0=关闭）
 	CooldownAfterTrailingMin int     `json:"cooldownAfterTrailingMin"` // 移动止盈平仓后的冷却分钟数（<0=统一用 CooldownMin；0=立即再入；默认 15）
+	WarmupMin                int     `json:"warmupMin"`                // 启动预热分钟数（默认 15，0=关闭）：放量确认依赖本地成交量采样窗口，启动后需约 15 分钟才完整，预热期内禁止开仓
 }
 
 // DefaultStrategyConfig 返回默认策略配置（S01 v2 纯追涨，2026-08-08 全参数矩阵定稿）
@@ -243,5 +244,8 @@ func DefaultStrategyConfig() StrategyConfig {
 		// 实盘 tick 为 15 秒，取 15 分钟在回测口径内（0 与 15 分钟在 5m 回测粒度下差异 <0.3%）且
 		// 保留对 15 秒级极端追单的保护。止损后 30 分钟冷却防止追跌。
 		CooldownAfterTrailingMin: 15,
+		// 启动预热 15 分钟：放量确认（最近 2 分钟 vs 前 13 分钟）依赖启动后本地成交量采样窗口，
+		// 窗口未满时放量检查 fail-open（算不出就放行），预热期内禁止开仓可避免少一道放量过滤。
+		WarmupMin: 15,
 	}
 }

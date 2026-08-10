@@ -25,6 +25,7 @@ const strategyParams = ref({
   min24hGainPct: 4.0,
   rankMode: 0,                 // 24h 涨幅排名过滤：0=关闭 1=前N% 2=前M名（替代固定 24h 涨幅门槛）
   rankParam: 20,               // 排名参数：模式1=百分位(%) 模式2=名数
+  warmupMin: 15,               // 启动预热分钟数：放量窗口需约 15 分钟积累，预热期内不开仓（0=关闭）
   minQuoteVolume: 10000000,     // 最小成交额(USDT)：24h 累计成交额下限 1000 万（2026-08-07 10 万→1000 万）
   topN: 10,
   maxOpenPositions: 10,         // 最大同时持仓数（2026-08-04 5→10）
@@ -90,6 +91,7 @@ function toBackendConfig() {
     min24hGainPct: p.min24hGainPct,
     rankMode: p.rankMode,
     rankParam: p.rankParam,
+    warmupMin: p.warmupMin,
     minQuoteVolume: p.minQuoteVolume,
     topN: p.topN,
     maxOpenPositions: p.maxOpenPositions,
@@ -132,6 +134,7 @@ async function loadConfig() {
       min24hGainPct: cfg.min24hGainPct ?? 5.0,
       rankMode: cfg.rankMode ?? 0,
       rankParam: cfg.rankParam ?? 20,
+      warmupMin: cfg.warmupMin ?? 15,
       minQuoteVolume: cfg.minQuoteVolume,
       topN: cfg.topN ?? 8,
       maxOpenPositions: cfg.maxOpenPositions,
@@ -508,6 +511,11 @@ onUnmounted(() => {
           <el-form-item v-if="strategyParams.rankMode > 0" :label="strategyParams.rankMode === 1 ? '排名百分位(%)' : '排名名数(M)'">
             <el-tooltip content="模式1=前N%（如 20 表示 24h 涨幅前 20%）；模式2=前 M 名（如 20 表示前 20 名）" placement="top">
               <el-input-number v-model="strategyParams.rankParam" :min="1" :max="100" :step="1" />
+            </el-tooltip>
+          </el-form-item>
+          <el-form-item label="启动预热(分钟)">
+            <el-tooltip content="程序启动后这段时间不开仓：放量确认（最近2分钟 vs 前13分钟）依赖本地成交量采样窗口，启动后需约15分钟才完整，窗口未满时放量检查自动放行，预热保护可避免少这道过滤（A/B 共用，0=关闭）" placement="top">
+              <el-input-number v-model="strategyParams.warmupMin" :min="0" :max="120" :step="5" />
             </el-tooltip>
           </el-form-item>
           <el-form-item label="信号模式">
