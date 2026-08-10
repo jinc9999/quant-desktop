@@ -1485,6 +1485,11 @@ func (c *Client) TestConnection(ctx context.Context) map[string]string {
 		return result
 	}
 
+	// 0) 同步服务器时间：本机时钟漂移时手工签名会报 -1021
+	//    （2026-08-11 实测本机比币安快约 1.1 秒，连接测试持续失败）。
+	//    先校准再诊断，保证测试结果反映的是 Key/白名单问题而非时钟问题。
+	_ = c.SyncServerTime(ctx)
+
 	// 1) 网络链路自检：请求同一域名下的无签名公开接口。
 	//    失败 = 网络/代理问题（与 Key 无关）；成功 = 链路通，认证失败才是 Key/白名单问题。
 	timeURL := strings.TrimRight(c.futuresClient.BaseURL, "/") + "/fapi/v1/time"
@@ -1507,7 +1512,8 @@ func (c *Client) TestConnection(ctx context.Context) map[string]string {
 	}
 
 	// 3) 标准签名请求（与币安官方一致）：timestamp + HMAC-SHA256
-	ts := time.Now().UnixMilli()
+	//    时间戳必须使用同步后的服务器时间偏移（TimeOffset），否则本机时钟漂移会 -1021。
+	ts := time.Now().UnixMilli() - c.futuresClient.TimeOffset
 	query := fmt.Sprintf("timestamp=%d", ts)
 	mac := hmac.New(sha256.New, []byte(c.futuresClient.SecretKey))
 	mac.Write([]byte(query))
