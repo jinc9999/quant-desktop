@@ -172,14 +172,22 @@ type StrategyConfig struct {
 // 4% 固定止损、2% 跟踪激活 + 3% 跟踪回撤（纯跟踪，无固定止盈封顶）、最长持仓 180 分钟超时平仓、
 // 止损后 30 分钟冷却（移动止盈后 15 分钟可再入追趋势）、新币过滤 60 天、24h 成交额 >= 1000 万、
 // 日亏 5% 熔断、账户回撤 15% 熔断、山顶过滤器 9%
+// 排名过滤默认关闭；B（排名筛选）版构建通过 -ldflags -X 覆盖以下两个变量
+// （-X quant-desktop/internal/binance.defaultRankMode=1 -X ...defaultRankParam=10），
+// 使 B 版新库开箱即用「24h 涨幅排名前 10%」，A 版默认行为不受影响。
+var (
+	defaultRankMode  = 0
+	defaultRankParam = 20.0
+)
+
 func DefaultStrategyConfig() StrategyConfig {
 	return StrategyConfig{
 		ScanIntervalSec:        15,
 		Timeframe:              "15m",
 		MinGainPct:             4.0,
 		Min24hGainPct:          4.0,      // 双条件筛选：24h 涨幅 >= 4% 且 15m K 线涨幅 >= 4%
-		RankMode:               0,        // 排名过滤默认关闭（S01 v2 保持原行为；A/B 实验实例可开启 1/20）
-		RankParam:              20,       // 排名参数默认 20（前 20% / 前 20 名）
+		RankMode:               defaultRankMode,  // 排名过滤：0=关闭 1=前N% 2=前M名（B 版构建默认 1）
+		RankParam:              defaultRankParam, // 排名参数（B 版构建默认 10 = 前 10%）
 		MinQuoteVolume:         10000000, // 24h 成交额下限 1000 万 USDT（2026-08-07 用户要求 10 万→1000 万，过滤小市值低流动性币）
 		TopN:                   10,
 		MaxOpenPositions:       10,   // 最大同时持仓 10（2026-08-04 用户要求 5→10）
