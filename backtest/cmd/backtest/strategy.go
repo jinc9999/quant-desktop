@@ -116,6 +116,7 @@ type StrategyConfig struct {
 
 	// ===== S01 单因子实验开关（默认全关，不改变 S01 现有行为）=====
 	FundingVetoEnabled bool    // 实验: 费率过热否决（正费率 ≥ 分级阈值不追）
+	FundingCostEnabled bool    // 实验: 持仓期间资金费成本计入盈亏（每 8h 结算点按费率×名义值扣收）
 	VolumeZThreshold   float64 // 实验: 成交量 Z-Score 确认阈值（0=关闭）
 	RSIFilterEnabled   bool    // 实验: RSI[RSIMin,RSIMax] 趋势带确认
 	Regime             string  // 实验: 市场状态过滤 none/btc24h/btcma/breadth（""=关闭）
@@ -1836,6 +1837,30 @@ func (e *Engine) OnBar(bars map[string]*bar, fundings map[string]fundingPoint, t
 	for sym, fp := range fundings {
 		e.fundPrev[sym] = e.fundRate[sym]
 		e.fundRate[sym] = fp.rate
+	}
+	// S01 实验: momentum 模式持仓资金费成本（每 8h 结算点收费，平仓时并入 PnL）
+	// 币安惯例: 正费率 = 多头付空头 → 多头 -rate×名义值，空头 +rate×名义值
+	if e.cfg.FundingCostEnabled && e.cfg.Mode != "funding" {
+		for _, p := range e.positions {
+			fp, ok := fundings[p.Symbol]
+			if !ok {
+				continue
+			}
+			b, ok := bars[p.Symbol]
+			if !ok {
+				continue
+			}
+			px := fp.markPrice
+			if px <= 0 {
+				px = b.close
+			}
+			paid := fp.rate * px * p.Amount
+			if p.Side == "LONG" {
+				paid = -paid
+			}
+			p.FundingCollected += paid
+			e.fundingIncome += paid
+		}
 	}
 
 	// 2. 更新状态并评估信号（使用本片收盘数据）

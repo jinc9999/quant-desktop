@@ -698,6 +698,7 @@ func main() {
 	v6rawFlag := flag.Bool("v6raw", false, "V6 诊断: 关闭日亏/连亏熔断（仅诊断，勿用于正式对比）")
 	slipoffFlag := flag.Bool("slipoff", false, "V6 诊断: 滑点置零（仅诊断，勿用于正式对比）")
 	fvetoFlag := flag.Bool("fveto", false, "S01 实验: 费率过热否决（正费率 ≥ 分级阈值不追）")
+	fundingCostFlag := flag.Bool("funding-cost", false, "S01 实验: 持仓资金费成本计入盈亏（每8h结算点按费率×名义值扣收）")
 	vzFlag := flag.Float64("vz", 0, "S01 实验: 成交量 Z-Score 确认阈值（0=关闭）")
 	rsiokFlag := flag.Bool("rsiok", false, "S01 实验: RSI[40,70] 趋势带确认")
 	takerbuyFlag := flag.Float64("takerbuy", 0, "S01 实验: 15m窗口主动买占比门槛 %%（0 关闭）")
@@ -822,6 +823,7 @@ func main() {
 	}
 	// S01 单因子实验（默认全关，不改动 S01 现有行为）
 	applyS01Experiments(cfg, *fvetoFlag, *vzFlag, *rsiokFlag)
+	cfg.FundingCostEnabled = *fundingCostFlag
 	// v6 口径覆盖共享参数（必须在 flag 赋值之后，否则默认 flag 会覆盖 v6 规范值）
 	if *modeFlag == "v6" {
 		V6Defaults(cfg)
@@ -838,7 +840,7 @@ func main() {
 
 	// funding / v6 / S01 费率实验: 加载资金费率数据流
 	var fundingStreams []*fundingStream
-	if cfg.Mode == "funding" || cfg.Mode == "v6" || (cfg.Mode == "momentum" && cfg.FundingVetoEnabled) {
+	if cfg.Mode == "funding" || cfg.Mode == "v6" || cfg.FundingVetoEnabled || cfg.FundingCostEnabled {
 		fundingStreams = openFundingStreams(*fundingDir)
 	}
 
@@ -905,6 +907,9 @@ func main() {
 	}
 	if cfg.Mode == "momentum" && cfg.FundingVetoEnabled {
 		fmt.Printf("费率过热否决信号数: %d\n", eng.fundingVetoCount)
+	}
+	if cfg.Mode == "momentum" && cfg.FundingCostEnabled {
+		fmt.Printf("持仓资金费净收入(负=支出): %.2fU\n", eng.fundingIncome)
 	}
 	if cfg.MinTakerBuyPct > 0 {
 		fmt.Printf("主动买占比过滤拦截信号数: %d\n", eng.takerBlocked)
