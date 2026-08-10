@@ -19,6 +19,8 @@ defineOptions({ name: "Strategy" });
  * 默认值 = S01 纯追涨（无门控）锁定参数（2026-08-04）
  */
 const strategyParams = ref({
+  strategyName: "币安-魔力进攻A策略", // 策略全名（A/B 版不同，标准化命名）
+  strategyVersion: "V1.0_202608102326", // 定版标识 V{主}.{次}_{YYYYMMDDHHMM}
   scanIntervalSec: 15,
   timeframe: "15m",
   minGainPct: 4.0,
@@ -85,6 +87,8 @@ const savingProxy = ref(false);
 function toBackendConfig() {
   const p = strategyParams.value;
   return {
+    strategyName: p.strategyName,
+    strategyVersion: p.strategyVersion,
     scanIntervalSec: p.scanIntervalSec,
     timeframe: p.timeframe,
     minGainPct: p.minGainPct,
@@ -128,6 +132,8 @@ async function loadConfig() {
   const cfg = await callService(() => QuantService.GetConfig(), { silent: true });
   if (cfg) {
     strategyParams.value = {
+      strategyName: cfg.strategyName ?? "币安-魔力进攻A策略",
+      strategyVersion: cfg.strategyVersion ?? "V1.0_202608102326",
       scanIntervalSec: cfg.scanIntervalSec,
       timeframe: cfg.timeframe,
       minGainPct: cfg.minGainPct,
@@ -379,6 +385,21 @@ onUnmounted(() => {
         {{ statusText }}
       </div>
       <span class="tick-count">已运行 Tick：{{ tickCount }}</span>
+    </div>
+
+    <!-- 策略版本标识（标准化命名：币安-魔力{类型}{代号}-V{主}.{次}_{定版时间}） -->
+    <div class="quant-card version-card">
+      <div class="version-main">
+        <span class="version-name">{{ strategyParams.strategyName }}</span>
+        <span class="version-badge">{{ strategyParams.strategyVersion }}</span>
+      </div>
+      <div class="version-meta">
+        15m触发 {{ strategyParams.minGainPct }}% · 成交额
+        {{ (strategyParams.minQuoteVolume / 10000).toLocaleString() }}万 ·
+        排名 {{ strategyParams.rankMode > 0 ? (strategyParams.rankMode === 1 ? "前" + strategyParams.rankParam + "%" : "前" + strategyParams.rankParam + "名") : "关" }} ·
+        杠杆 {{ strategyParams.leverage }}x · 止损 {{ strategyParams.stopLossPct }}% ·
+        同币 {{ 1 + strategyParams.maxAddOnsPerSymbol }}仓
+      </div>
     </div>
 
     <!-- 运行模式卡片（全宽） -->
@@ -719,6 +740,35 @@ onUnmounted(() => {
 }
 .tick-count {
   font-size: 13px;
+  color: var(--quant-text-secondary, #8b8fa3);
+}
+.version-card {
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  border-left: 4px solid var(--quant-primary, #409eff);
+  background: linear-gradient(90deg, rgba(64, 158, 255, 0.08), transparent);
+}
+.version-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.version-name {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--quant-text, #e0e0e0);
+}
+.version-badge {
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  background: rgba(64, 158, 255, 0.15);
+  color: #409eff;
+}
+.version-meta {
+  font-size: 12px;
   color: var(--quant-text-secondary, #8b8fa3);
 }
 .card-grid {

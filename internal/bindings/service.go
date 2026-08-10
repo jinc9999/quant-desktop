@@ -101,6 +101,14 @@ func migratePersistedStrategyConfig(raw string) (bool, binance.StrategyConfig, e
 		saved.WarmupMin = dft.WarmupMin
 		migrated = true
 	}
+	// 策略标识迁移：旧持久化配置缺少 strategyName/strategyVersion 键时补默认
+	// （A/B 版构建期默认值不同，升级后各自显示自己的策略名与定版号）。
+	if !bytes.Contains([]byte(raw), []byte(`"strategyName"`)) {
+		dft := binance.DefaultStrategyConfig()
+		saved.StrategyName = dft.StrategyName
+		saved.StrategyVersion = dft.StrategyVersion
+		migrated = true
+	}
 	// 最小成交额参数迁移：旧持久化配置中 24h 成交额下限仍为旧的 10 万 USDT 时，
 	// 升级为 1000 万 USDT（2026-08-07 用户要求）；用户显式保存的其他值不会被覆盖。
 	if saved.MinQuoteVolume == 100000 {

@@ -125,6 +125,8 @@ const (
 
 // StrategyConfig 策略配置参数
 type StrategyConfig struct {
+	StrategyName             string  `json:"strategyName"`             // 策略全名（如 币安-魔力进攻A策略 / 币安-魔力稳健B策略）
+	StrategyVersion          string  `json:"strategyVersion"`          // 定版标识（V{主}.{次}_{YYYYMMDDHHMM}）
 	ScanIntervalSec          int     `json:"scanIntervalSec"`
 	Timeframe                string  `json:"timeframe"`
 	MinGainPct               float64 `json:"minGainPct"`
@@ -188,6 +190,10 @@ var (
 	// 注意：-X 只能写入字符串变量，故此处用字符串承载，构造默认配置时再解析。
 	defaultRankMode  = "0"
 	defaultRankParam = "20"
+	// 策略标识（标准化命名，A/B 版构建期区分）：
+	//   A 版（默认）：币安-魔力进攻A策略；B 版构建加 -X ...defaultStrategyName=币安-魔力稳健B策略
+	defaultStrategyName    = "币安-魔力进攻A策略"
+	defaultStrategyVersion = "V1.0_202608102326" // 定版号：V{主}.{次}_{YYYYMMDDHHMM}
 )
 
 // parseIntDefault 解析字符串为 int，失败时返回默认值（供 -X 覆盖的默认参数使用）
@@ -208,6 +214,8 @@ func parseFloatDefault(s string, def float64) float64 {
 
 func DefaultStrategyConfig() StrategyConfig {
 	return StrategyConfig{
+		StrategyName:            defaultStrategyName,    // 策略全名（前端标题栏/参数卡显示）
+		StrategyVersion:         defaultStrategyVersion, // 定版标识 V{主}.{次}_{YYYYMMDDHHMM}
 		ScanIntervalSec:        15,
 		Timeframe:              "15m",
 		MinGainPct:             4.0,
