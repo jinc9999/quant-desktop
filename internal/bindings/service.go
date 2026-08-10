@@ -166,6 +166,21 @@ func (s *QuantService) SetApp(app *application.App) {
 	s.app = app
 }
 
+// syncServerTime 同步币安服务器时间偏移（签名请求防 -1021）。
+// 本机时钟漂移（实测快 1 秒）时所有签名请求被拒，前端权益显示 0.00；
+// 客户端重建（Init/切模式/改代理）后都要重同步。失败仅记录日志不阻断，
+// 余额接口的 -1021 自愈路径会在下次轮询时重同步。
+func (s *QuantService) syncServerTime() {
+	if s.client == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.client.SyncServerTime(ctx); err != nil {
+		log.Printf("[Binding] ⚠ 服务器时间同步失败: %v", err)
+	}
+}
+
 // emitBackendError 通过 Wails 事件推送后台错误到前端
 // context: 操作上下文（如"开仓"、"挂止损单"、"平仓"）
 // message: 错误详情
@@ -242,6 +257,8 @@ func (s *QuantService) Init() error {
 	// 初始化币安客户端（按当前模式 + 代理配置）
 	s.client = binance.NewClient(s.apiKey, s.apiSecret, s.mode, s.proxyAddr, s.proxyPort)
 	s.ws = binance.NewWsManagerWithProxy(s.mode, s.client.ProxyURL())
+	// 同步服务器时间：本机时钟漂移会导致签名请求 -1021、余额显示 0.00
+	s.syncServerTime()
 
 	// 初始化委托管理器
 	s.orderMgr = order.NewManager(s.client, db)
@@ -326,6 +343,8 @@ func (s *QuantService) SetCredentials(mode, apiKey, apiSecret string) string {
 	// 按新模式重建客户端与 WS 管理器（带代理配置）
 	s.client = binance.NewClient(apiKey, apiSecret, mode, s.proxyAddr, s.proxyPort)
 	s.ws = binance.NewWsManagerWithProxy(mode, s.client.ProxyURL())
+	// 同步服务器时间（新客户端 TimeOffset 归零，需重新同步）
+	s.syncServerTime()
 	// 重建委托管理器（使用新 client）
 	s.orderMgr = order.NewManager(s.client, s.db)
 
@@ -405,6 +424,8 @@ func (s *QuantService) SetProxyConfig(address string, port int) string {
 
 	// 重建客户端以应用新代理
 	s.client = binance.NewClient(s.apiKey, s.apiSecret, s.mode, s.proxyAddr, s.proxyPort)
+	// 同步服务器时间（新客户端 TimeOffset 归零，需重新同步）
+	s.syncServerTime()
 
 	if address != "" && port > 0 {
 		log.Printf("[Binding] 代理已设置为 %s:%d", address, port)

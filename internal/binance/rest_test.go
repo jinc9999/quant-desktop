@@ -754,6 +754,15 @@ func TestGetFuturesBalance_DryRun(t *testing.T) {
 	}
 }
 
+// TestSyncServerTime_DryRun 验证 DRY_RUN 模式下 SyncServerTime 为空操作（返回 nil）
+// DRY_RUN 不访问网络，时间同步仅在 SIMULATION/LIVE 模式生效
+func TestSyncServerTime_DryRun(t *testing.T) {
+	c := newDryRunClient()
+	if err := c.SyncServerTime(context.Background()); err != nil {
+		t.Fatalf("期望 err=nil, 实际=%v", err)
+	}
+}
+
 // TestSetPositionMode_DryRun 验证 DRY_RUN 模式下 SetPositionMode 为空操作（返回 nil）
 // DRY_RUN 模式不执行真实持仓模式切换
 func TestSetPositionMode_DryRun(t *testing.T) {

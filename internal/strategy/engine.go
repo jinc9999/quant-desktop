@@ -298,6 +298,17 @@ func (e *Engine) Start(ctx context.Context) {
 
 	log.Printf("[Strategy] 引擎启动，模式: %s, 间隔: %ds", e.cfg.Timeframe, e.cfg.ScanIntervalSec)
 
+	// 同步币安服务器时间：本机时钟漂移时所有签名请求被拒（-1021），
+	// 表现为余额 0.00、开仓/平仓/对账间歇失败。策略每次启动都校准一次，
+	// 与 service 层启动同步互为双保险（防运行中时钟调整后的漂移）。
+	if e.client != nil {
+		syncCtx, syncCancel := context.WithTimeout(engineCtx, 5*time.Second)
+		if err := e.client.SyncServerTime(syncCtx); err != nil {
+			log.Printf("[Strategy] ⚠ 服务器时间同步失败: %v", err)
+		}
+		syncCancel()
+	}
+
 	// 加载交易对精度规则（exchangeInfo），确保下单数量/价格符合交易所要求
 	// 必须在补挂止损单之前执行，否则 FormatPrice 回退到 8 位小数导致 -1111 精度错误
 	// 网络抖动可能失败，重试 3 次（指数退避），仍失败则依赖开仓前 EnsurePrecision 兜底

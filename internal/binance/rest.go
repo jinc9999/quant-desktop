@@ -1219,6 +1219,18 @@ func (c *Client) GetFuturesBalance(ctx context.Context) (*AccountBalance, error)
 		if err == nil {
 			break
 		}
+		// -1021（时间戳超出服务器窗口）：本机时钟漂移（实测快 1s 时余额接口 7/8 失败，
+		// 前端"账户权益"因此持续 0.00、偶尔闪一下真值）。重同步服务器时间后立即重试，
+		// 重试仍失败则返回错误（由调用方兜底为 0）。
+		if IsAPIErrorCode(err, -1021) {
+			if syncErr := c.SyncServerTime(ctx); syncErr == nil {
+				balances, err = c.futuresClient.NewGetBalanceService().Do(ctx)
+				if err == nil {
+					break
+				}
+			}
+			return nil, fmt.Errorf("获取账户余额失败: %w", err)
+		}
 		if !isTransientErr(err) || i == attempts-1 {
 			return nil, fmt.Errorf("获取账户余额失败: %w", err)
 		}
@@ -1242,6 +1254,22 @@ func (c *Client) GetFuturesBalance(ctx context.Context) (*AccountBalance, error)
 	}
 
 	return &AccountBalance{}, nil
+}
+
+// SyncServerTime 同步本机与币安服务器的时间偏移（签名请求防 -1021）。
+// 背景（2026-08-11）：本机时钟比币安快约 1 秒时，所有签名请求被拒（-1021），
+// 表现为前端"账户权益"持续 0.00、开仓/平仓/对账间歇失败。
+// 同步后客户端签名使用 currentTimestamp()-TimeOffset，不再依赖本机时钟精确。
+func (c *Client) SyncServerTime(ctx context.Context) error {
+	if c.isDryRun() {
+		return nil
+	}
+	offset, err := c.futuresClient.NewSetServerTimeService().Do(ctx)
+	if err != nil {
+		return fmt.Errorf("同步服务器时间失败: %w", err)
+	}
+	log.Printf("[Binance] ✅ 服务器时间已同步，时间偏移 %dms", offset)
+	return nil
 }
 
 // GetPositionRisk 查询交易所持仓风险信息
