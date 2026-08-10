@@ -112,9 +112,13 @@ func (s *QuantService) GetPositionDetails() ([]PositionDetail, error) {
 				pnl = -pnl // 空单盈亏方向相反
 			}
 			d.UnrealizedPnl = pnl
-			if d.Margin > 0 {
-				d.RoiPct = pnl / d.Margin * 100
+		if d.Margin > 0 {
+			d.RoiPct = pnl / d.Margin * 100
+			// 防御：异常小保证金（幽灵仓等）会让回报率爆出离谱数字，置 0 显示 "--"。
+			if d.Margin < 1 {
+				d.RoiPct = 0
 			}
+		}
 		}
 
 		posOrders := ordersByPos[p.ID]

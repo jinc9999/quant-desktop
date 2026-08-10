@@ -66,6 +66,11 @@ func (s *QuantService) GetClosedTradeDetails(limit int) ([]ClosedTradeDetail, er
 		margin := p.EntryPrice * p.Amount / lev
 		if margin > 0 {
 			d.ProfitPct = d.RealizedPnl / margin * 100
+			// 防御：异常小保证金（幽灵仓/成交回报错乱导致名义价值远低于 1U）会让百分比爆出离谱数字，
+			// 此时置 0 并在展示层显示 "--"，避免误导。
+			if margin < 1 {
+				d.ProfitPct = 0
+			}
 		}
 
 		details = append(details, d)
