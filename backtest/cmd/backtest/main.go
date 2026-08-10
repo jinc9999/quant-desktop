@@ -713,6 +713,7 @@ func main() {
 	priceSizeThFlag := flag.Float64("price-size-th", 0.05, "S01 实验: 按币价减仓阈值 USDT（<该价半仓，<0.2 七五折）")
 	rankModeFlag := flag.Int("rank", 0, "S01 实验: 24h涨幅排名过滤 0=关 1=前N%% 2=前M名")
 	rankParamFlag := flag.Float64("rank-param", 10, "S01 实验: 排名参数（模式1=百分位，模式2=名数）")
+	sectorMaxFlag := flag.Int("sector-max", 0, "S01 实验: 同板块同时持仓上限（0=关闭；OTHERS 不设限）")
 	trendFlag := flag.Int("trend", 0, "S01 实验: 趋势因子 0=关 1=EMA50向上 2=价>EMA96 3=4h涨>0 4=4h涨>2%% 5=价>4hVWAP")
 	flag.Parse()
 
@@ -768,6 +769,7 @@ func main() {
 	cfg.PriceSizeTh = *priceSizeThFlag
 	cfg.RankMode = *rankModeFlag
 	cfg.RankParam = *rankParamFlag
+	cfg.SectorMax = *sectorMaxFlag
 	cfg.TrendMode = *trendFlag
 	cfg.CooldownMs = int64(*cooldownFlag) * 60 * 1000
 	cfg.PositionMarginUSDT = *marginFlag
@@ -925,6 +927,9 @@ func main() {
 	}
 	if cfg.TrendMode > 0 {
 		fmt.Printf("趋势因子拦截信号数: %d\n", eng.trendBlocked)
+	}
+	if cfg.SectorMax > 0 {
+		fmt.Printf("板块暴露上限拦截信号数: %d\n", eng.sectorBlocked)
 	}
 
 	elapsed := time.Since(begin)

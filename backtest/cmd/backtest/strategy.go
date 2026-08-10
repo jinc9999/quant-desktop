@@ -117,6 +117,7 @@ type StrategyConfig struct {
 	// ===== S01 单因子实验开关（默认全关，不改变 S01 现有行为）=====
 	FundingVetoEnabled bool    // 实验: 费率过热否决（正费率 ≥ 分级阈值不追）
 	FundingCostEnabled bool    // 实验: 持仓期间资金费成本计入盈亏（每 8h 结算点按费率×名义值扣收）
+	SectorMax          int     // 实验: 同板块同时持仓上限（0=关闭；OTHERS 不设限）
 	VolumeZThreshold   float64 // 实验: 成交量 Z-Score 确认阈值（0=关闭）
 	RSIFilterEnabled   bool    // 实验: RSI[RSIMin,RSIMax] 趋势带确认
 	Regime             string  // 实验: 市场状态过滤 none/btc24h/btcma/breadth（""=关闭）
@@ -382,6 +383,7 @@ type Engine struct {
 	retraceFilled    int64              // S01 实验: 回踩确认后成交数
 	rankBlocked      int64              // S01 实验: 排名过滤拦截信号数
 	trendBlocked     int64              // S01 实验: 趋势因子拦截信号数
+	sectorBlocked    int64              // S01 实验: 板块暴露上限拦截信号数
 	rankOK           map[string]bool    // 当前时间片通过 24h 涨幅排名的币种
 	gain24s          []gainRec          // 当前时间片全部流动性币的 24h 涨幅
 	lastEntry        map[string]float64 // 追涨/回踩分类: 每币上一笔入场价
@@ -1113,6 +1115,26 @@ func (e *Engine) openPositions(candidates []candidate, now int64) {
 	for i, c := range candidates {
 		if len(e.positions)+len(e.pending) >= e.cfg.MaxOpenPositions {
 			break
+		}
+		// S01 实验: 板块暴露上限（同板块同时持仓 < SectorMax 才可开新币；OTHERS/未知不设限，加仓不受限）
+		if e.cfg.SectorMax > 0 && !held[c.symbol] {
+			if sec := symbolSector[c.symbol]; sec != "" && sec != "OTHERS" {
+				cnt := 0
+				for _, p := range e.positions {
+					if symbolSector[p.Symbol] == sec {
+						cnt++
+					}
+				}
+				for _, p := range e.pending {
+					if symbolSector[p.Symbol] == sec {
+						cnt++
+					}
+				}
+				if cnt >= e.cfg.SectorMax {
+					e.sectorBlocked++
+					continue
+				}
+			}
 		}
 		if held[c.symbol] {
 			if e.cfg.Mode == "v6" {
