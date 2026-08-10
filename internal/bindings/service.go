@@ -85,6 +85,14 @@ func migratePersistedStrategyConfig(raw string) (bool, binance.StrategyConfig, e
 		saved.MaxAddOnsPerSymbol = dft.MaxAddOnsPerSymbol
 		migrated = true
 	}
+	// 24h 涨幅排名过滤字段迁移：旧持久化配置缺少 rankMode/rankParam 键时补默认值（关闭 / 前 20%）。
+	// 保证升级后旧配置行为不变；用户在新版本界面显式保存的值不会被覆盖。
+	if !bytes.Contains([]byte(raw), []byte(`"rankMode"`)) {
+		dft := binance.DefaultStrategyConfig()
+		saved.RankMode = dft.RankMode
+		saved.RankParam = dft.RankParam
+		migrated = true
+	}
 	// 最小成交额参数迁移：旧持久化配置中 24h 成交额下限仍为旧的 10 万 USDT 时，
 	// 升级为 1000 万 USDT（2026-08-07 用户要求）；用户显式保存的其他值不会被覆盖。
 	if saved.MinQuoteVolume == 100000 {

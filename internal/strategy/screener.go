@@ -2,6 +2,7 @@
 package strategy
 
 import (
+	"math"
 	"sort"
 
 	"quant-desktop/internal/binance"
@@ -36,11 +37,12 @@ type Candidate struct {
 // signalMode: 信号模式（"kline" 或 "sliding"，其他值按 sliding 处理）
 // klineOpen: symbol -> 当前 K 线开盘价（kline 模式用；缺失的币保守跳过）
 // maxPullbackPct: 山顶过滤器（%）：当前价距 24h 最高/最低价回撤超过该值不追，0=关闭
+// rankOK: 24h 涨幅排名通过集合（nil=不启用排名过滤；替代固定 24h 涨幅门槛）
 // 返回: 按成交额降序排列的候选列表（最多 topN 个）
 func ScreenSliding(window *SlidingWindow, tickers []binance.Ticker, priceMap map[string]float64,
 	minGainPct, min24hGainPct, minQuoteVolume float64, topN int, now int64,
 	enableShort bool, confirmWindowMs int64, confirmThreshold, volumeSurgeThreshold float64,
-	signalMode string, klineOpen map[string]float64, maxPullbackPct float64) []Candidate {
+	signalMode string, klineOpen map[string]float64, maxPullbackPct float64, rankOK map[string]bool) []Candidate {
 	var candidates []Candidate
 	klineMode := signalMode == "kline"
 
@@ -100,6 +102,13 @@ func ScreenSliding(window *SlidingWindow, tickers []binance.Ticker, priceMap map
 			if side == "SHORT" && t.PriceChange > -min24hGainPct {
 				continue // 做空：24h 跌幅不足，排除
 			}
+		}
+
+		// 24h 涨幅排名过滤（替代固定 24h 涨幅门槛，2026-08-10 实验落地）：
+		// 在成交额>=minQuoteVolume 的流动性币池内按 24h 涨幅排序，只保留前 N%/前 M 名。
+		// 当前仅做多方向排名（策略纯多；做空不启用排名过滤）。
+		if rankOK != nil && side == "LONG" && !rankOK[t.Symbol] {
+			continue
 		}
 
 		// 山顶过滤器：做多时不追「已从 24h 最高价大幅回落」的币（可能接飞刀），
@@ -164,4 +173,45 @@ func ScreenSliding(window *SlidingWindow, tickers []binance.Ticker, priceMap map
 	}
 
 	return candidates
+}
+
+// buildRankOK 按 24h 涨幅对流动性币池排序，返回排名通过集合（前 N% 或前 M 名）。
+// 排名宇宙 = 24h 成交额 >= minQuoteVolume 的全部币种（与 ScreenSliding 流动性过滤一致）。
+// rankMode: 1=前N% 2=前M名；rankParam 对应百分位或名数。rankMode<=0 返回 nil（不启用）。
+func buildRankOK(tickers []binance.Ticker, minQuoteVolume float64, rankMode int, rankParam float64) map[string]bool {
+	if rankMode <= 0 || len(tickers) == 0 {
+		return nil
+	}
+	type rankItem struct {
+		sym string
+		v   float64
+	}
+	var list []rankItem
+	for _, t := range tickers {
+		if t.QuoteVolume < minQuoteVolume {
+			continue
+		}
+		list = append(list, rankItem{sym: t.Symbol, v: t.PriceChange})
+	}
+	if len(list) == 0 {
+		return nil
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].v > list[j].v })
+	limit := 1
+	if rankMode == 1 {
+		limit = int(math.Ceil(float64(len(list)) * rankParam / 100))
+	} else {
+		limit = int(rankParam)
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > len(list) {
+		limit = len(list)
+	}
+	ok := make(map[string]bool, limit)
+	for i := 0; i < limit; i++ {
+		ok[list[i].sym] = true
+	}
+	return ok
 }

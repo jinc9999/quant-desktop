@@ -23,6 +23,8 @@ const strategyParams = ref({
   timeframe: "15m",
   minGainPct: 4.0,
   min24hGainPct: 4.0,
+  rankMode: 0,                 // 24h 涨幅排名过滤：0=关闭 1=前N% 2=前M名（替代固定 24h 涨幅门槛）
+  rankParam: 20,               // 排名参数：模式1=百分位(%) 模式2=名数
   minQuoteVolume: 10000000,     // 最小成交额(USDT)：24h 累计成交额下限 1000 万（2026-08-07 10 万→1000 万）
   topN: 10,
   maxOpenPositions: 10,         // 最大同时持仓数（2026-08-04 5→10）
@@ -86,6 +88,8 @@ function toBackendConfig() {
     timeframe: p.timeframe,
     minGainPct: p.minGainPct,
     min24hGainPct: p.min24hGainPct,
+    rankMode: p.rankMode,
+    rankParam: p.rankParam,
     minQuoteVolume: p.minQuoteVolume,
     topN: p.topN,
     maxOpenPositions: p.maxOpenPositions,
@@ -126,6 +130,8 @@ async function loadConfig() {
       timeframe: cfg.timeframe,
       minGainPct: cfg.minGainPct,
       min24hGainPct: cfg.min24hGainPct ?? 5.0,
+      rankMode: cfg.rankMode ?? 0,
+      rankParam: cfg.rankParam ?? 20,
       minQuoteVolume: cfg.minQuoteVolume,
       topN: cfg.topN ?? 8,
       maxOpenPositions: cfg.maxOpenPositions,
@@ -488,6 +494,20 @@ onUnmounted(() => {
           <el-form-item label="24h最小涨幅(%)">
             <el-tooltip content="24 小时涨幅门槛（%），与 15m 涨幅同时满足才入选（双条件筛选）" placement="top">
               <el-input-number v-model="strategyParams.min24hGainPct" :min="0.1" :max="50" :step="0.5" />
+            </el-tooltip>
+          </el-form-item>
+          <el-form-item label="24h涨幅排名">
+            <el-tooltip content="替代固定 24h 涨幅门槛：在成交额≥最小成交额的币池内按 24h 涨幅排序，只保留前 N%（或前 M 名）。设置后建议把 24h最小涨幅 调低或置 0，避免双重限制" placement="top">
+              <el-select v-model="strategyParams.rankMode" style="width: 140px">
+                <el-option label="关闭" :value="0" />
+                <el-option label="前N%" :value="1" />
+                <el-option label="前M名" :value="2" />
+              </el-select>
+            </el-tooltip>
+          </el-form-item>
+          <el-form-item v-if="strategyParams.rankMode > 0" :label="strategyParams.rankMode === 1 ? '排名百分位(%)' : '排名名数(M)'">
+            <el-tooltip content="模式1=前N%（如 20 表示 24h 涨幅前 20%）；模式2=前 M 名（如 20 表示前 20 名）" placement="top">
+              <el-input-number v-model="strategyParams.rankParam" :min="1" :max="100" :step="1" />
             </el-tooltip>
           </el-form-item>
           <el-form-item label="信号模式">

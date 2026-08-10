@@ -940,7 +940,7 @@ func TestScreenSliding_TopNZero(t *testing.T) {
 	}
 	priceMap := map[string]float64{"AUSDT": 106, "BUSDT": 107, "CUSDT": 108}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 3 {
 		t.Fatalf("topN=0 时 len = %d, 期望 3（不限制应返回全部）", len(got))
 	}
@@ -962,7 +962,7 @@ func TestScreenSliding_TopNLargerThanCandidates(t *testing.T) {
 	}
 	priceMap := map[string]float64{"AUSDT": 106, "BUSDT": 107, "CUSDT": 108}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 10, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 10, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 3 {
 		t.Fatalf("topN=10 但仅 3 个候选时 len = %d, 期望 3", len(got))
 	}
@@ -1371,7 +1371,7 @@ func TestE2E_DryRun_TrailingStopCycle(t *testing.T) {
 
 	candidates := ScreenSliding(e.window, tickers, priceMap,
 		e.cfg.MinGainPct, e.cfg.Min24hGainPct, e.cfg.MinQuoteVolume, e.cfg.TopN, now,
-		false, 0, 0, 0, "sliding", nil, 0)
+		false, 0, 0, 0, "sliding", nil, 0, nil)
 
 	if len(candidates) != 1 {
 		t.Fatalf("筛选候选数 = %d, 期望 1", len(candidates))
@@ -1515,7 +1515,7 @@ func TestE2E_DryRun_StopLossCycle(t *testing.T) {
 
 	candidates := ScreenSliding(e.window, tickers, priceMap,
 		e.cfg.MinGainPct, e.cfg.Min24hGainPct, e.cfg.MinQuoteVolume, e.cfg.TopN, now,
-		false, 0, 0, 0, "sliding", nil, 0)
+		false, 0, 0, 0, "sliding", nil, 0, nil)
 
 	if len(candidates) != 1 {
 		t.Fatalf("筛选候选数 = %d, 期望 1", len(candidates))
@@ -1604,7 +1604,7 @@ func TestE2E_DryRun_MultiSymbolPipeline(t *testing.T) {
 
 	candidates := ScreenSliding(e.window, tickers, priceMap,
 		e.cfg.MinGainPct, e.cfg.Min24hGainPct, e.cfg.MinQuoteVolume, e.cfg.TopN, now,
-		false, 0, 0, 0, "sliding", nil, 0)
+		false, 0, 0, 0, "sliding", nil, 0, nil)
 
 	// CCCUSDT 涨幅 3% < 5% 被过滤，TopN=2 截取前 2 个
 	if len(candidates) != 2 {
@@ -1694,7 +1694,7 @@ func TestE2E_DryRun_OpenToCloseFullLifecycle(t *testing.T) {
 
 	candidates := ScreenSliding(e.window, tickers, priceMap,
 		e.cfg.MinGainPct, e.cfg.Min24hGainPct, e.cfg.MinQuoteVolume, e.cfg.TopN, now,
-		false, 0, 0, 0, "sliding", nil, 0)
+		false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(candidates) != 1 {
 		t.Fatalf("筛选候选数 = %d, 期望 1", len(candidates))
 	}

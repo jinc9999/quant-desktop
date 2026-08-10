@@ -40,7 +40,7 @@ func TestIntegration_ScreenToCandidate(t *testing.T) {
 	priceMap := map[string]float64{"PUMPUSDT": 115, "DUMPUSDT": 85, "FLATUSDT": 100.5}
 
 	// 开启做空，关闭二次确认
-	got := ScreenSliding(w, tickers, priceMap, 10.0, 0, 100000, 0, now, true, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 10.0, 0, 100000, 0, now, true, 0, 0, 0, "sliding", nil, 0, nil)
 
 	// 应筛出 2 个：PUMPUSDT(LONG) + DUMPUSDT(SHORT)，FLATUSDT 不达标
 	if len(got) != 2 {
@@ -85,7 +85,7 @@ func TestRegression_LongOnlyUnchanged(t *testing.T) {
 	priceMap := map[string]float64{"BTCUSDT": 115}
 
 	// enableShort=false, 无确认 → 应与旧版行为完全一致
-	got := ScreenSliding(w, tickers, priceMap, 10.0, 0, 100000, 3, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 10.0, 0, 100000, 3, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("期望 1 个候选, 实际 %d", len(got))
 	}
@@ -130,7 +130,7 @@ func TestBoundary_EmptyWindow(t *testing.T) {
 	// 空窗口筛选
 	tickers := []binance.Ticker{{Symbol: "BTCUSDT", LastPrice: 100, QuoteVolume: 500000}}
 	priceMap := map[string]float64{"BTCUSDT": 100}
-	got := ScreenSliding(w, tickers, priceMap, 10.0, 0, 100000, 0, now, true, 180000, 1.5, 1.5, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 10.0, 0, 100000, 0, now, true, 180000, 1.5, 1.5, "sliding", nil, 0, nil)
 	if len(got) != 0 {
 		t.Errorf("空窗口期望 0 个候选, 实际 %d", len(got))
 	}
@@ -162,7 +162,7 @@ func TestBoundary_ZeroThreshold(t *testing.T) {
 	priceMap := map[string]float64{"ZEROUSDT": 115}
 
 	// confirmThreshold=0, volumeSurgeThreshold=0 → 全部关闭，应通过
-	got := ScreenSliding(w, tickers, priceMap, 10.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 10.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("关闭确认时期望 1 个候选, 实际 %d", len(got))
 	}
@@ -179,7 +179,7 @@ func TestBoundary_SingleSample(t *testing.T) {
 	priceMap := map[string]float64{"ONEUSDT": 115}
 
 	// 不应 panic
-	got := ScreenSliding(w, tickers, priceMap, 10.0, 0, 100000, 0, now, true, 180000, 1.5, 1.5, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 10.0, 0, 100000, 0, now, true, 180000, 1.5, 1.5, "sliding", nil, 0, nil)
 	_ = got // 结果不重要，不 panic 就行
 }
 
@@ -188,7 +188,7 @@ func TestBoundary_NilTickers(t *testing.T) {
 	w := NewSlidingWindow(15*60*1000, 30000)
 	now := int64(1000000)
 
-	got := ScreenSliding(w, nil, nil, 10.0, 0, 100000, 0, now, true, 180000, 1.5, 1.5, "sliding", nil, 0)
+	got := ScreenSliding(w, nil, nil, 10.0, 0, 100000, 0, now, true, 180000, 1.5, 1.5, "sliding", nil, 0, nil)
 	if len(got) != 0 {
 		t.Errorf("空 tickers 期望 0 个候选, 实际 %d", len(got))
 	}

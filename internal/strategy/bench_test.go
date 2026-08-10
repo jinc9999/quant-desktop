@@ -132,7 +132,7 @@ func BenchmarkScreenSliding(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+		ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	}
 }
 

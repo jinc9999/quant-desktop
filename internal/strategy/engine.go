@@ -448,6 +448,8 @@ func (e *Engine) runOnce(ctx context.Context) {
 	//    sliding 模式：滑动窗口过程涨幅判定）
 	screenStart := time.Now()
 	confirmWindowMs := int64(e.cfg.ConfirmWindowMin * 60000)
+	// 24h 涨幅排名过滤（实验）：在流动性币池内排序，生成通过集合（nil=关闭）
+	rankOK := buildRankOK(tickers, e.cfg.MinQuoteVolume, e.cfg.RankMode, e.cfg.RankParam)
 	var klineOpen map[string]float64
 	if e.cfg.SignalMode == "kline" {
 		klineOpen = e.buildKlineOpenMap(ctx, tickers, now, blockedNew)
@@ -456,7 +458,7 @@ func (e *Engine) runOnce(ctx context.Context) {
 	}
 	candidates := ScreenSliding(e.window, filterTickers(tickers, blockedNew), priceMap, e.cfg.MinGainPct, e.cfg.Min24hGainPct, e.cfg.MinQuoteVolume, e.cfg.TopN, now,
 		e.cfg.EnableShort, confirmWindowMs, e.cfg.ConfirmThreshold, e.cfg.VolumeSurgeThreshold,
-		e.cfg.SignalMode, klineOpen, e.cfg.MaxPullbackPct)
+		e.cfg.SignalMode, klineOpen, e.cfg.MaxPullbackPct, rankOK)
 	screenDur := time.Since(screenStart)
 
 	// 4.5 候选明细日志

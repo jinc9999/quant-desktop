@@ -32,7 +32,7 @@ func TestScreenSliding_FilterByGain(t *testing.T) {
 	}
 	priceMap := map[string]float64{"LOWUSDT": 103, "HIGHUSDT": 106}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("len = %d, 期望 1", len(got))
 	}
@@ -55,7 +55,7 @@ func TestScreenSliding_FilterByVolume(t *testing.T) {
 	}
 	priceMap := map[string]float64{"LOWVOLUSDT": 106, "HIGHVOLUSDT": 106}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("len = %d, 期望 1", len(got))
 	}
@@ -80,7 +80,7 @@ func TestScreenSliding_SortByVolume(t *testing.T) {
 	}
 	priceMap := map[string]float64{"AUSDT": 106, "BUSDT": 109, "CUSDT": 107.5}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 3 {
 		t.Fatalf("len = %d, 期望 3", len(got))
 	}
@@ -118,7 +118,7 @@ func TestScreenSliding_TopN(t *testing.T) {
 		priceMap[sym] = 110
 	}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 3, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 3, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 3 {
 		t.Fatalf("topN=3 时 len = %d, 期望 3", len(got))
 	}
@@ -144,7 +144,7 @@ func TestScreenSliding_WarmupIncluded(t *testing.T) {
 	}
 	priceMap := map[string]float64{"NEWUSDT": 150}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("预热期币种涨幅达标应入选，len = %d, 期望 1", len(got))
 	}
@@ -170,7 +170,7 @@ func TestScreenSliding_PriceMapPriority(t *testing.T) {
 	}
 	priceMap := map[string]float64{"XUSDT": 108}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("应使用 priceMap 实时价计算，len = %d, 期望 1", len(got))
 	}
@@ -185,10 +185,10 @@ func TestScreenSliding_EmptyInput(t *testing.T) {
 	now := int64(1000000)
 	w := NewSlidingWindow(300000, 10000)
 
-	if got := ScreenSliding(w, []binance.Ticker{}, nil, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0); len(got) != 0 {
+	if got := ScreenSliding(w, []binance.Ticker{}, nil, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil); len(got) != 0 {
 		t.Errorf("空切片输入 len = %d, 期望 0", len(got))
 	}
-	if got := ScreenSliding(w, nil, nil, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0); len(got) != 0 {
+	if got := ScreenSliding(w, nil, nil, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil); len(got) != 0 {
 		t.Errorf("nil 输入 len = %d, 期望 0", len(got))
 	}
 }
@@ -208,7 +208,7 @@ func TestScreenSliding_Boundary_MinGainExact(t *testing.T) {
 	}
 	priceMap := map[string]float64{"EXACTUSDT": 105}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("涨幅恰好等于阈值应被纳入，len = %d, 期望 1", len(got))
 	}
@@ -232,7 +232,7 @@ func TestScreenSliding_Boundary_MinVolumeExact(t *testing.T) {
 	}
 	priceMap := map[string]float64{"VOLEXACTUSDT": 106}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("成交额恰好等于阈值应被纳入，len = %d, 期望 1", len(got))
 	}
@@ -256,7 +256,7 @@ func TestScreenSliding_Boundary_MinVolumeNewDefault(t *testing.T) {
 	}
 	priceMap := map[string]float64{"EXACT10MUSDT": 106, "BELOW10MUSDT": 106}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 10000000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 10000000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("len = %d, 期望 1（仅 1000 万整入选，999 万被过滤）", len(got))
 	}
@@ -283,7 +283,7 @@ func TestScreenSliding_Boundary_MinVolumeAbove(t *testing.T) {
 	}
 	priceMap := map[string]float64{"HUGEUSDT": 106, "SLIGHTUSDT": 106, "NEARUSDT": 106}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 10000000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 10000000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 2 {
 		t.Fatalf("len = %d, 期望 2（1.5 亿与 1050 万入选，990 万被过滤）", len(got))
 	}
@@ -310,7 +310,7 @@ func TestScreenSliding_CustomHigherThreshold(t *testing.T) {
 	priceMap := map[string]float64{"BIGUSDT": 106, "MIDUSDT": 106}
 
 	// 用户自定义阈值 2000 万
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 20000000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 20000000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("len = %d, 期望 1（仅 2500 万入选，1500 万被 2000 万阈值过滤）", len(got))
 	}
@@ -362,7 +362,7 @@ func TestScreenSliding_Boundary_TopNExact(t *testing.T) {
 	}
 	priceMap := map[string]float64{"AUSDT": 106, "BUSDT": 107, "CUSDT": 108}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 3, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 3, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 3 {
 		t.Fatalf("topN 等于候选数时应全部返回，len = %d, 期望 3", len(got))
 	}
@@ -380,7 +380,7 @@ func TestScreenSliding_Boundary_SingleCandidate(t *testing.T) {
 	}
 	priceMap := map[string]float64{"SOLOUSDT": 110}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 1, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 1, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("单候选 topN=1 应返回 1 个，len = %d, 期望 1", len(got))
 	}
@@ -403,7 +403,7 @@ func TestScreenSliding_Boundary_ZeroPrice(t *testing.T) {
 	}
 	priceMap := map[string]float64{"ZEROUSDT": 0, "NORMALUSDT": 106}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("零价格应被跳过，len = %d, 期望 1", len(got))
 	}
@@ -426,7 +426,7 @@ func TestScreenSliding_Boundary_NegativeGain(t *testing.T) {
 	}
 	priceMap := map[string]float64{"DROPUSDT": 95, "RISEUSDT": 106}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("负涨幅应被过滤，len = %d, 期望 1", len(got))
 	}
@@ -451,7 +451,7 @@ func TestScreenSliding_Short(t *testing.T) {
 	priceMap := map[string]float64{"DROPUSDT": 88}
 
 	// enableShort=true 时应筛出做空候选
-	got := ScreenSliding(w, tickers, priceMap, 10.0, 0, 100000, 0, now, true, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 10.0, 0, 100000, 0, now, true, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("期望 1 个候选, 实际 %d", len(got))
 	}
@@ -463,7 +463,7 @@ func TestScreenSliding_Short(t *testing.T) {
 	}
 
 	// enableShort=false 时不应筛出
-	got2 := ScreenSliding(w, tickers, priceMap, 10.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got2 := ScreenSliding(w, tickers, priceMap, 10.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got2) != 0 {
 		t.Errorf("enableShort=false 时期望 0 个候选, 实际 %d", len(got2))
 	}
@@ -489,14 +489,14 @@ func TestScreenSliding_ConfirmThreshold(t *testing.T) {
 	priceMap := map[string]float64{"CONFUSDT": 110}
 
 	// 关闭确认（threshold=0）：应通过（长窗口 MaxGainPct=10% >= 5%）
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) == 0 {
 		t.Fatal("关闭确认时期望有候选")
 	}
 
 	// 开启确认（threshold=3%，窗口=3分钟）：短窗口涨幅不足应被过滤
 	// RecentGainPct 基准为 ts=790000 处的 111.5，gain=(110-111.5)/111.5*100≈-1.35% < 3%
-	got2 := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 180000, 3.0, 0, "sliding", nil, 0)
+	got2 := ScreenSliding(w, tickers, priceMap, 5.0, 0, 100000, 0, now, false, 180000, 3.0, 0, "sliding", nil, 0, nil)
 	if len(got2) != 0 {
 		t.Errorf("短窗口涨幅不足时期望 0 个候选, 实际 %d", len(got2))
 	}
@@ -521,7 +521,7 @@ func TestScreenSliding_24hGainFilter(t *testing.T) {
 	priceMap := map[string]float64{"GOOD24USDT": 106, "BAD24USDT": 106}
 
 	// 启用 24h 过滤（min24hGainPct=5.0）：仅 24h 涨幅达标的保留
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 5.0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 5.0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("len = %d, 期望 1（仅 24h 涨幅达标的候选保留）", len(got))
 	}
@@ -550,7 +550,7 @@ func TestScreenSliding_DualCriteria(t *testing.T) {
 	priceMap := map[string]float64{"DUALUSDT": 106, "NO15MUSDT": 103, "NO24HUSDT": 107}
 
 	// 双条件：15m 涨幅 >= 5% 且 24h 涨幅 >= 5%
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 5.0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 5.0, 100000, 0, now, false, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("len = %d, 期望 1（仅 DUALUSDT 同时满足双条件）", len(got))
 	}
@@ -575,7 +575,7 @@ func TestScreenSliding_24hGainFilterShort(t *testing.T) {
 	}
 	priceMap := map[string]float64{"SHORT24USDT": 88, "NOSHORT24USDT": 88}
 
-	got := ScreenSliding(w, tickers, priceMap, 10.0, 5.0, 100000, 0, now, true, 0, 0, 0, "sliding", nil, 0)
+	got := ScreenSliding(w, tickers, priceMap, 10.0, 5.0, 100000, 0, now, true, 0, 0, 0, "sliding", nil, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("len = %d, 期望 1（仅 24h 跌幅达标的做空候选保留）", len(got))
 	}
@@ -610,7 +610,7 @@ func TestScreenKlineMode_Basic(t *testing.T) {
 		"LONGKUSDT": 100, "NO24KUSDT": 100, "SHORTKUSDT": 100, "WEAKKUSDT": 100,
 	}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 5.0, 100000, 0, now, true, 0, 0, 0, "kline", klineOpen, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 5.0, 100000, 0, now, true, 0, 0, 0, "kline", klineOpen, 0, nil)
 	if len(got) != 2 {
 		t.Fatalf("len = %d, 期望 2（LONGKUSDT + SHORTKUSDT）", len(got))
 	}
@@ -639,7 +639,7 @@ func TestScreenKlineMode_MissingOpen(t *testing.T) {
 	priceMap := map[string]float64{"HASOPENUSDT": 105, "NOOPENUSDT": 105}
 	klineOpen := map[string]float64{"HASOPENUSDT": 100}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 5.0, 100000, 0, now, true, 0, 0, 0, "kline", klineOpen, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 5.0, 100000, 0, now, true, 0, 0, 0, "kline", klineOpen, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("len = %d, 期望 1（NOOPENUSDT 因 K 线开盘价缺失应被跳过）", len(got))
 	}
@@ -672,7 +672,7 @@ func TestScreenKlineMode_MaxPullback(t *testing.T) {
 		"TOPHIGHUSDT": 100, "OKHIGHUSDT": 100, "TOPLOWUSDT": 100, "OKLOWUSDT": 100,
 	}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 5.0, 100000, 0, now, true, 0, 0, 0, "kline", klineOpen, 9.0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 5.0, 100000, 0, now, true, 0, 0, 0, "kline", klineOpen, 9.0, nil)
 	if len(got) != 2 {
 		t.Fatalf("len = %d, 期望 2（OKHIGHUSDT + OKLOWUSDT，超回撤的被过滤）", len(got))
 	}
@@ -727,7 +727,7 @@ func TestScreenKlineMode_VolumeSurge(t *testing.T) {
 	klineOpen := map[string]float64{"SURGEUSDT": 100}
 
 	// kline 模式 + 放量确认（2 分钟窗口，1.8 倍阈值）
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 5.0, 100000, 0, now, true, 120000, 0, 1.8, "kline", klineOpen, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 5.0, 100000, 0, now, true, 120000, 0, 1.8, "kline", klineOpen, 0, nil)
 	if len(got) != 1 {
 		t.Fatalf("放量达标应入选，len = %d, 期望 1", len(got))
 	}
@@ -756,7 +756,7 @@ func TestScreenKlineMode_VolumeSurge_Filter(t *testing.T) {
 	priceMap := map[string]float64{"FLATUSDT": 107}
 	klineOpen := map[string]float64{"FLATUSDT": 100}
 
-	got := ScreenSliding(w, tickers, priceMap, 5.0, 5.0, 100000, 0, now, true, 120000, 0, 1.8, "kline", klineOpen, 0)
+	got := ScreenSliding(w, tickers, priceMap, 5.0, 5.0, 100000, 0, now, true, 120000, 0, 1.8, "kline", klineOpen, 0, nil)
 	if len(got) != 0 {
 		t.Errorf("放量不足应被过滤，len = %d, 期望 0", len(got))
 	}

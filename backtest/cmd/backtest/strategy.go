@@ -23,6 +23,18 @@ type StrategyConfig struct {
 	VolumeSurgeThreshold float64 // 放量倍数阈值
 	SurgeLookback        int     // 放量基准窗口(K 线根数)
 	MaxPullbackPct       float64 // 山顶过滤器回撤上限(%)
+	MinTakerBuyPct       float64 // 15m 窗口主动买占比门槛(%)(0 关闭)
+	RetracePct           float64 // S01 回踩实验: 信号后回踩深度%(0 关闭)
+	RetraceMaxBars       int     // S01 回踩实验: 最长等待 K 线数（超时放弃）
+	SizeMode             int     // S01 仓位倾斜: 0=均仓 1=按15m涨幅 2=按放量 3=按主动买 4=组合
+	SizeTilt             float64 // 每 1σ 信号强度调整仓位倍数（默认 0.3 = ±30%）
+	SizeMin              float64 // 仓位倍数下限（默认 0.5）
+	SizeMax              float64 // 仓位倍数上限（默认 1.5）
+	PriceSizeTh          float64 // 按币价减仓: 低于该价减半仓（USDT，默认 0.05）
+	TakerExitPct         float64 // S01 实验: 浮盈持仓 15m 主动买占比跌破该值提前止盈(%)(0 关闭)
+	RankMode             int     // 24h 涨幅排名过滤: 0=关 1=前N% 2=前M名（替代固定 24h 涨幅）
+	RankParam            float64 // 排名参数: 模式1=百分位(%) 模式2=名数
+	TrendMode            int     // 趋势因子: 0=关 1=EMA50向上 2=价>EMA96 3=4h涨>0 4=4h涨>2% 5=价>4hVWAP
 	TopN                 int     // 候选排序取前 N
 	MaxOpenPositions     int     // 最大同时持仓数
 	Leverage             float64 // 杠杆倍数
@@ -141,6 +153,18 @@ func DefaultConfig() *StrategyConfig {
 		VolumeSurgeThreshold:     1.8,
 		SurgeLookback:            24, // 2 小时基准窗口（24 根 5m）
 		MaxPullbackPct:           9.0,
+		MinTakerBuyPct:           0,
+		RetracePct:               0,
+		RetraceMaxBars:           6,
+		SizeMode:                 0,
+		SizeTilt:                 0.3,
+		SizeMin:                  0.5,
+		SizeMax:                  1.5,
+		PriceSizeTh:              0.05,
+		TakerExitPct:             0,
+		RankMode:                 0,
+		RankParam:                10,
+		TrendMode:                0,
 		TopN:                     8,
 		MaxOpenPositions:         5,
 		Leverage:                 10,
@@ -204,8 +228,14 @@ type symbolState struct {
 	periodOpen      float64             // 当前 15m 周期开盘价
 	periodTS        int64               // 当前 15m 周期起点
 	hasPeriod       bool                // 15m 周期是否已初始化
+	periodVol       float64             // 当前 15m 周期累计成交量（主动买占比用）
+	periodTBB       float64             // 当前 15m 周期累计主动买量（主动买占比用）
 	lastClose       int64               // 该币最近平仓时间（冷却用）
 	lastCloseReason string              // 该币最近平仓原因（分原因冷却用）
+	vols            [WindowBars]float64 // 环形: 24h 成交量（VWAP 计算用）
+	trendEma        float64             // 趋势因子: EMA（50 或 96 周期）
+	prevTrendEma    float64             // 趋势因子: 上一 EMA（判断向上）
+	trendEmaInit    bool                // 趋势因子: EMA 是否已初始化
 	fastEma         float64             // 趋势模式: 快线 EMA
 	slowEma         float64             // 趋势模式: 慢线 EMA
 	prevFast        float64             // 上一根快线 EMA（交叉检测用）
@@ -247,6 +277,13 @@ type Position struct {
 	ExtremePrice     float64 // 跟踪止盈极值（多头=最高价, 空头=最低价）
 	TrailingActive   bool    // 是否已激活跟踪止盈
 	Pending          bool    // 待下一片开盘成交
+	RetracePct       float64 // S01 回踩实验: 回踩深度%（0=信号后立即成交）
+	RetraceRef       float64 // 回踩基准价（信号 bar 收盘价）
+	RetraceSeenDip   bool    // 是否已出现满足深度的回踩
+	RetraceDipHigh   float64 // 回踩 bar 最高价（反弹需收复）
+	RetraceConfirmed bool    // 回踩后已收复，下一片开盘成交
+	RetraceBars      int     // 已等待 K 线数
+	RetraceMax       int     // 最长等待 K 线数（超时放弃）
 	FundingCollected float64 // funding 模式: 持有期间累计收取的资金费（USDT）
 	FundIntervals    int     // funding 模式: 已收取资金费的结算周期数
 	Mode             string  // 自适应模式: chase / pullback / short（开仓时固化）
@@ -339,7 +376,20 @@ type Engine struct {
 	v6Gates          [8]int64           // v6 信号漏斗各阶段通过数（诊断用）
 	v6Skip           [4]int64           // v6 开仓拦截原因统计: 0=熔断拦截 1=仓位/敞口/破产 2=已持仓去重 3=实际成交数
 	fundingVetoCount int64              // S01 实验: 费率过热否决的信号数
+	takerBlocked     int64              // S01 实验: 主动买占比过滤拦截信号数
+	retraceTimeout   int64              // S01 实验: 回踩等待超时放弃数
+	retraceFilled    int64              // S01 实验: 回踩确认后成交数
+	rankBlocked      int64              // S01 实验: 排名过滤拦截信号数
+	trendBlocked     int64              // S01 实验: 趋势因子拦截信号数
+	rankOK           map[string]bool    // 当前时间片通过 24h 涨幅排名的币种
+	gain24s          []gainRec          // 当前时间片全部流动性币的 24h 涨幅
 	lastEntry        map[string]float64 // 追涨/回踩分类: 每币上一笔入场价
+}
+
+// gainRec 单个币种的 24h 涨幅（排名用）
+type gainRec struct {
+	sym string
+	g   float64
 }
 
 // NewEngine 创建回测引擎
@@ -369,6 +419,8 @@ type bar struct {
 	low      float64
 	close    float64
 	quoteVol float64
+	vol      float64
+	tbb      float64
 }
 
 // max24h 返回最近 24h 窗口内最高价（全扫描 O(288)）
@@ -426,6 +478,7 @@ func (e *Engine) updateState(symbol string, b *bar) (*symbolState, bool) {
 	st.highs[st.idx] = b.high
 	st.lows[st.idx] = b.low
 	st.quoteVols[st.idx] = b.quoteVol
+	st.vols[st.idx] = b.vol
 
 	// 24h 累计成交额滚动维护
 	if st.filled >= WindowBars {
@@ -439,8 +492,12 @@ func (e *Engine) updateState(symbol string, b *bar) (*symbolState, bool) {
 	if !st.hasPeriod || st.periodTS != periodTS {
 		st.periodTS = periodTS
 		st.periodOpen = b.open
+		st.periodVol = 0
+		st.periodTBB = 0
 		st.hasPeriod = true
 	}
+	st.periodVol += b.vol
+	st.periodTBB += b.tbb
 
 	st.idx = (st.idx + 1) % WindowBars
 	st.filled++
@@ -469,6 +526,22 @@ func (e *Engine) updateState(symbol string, b *bar) (*symbolState, bool) {
 		} else {
 			k := 2.0 / (float64(e.cfg.RBEMA) + 1)
 			st.rbEma += (b.close - st.rbEma) * k
+		}
+	}
+
+	// 趋势因子 EMA（momentum 实验）: EMA50（向上判定）或 EMA96（中期趋势）
+	if e.cfg.TrendMode == 1 || e.cfg.TrendMode == 2 {
+		span := 50
+		if e.cfg.TrendMode == 2 {
+			span = 96
+		}
+		if !st.trendEmaInit {
+			st.trendEma = b.close
+			st.trendEmaInit = true
+		} else {
+			k := 2.0 / (float64(span) + 1)
+			st.prevTrendEma = st.trendEma
+			st.trendEma += (b.close - st.trendEma) * k
 		}
 	}
 
@@ -847,6 +920,17 @@ func (e *Engine) computeSignal(st *symbolState, b *bar, ready24 bool) (string, s
 				return "", ""
 			}
 		}
+		// 最低币价过滤：低价币点差宽、滑点大（实盘 JCT/CYS 极端滑点根因）
+		if cfg.MinPrice > 0 && b.close < cfg.MinPrice {
+			return "", ""
+		}
+		// 主动买占比（S01 实验）：当前 15m 窗口主动买量/总成交量 >= 门槛（0=关闭）
+		if cfg.MinTakerBuyPct > 0 {
+			if st.periodVol <= 0 || st.periodTBB/st.periodVol*100 < cfg.MinTakerBuyPct {
+				e.takerBlocked++
+				return "", ""
+			}
+		}
 		return side, ""
 	}
 }
@@ -865,6 +949,32 @@ func (e *Engine) fillPending(bars map[string]*bar, ts int64) {
 				still = append(still, p)
 			}
 			continue
+		}
+		// S01 回踩入场实验: 信号后不立即成交，等回踩到位 + 5m 阳线收复回踩 bar 高点
+		if p.RetracePct > 0 {
+			if !p.RetraceConfirmed {
+				p.RetraceBars++
+				if !p.RetraceSeenDip {
+					if b.low <= p.RetraceRef*(1-p.RetracePct/100) {
+						p.RetraceSeenDip = true
+						p.RetraceDipHigh = b.high
+					}
+				} else if b.close >= p.RetraceDipHigh {
+					p.RetraceConfirmed = true
+				}
+				if !p.RetraceConfirmed {
+					if p.RetraceBars > p.RetraceMax {
+						e.retraceTimeout++ // 超时未确认，放弃
+						continue
+					}
+					still = append(still, p)
+					continue
+				}
+				// 本片收盘才确认，必须等下一片开盘成交（防未来函数）
+				still = append(still, p)
+				continue
+			}
+			e.retraceFilled++
 		}
 		p.EntryTS = ts
 		p.EntryPrice = b.open
@@ -949,7 +1059,57 @@ func (e *Engine) openPositions(candidates []candidate, now int64) {
 		}
 	}
 
-	for _, c := range candidates {
+	// S01 仓位倾斜实验: 按信号强度因子 z 标准化调整每仓保证金（默认均仓）
+	mult := make([]float64, len(candidates))
+	if e.cfg.SizeMode == 5 {
+		// 按币价减仓（脚毛币滑点大）: <PriceSizeTh 半仓，<0.2U 七五折，其余均仓
+		for i, c := range candidates {
+			px := c.ref
+			if px <= 0 {
+				if st := e.states[c.symbol]; st != nil {
+					px = ringAt(&st.closes, st.idx, 0)
+				}
+			}
+			m := 1.0
+			switch {
+			case px > 0 && px < e.cfg.PriceSizeTh:
+				m = 0.5
+			case px >= e.cfg.PriceSizeTh && px < 0.2:
+				m = 0.75
+			}
+			mult[i] = math.Max(e.cfg.SizeMin, math.Min(e.cfg.SizeMax, m))
+		}
+	} else if e.cfg.SizeMode > 0 {
+		vals := make([]float64, len(candidates))
+		for i, c := range candidates {
+			switch e.cfg.SizeMode {
+			case 1:
+				vals[i] = c.gain15
+			case 2:
+				vals[i] = c.surge
+			case 3:
+				vals[i] = c.taker
+			case 4:
+				vals[i] = c.gain15 + c.surge*3 + c.taker*0.2
+			default:
+				vals[i] = 0
+			}
+		}
+		mean, std := meanStd(vals)
+		for i := range candidates {
+			m := 1.0
+			if std > 1e-9 {
+				m = 1 + e.cfg.SizeTilt*(vals[i]-mean)/std
+			}
+			mult[i] = math.Max(e.cfg.SizeMin, math.Min(e.cfg.SizeMax, m))
+		}
+	} else {
+		for i := range candidates {
+			mult[i] = 1
+		}
+	}
+
+	for i, c := range candidates {
 		if len(e.positions)+len(e.pending) >= e.cfg.MaxOpenPositions {
 			break
 		}
@@ -1007,8 +1167,14 @@ func (e *Engine) openPositions(candidates []candidate, now int64) {
 			p.SLPct, p.TPPct, p.ActPct, p.CbPct, p.HoldBars = e.cfg.SSL, e.cfg.STP, e.cfg.SAct, e.cfg.SCb, e.cfg.SHold
 		default: // chase 或非 adaptive
 			p.SLPct, p.TPPct, p.ActPct, p.CbPct, p.HoldBars = e.cfg.StopLossPct, e.cfg.TakeProfitPct, e.cfg.TrailingActivation, e.cfg.TrailingCallback, e.cfg.MaxHoldBars
-			p.Margin = e.cfg.PositionMarginUSDT
-			p.Notional = e.cfg.PositionMarginUSDT * e.cfg.Leverage
+			p.Margin = e.cfg.PositionMarginUSDT * mult[i]
+			p.Notional = p.Margin * e.cfg.Leverage
+		}
+		// S01 回踩入场实验: momentum 模式信号后等待回踩+收复才成交
+		if e.cfg.Mode == "momentum" && e.cfg.RetracePct > 0 && c.ref > 0 {
+			p.RetracePct = e.cfg.RetracePct
+			p.RetraceRef = c.ref
+			p.RetraceMax = e.cfg.RetraceMaxBars
 		}
 		p.Mode = c.mode
 		e.pending = append(e.pending, p)
@@ -1017,6 +1183,102 @@ func (e *Engine) openPositions(candidates []candidate, now int64) {
 		}
 		held[c.symbol] = true
 	}
+}
+
+// meanStd 计算切片均值与标准差（仓位倾斜 z 标准化用）
+func meanStd(vals []float64) (float64, float64) {
+	if len(vals) == 0 {
+		return 0, 0
+	}
+	sum := 0.0
+	for _, v := range vals {
+		sum += v
+	}
+	mean := sum / float64(len(vals))
+	var s float64
+	for _, v := range vals {
+		d := v - mean
+		s += d * d
+	}
+	return mean, math.Sqrt(s / float64(len(vals)))
+}
+
+// takerRatio 返回当前 15m 窗口主动买占比（%）
+func (e *Engine) takerRatio(symbol string) float64 {
+	st := e.states[symbol]
+	if st == nil || st.periodVol <= 0 {
+		return 0
+	}
+	return st.periodTBB / st.periodVol * 100
+}
+
+// computeRank 按 24h 涨幅对当前片流动性币排序，生成排名通过集合（前 N% 或前 M 名）
+func (e *Engine) computeRank() {
+	e.rankOK = make(map[string]bool, len(e.gain24s))
+	n := len(e.gain24s)
+	if n == 0 {
+		return
+	}
+	sort.Slice(e.gain24s, func(i, j int) bool { return e.gain24s[i].g > e.gain24s[j].g })
+	limit := 0
+	if e.cfg.RankMode == 1 {
+		limit = int(math.Ceil(float64(n) * e.cfg.RankParam / 100))
+	} else if e.cfg.RankMode == 2 {
+		limit = int(e.cfg.RankParam)
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > n {
+		limit = n
+	}
+	for i := 0; i < limit; i++ {
+		e.rankOK[e.gain24s[i].sym] = true
+	}
+}
+
+// vwap4h 返回最近 48 根 5m（4 小时）的成交量加权均价
+func (e *Engine) vwap4h(st *symbolState) float64 {
+	if st.filled < 48 {
+		return 0
+	}
+	ci := (st.idx - 1 + WindowBars) % WindowBars
+	var qv, v float64
+	for i := 0; i < 48; i++ {
+		j := (ci - i + WindowBars*2) % WindowBars
+		qv += st.quoteVols[j]
+		v += st.vols[j]
+	}
+	if v <= 0 {
+		return 0
+	}
+	return qv / v
+}
+
+// trendOK 趋势因子判定（入场时刻资产是否处于上升趋势，返回 true 表示放行）
+func (e *Engine) trendOK(st *symbolState, b *bar) bool {
+	switch e.cfg.TrendMode {
+	case 1: // EMA50 向上且现价在其上方
+		if !st.trendEmaInit || st.trendEma <= 0 {
+			return true // 预热期放行，避免误伤
+		}
+		return b.close > st.trendEma && st.trendEma > st.prevTrendEma
+	case 2: // 现价 > EMA96（≈8h 中期趋势）
+		if !st.trendEmaInit || st.trendEma <= 0 {
+			return true
+		}
+		return b.close > st.trendEma
+	case 3: // 4h 涨幅 > 0
+		old := prevClose(st, 48)
+		return old > 0 && b.close > old
+	case 4: // 4h 涨幅 > 2%
+		old := prevClose(st, 48)
+		return old > 0 && (b.close-old)/old > 0.02
+	case 5: // 现价 > 4h VWAP
+		vwap := e.vwap4h(st)
+		return vwap > 0 && b.close > vwap
+	}
+	return true
 }
 
 // sortCandidates 将候选按成交额降序排序（放量大的优先）
@@ -1061,6 +1323,10 @@ type candidate struct {
 	mode   string  // 自适应模式: chase/pullback/short（非 adaptive 为空）
 	score  float64 // v6: L3 加权总分
 	tier   string  // v6: 币种分级 big/mid/small
+	ref    float64 // 信号 bar 收盘价（回踩实验基准）
+	gain15 float64 // 15m 实体涨幅%（仓位倾斜用）
+	surge  float64 // 放量倍数（仓位倾斜用）
+	taker  float64 // 15m 主动买占比%（仓位倾斜用）
 }
 
 // closePosition 平仓结算一笔持仓（含资金费收入并入 PnL）
@@ -1443,6 +1709,10 @@ func (e *Engine) monitorPositions(bars map[string]*bar) {
 							if b.close <= trail {
 								exitPx = min2(b.open, trail)
 								reason = "TRAILING_STOP"
+							} else if e.cfg.TakerExitPct > 0 && b.close > p.EntryPrice &&
+								e.takerRatio(p.Symbol) < e.cfg.TakerExitPct {
+								exitPx = b.close
+								reason = "TAKER_EXIT"
 							}
 						}
 					}
@@ -1470,6 +1740,10 @@ func (e *Engine) monitorPositions(bars map[string]*bar) {
 						if b.low <= trail {
 							exitPx = min2(b.open, trail)
 							reason = "TRAILING_STOP"
+						} else if e.cfg.TakerExitPct > 0 && b.close > p.EntryPrice &&
+							e.takerRatio(p.Symbol) < e.cfg.TakerExitPct {
+							exitPx = b.close
+							reason = "TAKER_EXIT"
 						}
 					}
 				}
@@ -1599,12 +1873,47 @@ func (e *Engine) OnBar(bars map[string]*bar, fundings map[string]fundingPoint, t
 		}
 		// 市场状态过滤: 整片先判定一次（breadth 用上一片已更新状态，5m 滞后可忽略）
 		regimePass := e.regimeOK()
+		// 24h 涨幅排名过滤: 先推进全部状态并收集排名数据（两遍循环，避免重复推进）
+		if e.cfg.RankMode > 0 {
+			e.gain24s = e.gain24s[:0]
+			for sym, b := range bars {
+				st, ready := e.updateState(sym, b)
+				if !ready || st.sumVol24 < e.cfg.MinQuoteVolume {
+					continue
+				}
+				old := prevClose(st, WindowBars)
+				if old > 0 {
+					e.gain24s = append(e.gain24s, gainRec{sym: sym, g: (b.close - old) / old})
+				}
+			}
+			e.computeRank()
+		}
 		for sym, b := range bars {
-			st, ready := e.updateState(sym, b)
+			var st *symbolState
+			var ready bool
+			if e.cfg.RankMode > 0 {
+				st = e.states[sym]
+				if st == nil {
+					continue
+				}
+				ready = st.filled >= WindowBars
+			} else {
+				st, ready = e.updateState(sym, b)
+			}
 			if !regimePass {
 				continue
 			}
 			if side, mode := e.computeSignal(st, b, ready); side != "" {
+				// S01 实验: 24h 涨幅排名过滤（替代固定 24h 涨幅）
+				if e.cfg.RankMode > 0 && !e.rankOK[sym] {
+					e.rankBlocked++
+					continue
+				}
+				// S01 实验: 趋势因子（替代固定 24h 涨幅）
+				if !e.trendOK(st, b) {
+					e.trendBlocked++
+					continue
+				}
 				// S01 单因子实验（默认全关）: 费率过热否决 / 成交量 Z 确认 / RSI 趋势带
 				if e.cfg.FundingVetoEnabled && e.fundingVetoed(sym, st.sumVol24) {
 					e.fundingVetoCount++
@@ -1616,7 +1925,16 @@ func (e *Engine) OnBar(bars map[string]*bar, fundings map[string]fundingPoint, t
 				if e.cfg.RSIFilterEnabled && (st.rsi < e.cfg.RSIMin || st.rsi > e.cfg.RSIMax) {
 					continue
 				}
-				cands = append(cands, candidate{symbol: sym, side: side, volume: b.quoteVol, mode: mode})
+				tk := 0.0
+				if st.periodVol > 0 {
+					tk = st.periodTBB / st.periodVol * 100
+				}
+				cands = append(cands, candidate{
+					symbol: sym, side: side, volume: b.quoteVol, mode: mode, ref: b.close,
+					gain15: (b.close - st.periodOpen) / st.periodOpen * 100,
+					surge:  volumeSurge(st, b, e.cfg.SurgeLookback),
+					taker:  tk,
+				})
 			}
 		}
 	}

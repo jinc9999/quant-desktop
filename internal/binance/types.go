@@ -124,6 +124,8 @@ type StrategyConfig struct {
 	Timeframe                string  `json:"timeframe"`
 	MinGainPct               float64 `json:"minGainPct"`
 	Min24hGainPct            float64 `json:"min24hGainPct"` // 24h 涨幅门槛（%），双条件筛选：同时满足 15m 与 24h 涨幅才入选
+	RankMode                 int     `json:"rankMode"`      // 24h 涨幅排名过滤：0=关闭 1=前N% 2=前M名（替代固定 24h 涨幅门槛）
+	RankParam                float64 `json:"rankParam"`     // 排名参数：模式1=百分位(%) 模式2=名数（默认 20）
 	MinQuoteVolume           float64 `json:"minQuoteVolume"`
 	TopN                     int     `json:"topN"` // 候选数量上限，按成交额排序后只取前 N（0=不限制）
 	MaxOpenPositions         int     `json:"maxOpenPositions"`
@@ -176,6 +178,8 @@ func DefaultStrategyConfig() StrategyConfig {
 		Timeframe:              "15m",
 		MinGainPct:             4.0,
 		Min24hGainPct:          4.0,      // 双条件筛选：24h 涨幅 >= 4% 且 15m K 线涨幅 >= 4%
+		RankMode:               0,        // 排名过滤默认关闭（S01 v2 保持原行为；A/B 实验实例可开启 1/20）
+		RankParam:              20,       // 排名参数默认 20（前 20% / 前 20 名）
 		MinQuoteVolume:         10000000, // 24h 成交额下限 1000 万 USDT（2026-08-07 用户要求 10 万→1000 万，过滤小市值低流动性币）
 		TopN:                   10,
 		MaxOpenPositions:       10,   // 最大同时持仓 10（2026-08-04 用户要求 5→10）

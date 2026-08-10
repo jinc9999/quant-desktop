@@ -90,7 +90,16 @@ func parseBar(rec []string) *bar {
 	if err != nil {
 		return nil
 	}
-	return &bar{ts: ts, open: vals[0], high: vals[1], low: vals[2], close: vals[3], quoteVol: qv}
+	vol, tbb := 0.0, 0.0
+	if v, err := strconv.ParseFloat(rec[5], 64); err == nil {
+		vol = v
+	}
+	if len(rec) >= 10 {
+		if v, err := strconv.ParseFloat(rec[9], 64); err == nil {
+			tbb = v
+		}
+	}
+	return &bar{ts: ts, open: vals[0], high: vals[1], low: vals[2], close: vals[3], quoteVol: qv, vol: vol, tbb: tbb}
 }
 
 // next 推进到下一行
@@ -373,6 +382,7 @@ type Metrics struct {
 	TrailingCount     int
 	TakeProfitCount   int     // 固定止盈平仓数
 	MaxHoldCount      int     // 超时平仓数
+	TakerExitCount    int     // 主动买占比跑路平仓数
 	ATRDecayCount     int     // 波动率衰减平仓数（v6）
 	FundReversalCount int     // 费率反转平仓数（v6）
 	FundingIncome     float64 // funding 模式: 累计资金费收入(USDT)
@@ -426,6 +436,8 @@ func computeMetrics(e *Engine) Metrics {
 			m.TakeProfitCount++
 		case "MAX_HOLD":
 			m.MaxHoldCount++
+		case "TAKER_EXIT":
+			m.TakerExitCount++
 		case "ATR_DECAY":
 			m.ATRDecayCount++
 		case "FUND_REVERSAL":
@@ -577,6 +589,9 @@ func printReport(m Metrics, cfg *StrategyConfig) {
 	if cfg.Mode == "v6" {
 		fmt.Printf(" / 波动率衰减 %d 笔 / 费率反转 %d 笔", m.ATRDecayCount, m.FundReversalCount)
 	}
+	if m.TakerExitCount > 0 {
+		fmt.Printf(" / 主动买跑路 %d 笔", m.TakerExitCount)
+	}
 	fmt.Printf("\n")
 	if m.FirstCount+m.ChaseCount+m.PullbackCount > 0 {
 		fmt.Printf("追涨/回踩: 首笔 %d 笔 %+.2fU (%.3f/笔) | 追涨 %d 笔 %+.2fU (%.3f/笔) | 回踩 %d 笔 %+.2fU (%.3f/笔)\n",
@@ -685,6 +700,19 @@ func main() {
 	fvetoFlag := flag.Bool("fveto", false, "S01 实验: 费率过热否决（正费率 ≥ 分级阈值不追）")
 	vzFlag := flag.Float64("vz", 0, "S01 实验: 成交量 Z-Score 确认阈值（0=关闭）")
 	rsiokFlag := flag.Bool("rsiok", false, "S01 实验: RSI[40,70] 趋势带确认")
+	takerbuyFlag := flag.Float64("takerbuy", 0, "S01 实验: 15m窗口主动买占比门槛 %%（0 关闭）")
+	retraceFlag := flag.Float64("retrace", 0, "S01 实验: 信号后回踩深度 %%（0 关闭）")
+	retraceBarsFlag := flag.Int("retrace-bars", 6, "S01 实验: 回踩最长等待 K 线数（超时放弃）")
+	sizeModeFlag := flag.Int("size", 0, "S01 实验: 仓位倾斜 0=均仓 1=按15m涨幅 2=按放量 3=按主动买 4=组合")
+	sizeTiltFlag := flag.Float64("size-tilt", 0.3, "S01 实验: 每 1σ 信号强度仓位调整倍数")
+	sizeMinFlag := flag.Float64("size-min", 0.5, "S01 实验: 仓位倍数下限")
+	sizeMaxFlag := flag.Float64("size-max", 1.5, "S01 实验: 仓位倍数上限")
+	takerExitFlag := flag.Float64("taker-exit", 0, "S01 实验: 浮盈持仓 15m 主动买占比跌破该值提前止盈 %%（0 关闭）")
+	minPriceFlag := flag.Float64("minprice", 0, "S01 实验: 最低币价过滤 USDT（低于该价不追，0 关闭）")
+	priceSizeThFlag := flag.Float64("price-size-th", 0.05, "S01 实验: 按币价减仓阈值 USDT（<该价半仓，<0.2 七五折）")
+	rankModeFlag := flag.Int("rank", 0, "S01 实验: 24h涨幅排名过滤 0=关 1=前N%% 2=前M名")
+	rankParamFlag := flag.Float64("rank-param", 10, "S01 实验: 排名参数（模式1=百分位，模式2=名数）")
+	trendFlag := flag.Int("trend", 0, "S01 实验: 趋势因子 0=关 1=EMA50向上 2=价>EMA96 3=4h涨>0 4=4h涨>2%% 5=价>4hVWAP")
 	flag.Parse()
 
 	var startTs, endTs int64
@@ -727,6 +755,19 @@ func main() {
 	cfg.ExitClose = *exitModeFlag == "close"
 	cfg.Min24hGainPct = *min24GainFlag
 	cfg.MaxPullbackPct = *pullbackFlag
+	cfg.MinTakerBuyPct = *takerbuyFlag
+	cfg.RetracePct = *retraceFlag
+	cfg.RetraceMaxBars = *retraceBarsFlag
+	cfg.SizeMode = *sizeModeFlag
+	cfg.SizeTilt = *sizeTiltFlag
+	cfg.SizeMin = *sizeMinFlag
+	cfg.SizeMax = *sizeMaxFlag
+	cfg.TakerExitPct = *takerExitFlag
+	cfg.MinPrice = *minPriceFlag
+	cfg.PriceSizeTh = *priceSizeThFlag
+	cfg.RankMode = *rankModeFlag
+	cfg.RankParam = *rankParamFlag
+	cfg.TrendMode = *trendFlag
 	cfg.CooldownMs = int64(*cooldownFlag) * 60 * 1000
 	cfg.PositionMarginUSDT = *marginFlag
 	cfg.FeeRate = *feeFlag / 100
@@ -864,6 +905,21 @@ func main() {
 	}
 	if cfg.Mode == "momentum" && cfg.FundingVetoEnabled {
 		fmt.Printf("费率过热否决信号数: %d\n", eng.fundingVetoCount)
+	}
+	if cfg.MinTakerBuyPct > 0 {
+		fmt.Printf("主动买占比过滤拦截信号数: %d\n", eng.takerBlocked)
+	}
+	if cfg.RetracePct > 0 {
+		fmt.Printf("回踩入场: 确认成交 %d 笔 / 超时放弃 %d 笔\n", eng.retraceFilled, eng.retraceTimeout)
+	}
+	if cfg.SizeMode > 0 {
+		fmt.Printf("仓位倾斜: mode=%d tilt=%.2f 倍数[%.2f, %.2f]\n", cfg.SizeMode, cfg.SizeTilt, cfg.SizeMin, cfg.SizeMax)
+	}
+	if cfg.RankMode > 0 {
+		fmt.Printf("24h涨幅排名过滤拦截信号数: %d\n", eng.rankBlocked)
+	}
+	if cfg.TrendMode > 0 {
+		fmt.Printf("趋势因子拦截信号数: %d\n", eng.trendBlocked)
 	}
 
 	elapsed := time.Since(begin)
