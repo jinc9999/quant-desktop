@@ -75,6 +75,8 @@ type Engine struct {
 	failedOpen        map[string]time.Time          // symbol -> 开仓失败时间，短期内不再重试
 	openBlocked       map[string]time.Time          // symbol -> 结构性开仓失败拉黑截止时间（12h，防反复刷屏）
 	closeRetry        map[int64]time.Time           // positionID -> 平仓失败重试冷却截止时间（3min，防强平模式刷屏）
+	stopBreachSince   map[int64]time.Time           // positionID -> 价格首次击穿有效止损位的时间（交易所条件单兜底计时）
+	stopFallbackDelay time.Duration                 // 条件单存在时，价格击穿止损位后等待条件单成交的最长时间，超时本地兜底平仓
 	stateMu           sync.Mutex                    // 保护并发开仓 goroutine 对 failedOpen/openBlocked 的读写
 	onError           func(context, message string) // 后台错误回调（推送到前端弹窗）
 	lastBreakerDay    string                        // 上次熔断检查日期（YYYY-MM-DD），跨天时重置日熔断
@@ -123,6 +125,8 @@ func NewEngine(cfg binance.StrategyConfig, client *binance.Client, ws *binance.W
 		failedOpen:     make(map[string]time.Time),
 		openBlocked:    make(map[string]time.Time),
 		closeRetry:     make(map[int64]time.Time),
+		stopBreachSince: make(map[int64]time.Time),
+		stopFallbackDelay: 30 * time.Second, // 约 2 个 tick（ScanIntervalSec=15s），给交易所条件单留出成交窗口
 		klineOpenCache: make(map[string]klineOpenEntry),
 		newListLogged:  make(map[string]bool),
 	}
@@ -1290,6 +1294,18 @@ func (e *Engine) monitorPositions(ctx context.Context, priceMap map[string]float
 		log.Printf("[Strategy] 查询持仓失败: %v", err)
 		return
 	}
+
+	// 清理已平仓持仓遗留的兜底计时（防 map 无限增长）
+	openIDs := make(map[int64]struct{}, len(positions))
+	for i := range positions {
+		openIDs[positions[i].ID] = struct{}{}
+	}
+	for id := range e.stopBreachSince {
+		if _, ok := openIDs[id]; !ok {
+			delete(e.stopBreachSince, id)
+		}
+	}
+
 	for i := range positions {
 		pos := &positions[i]
 		price, ok := priceMap[pos.Symbol]
@@ -1322,10 +1338,14 @@ func (e *Engine) monitorPositions(ctx context.Context, priceMap map[string]float
 		// 开仓后交易所挂了 STOP_MARKET + TRAILING_STOP_MARKET 条件单，本地 monitorPositions
 		// 再用 WS 价格独立判断止损。价格触及止损时双方几乎同时触发——
 		// 交易所条件单先成交，本地再发 ReduceOnly 平仓必遭 -2022（无仓位可平）→ 幽灵持仓。
-		// 因此：该持仓已有活跃条件单时，本地平仓逻辑完全交由交易所条件单 + SyncOrders 闭环
+		// 因此：该持仓已有活跃条件单时，平仓以交易所条件单 + SyncOrders 闭环为主路径
 		//（SyncOrders 每 Tick 检测 FILLED → handleFilledOrder 关仓，延迟最多 10 秒）。
-		// 本地 monitorPositions 仅作为「条件单缺失/挂出失败」时的兜底保护。
+		// 本地 monitorPositions 仍保留「击穿超时兜底」（checkStopFallback）：
+		// 若价格击穿有效止损位后条件单迟迟未成交（薄盘币标记价格滞后/条件单失效时会发生，
+		// 2026-08-11 HOMEUSDT 复盘：条件单全程未触发，持仓从 +18% 裸奔至 -7.3U），
+		// 超时后主动撤单并市价平仓，防止保护链悬空。
 		if e.hasActiveStopOrders(pos.ID) {
+			e.checkStopFallback(ctx, pos, price)
 			continue
 		}
 
@@ -1420,6 +1440,73 @@ func (e *Engine) monitorPositions(ctx context.Context, priceMap map[string]float
 			}
 		}
 	}
+}
+
+// checkStopFallback 交易所条件单存在时的本地兜底保护（防"裸奔"）。
+//
+// 背景（2026-08-11 HOMEUSDT 复盘）：开仓后本地按最新价判定移动止盈激活并撤销固定止损，
+// 但交易所侧条件单按标记价格触发，薄盘币标记价格未跟上 → 条件单全程未触发；
+// 而 monitorPositions 因"存在活跃条件单"跳过本地止损，持仓从 +18% 一路裸奔到 -7.3U，
+// 最后由 MAX_HOLD 强制平仓。本函数补上最后一道防线：
+//
+//  1. 价格击穿当前有效止损位（固定止损或移动止损）后开始计时；
+//  2. 计时超过 stopFallbackDelay（默认 30s，约 2 个 tick）条件单仍未成交 → 主动撤单市价平仓；
+//  3. 价格恢复至止损位上方则重置计时，避免瞬时毛刺误平仓。
+//
+// 双触发竞态由 closePosition 的 -2022 幽灵清理兜底：若交易所条件单恰好先成交，
+// 本地市价平仓会收到 -2022，按 GHOST 幂等处理，不会产生反向仓位。
+func (e *Engine) checkStopFallback(ctx context.Context, pos *storage.Position, price float64) {
+	stopPrice := pos.CurrentStopPrice
+	if stopPrice <= 0 {
+		return
+	}
+
+	breached := false
+	if pos.Side == "SHORT" {
+		breached = price >= stopPrice // 做空：价格上涨击穿止损
+	} else {
+		breached = price <= stopPrice // 做多：价格下跌击穿止损
+	}
+	if !breached {
+		delete(e.stopBreachSince, pos.ID)
+		return
+	}
+
+	first, ok := e.stopBreachSince[pos.ID]
+	if !ok {
+		e.stopBreachSince[pos.ID] = time.Now()
+		e.db.InsertLog(&storage.TradeLog{
+			Timestamp: time.Now().UnixMilli(),
+			Level:     "warn",
+			Module:    "strategy",
+			Message:   fmt.Sprintf("⚠ %s 价格击穿止损位 %.6f（当前 %.6f），等待交易所条件单成交（%s 后本地兜底平仓）", pos.Symbol, stopPrice, price, e.stopFallbackDelay.Round(time.Second)),
+			Symbol:    pos.Symbol,
+			Price:     price,
+			Amount:    pos.Amount,
+		})
+		return
+	}
+	if time.Since(first) < e.stopFallbackDelay {
+		return
+	}
+
+	delete(e.stopBreachSince, pos.ID)
+	reason := "STOP_LOSS"
+	if pos.TrailingActive {
+		reason = "TRAILING_STOP"
+	}
+	log.Printf("[Strategy] ⚠ %s 条件单 %s 未成交，本地兜底平仓（价格 %.6f 击穿止损位 %.6f, reason=%s）",
+		pos.Symbol, e.stopFallbackDelay.Round(time.Second), price, stopPrice, reason)
+	e.db.InsertLog(&storage.TradeLog{
+		Timestamp: time.Now().UnixMilli(),
+		Level:     "warn",
+		Module:    "strategy",
+		Message:   fmt.Sprintf("本地兜底平仓 %s reason=%s 价格=%.6f 止损位=%.6f（条件单 %s 未成交）", pos.Symbol, reason, price, stopPrice, e.stopFallbackDelay.Round(time.Second)),
+		Symbol:    pos.Symbol,
+		Price:     price,
+		Amount:    pos.Amount,
+	})
+	e.closePosition(ctx, pos, price, reason)
 }
 
 // hasActiveStopOrders 判断持仓是否已有活跃的交易所止损条件单（NEW / PARTIALLY_FILLED）。

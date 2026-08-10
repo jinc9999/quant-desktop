@@ -1805,55 +1805,175 @@ func TestOpenPositions_Boundary_CooldownExpired(t *testing.T) {
 	}
 }
 
-// ========== 十四、双触发防护测试（幽灵持仓根因） ==========
-// TestMonitor_SkipWhenActiveStopOrders 验证双触发防护：
-// 开仓后存在活跃止损条件单时，本地 monitorPositions 应跳过平仓
-// （完全交由交易所条件单 + SyncOrders 闭环），防止价格触及止损时本地重复平仓
-// 遭 -2022（ReduceOnly 无仓可平）产生幽灵持仓。
-// 取消条件单后（模拟条件单失效），本地兜底平仓恢复。
-func TestMonitor_SkipWhenActiveStopOrders(t *testing.T) {
-	e, db := newTestEngine(t)
+// ========== 十四、双触发防护与本地兜底测试（幽灵持仓根因 + HOMEUSDT 裸奔修复） ==========
+
+// openPositionWithOrders 通过 openPositions 开仓并生成 STOP_MARKET + TRAILING_STOP_MARKET 活跃条件单。
+// 返回新持仓记录（含 ID 与风控状态）。
+func openPositionWithOrders(t *testing.T, e *Engine, db *storage.DB, symbol string, price float64) storage.Position {
+	t.Helper()
 	ctx := context.Background()
-
-	// 开仓（挂出 2 条活跃条件单：止损 + 跟踪止损）
 	candidates := []Candidate{
-		{Symbol: "BTCUSDT", GainPct: 6.0, QuoteVolume: 200000},
+		{Symbol: symbol, GainPct: 6.0, QuoteVolume: 200000},
 	}
-	priceMap := map[string]float64{"BTCUSDT": 50.0}
-	e.openPositions(ctx, candidates, priceMap, nil)
-
+	e.openPositions(ctx, candidates, map[string]float64{symbol: price}, nil)
 	positions, err := db.GetOpenPositions()
 	if err != nil || len(positions) != 1 {
 		t.Fatalf("开仓失败: positions=%v err=%v", positions, err)
 	}
-	pos := positions[0]
 	if len(e.failedOpen) != 0 {
 		t.Fatalf("开仓不应失败，failedOpen = %v", e.failedOpen)
 	}
+	return positions[0]
+}
 
-	// 价格跌破止损线（止损价 = 50*0.9 = 45，价格 44）
-	// 有活跃条件单 → 本地应跳过平仓，等待交易所条件单成交 + SyncOrders 检测
+// TestMonitor_ActiveStopOrders_NoImmediateClose 验证双触发防护的主路径：
+// 价格击穿止损位时，本地不立即平仓（给交易所条件单 + SyncOrders 成交机会），
+// 防止本地重复平仓遭 -2022（ReduceOnly 无仓可平）产生幽灵持仓。
+func TestMonitor_ActiveStopOrders_NoImmediateClose(t *testing.T) {
+	e, db := newTestEngine(t)
+	ctx := context.Background()
+	e.stopFallbackDelay = 30 * time.Second // 默认兜底时长，验证"未超时不平仓"
+
+	pos := openPositionWithOrders(t, e, db, "BTCUSDT", 50.0) // 止损价 = 50*0.9 = 45
+
+	// 价格 44 跌破止损线，条件单仍活跃 → 只开始兜底计时，不平仓
 	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 44.0})
 	after, err := db.GetPositionByID(pos.ID)
 	if err != nil {
 		t.Fatalf("查询持仓失败: %v", err)
 	}
 	if after.Status != "OPEN" {
-		t.Fatalf("有活跃条件单时本地不应平仓，Status = %q, 期望 OPEN", after.Status)
+		t.Fatalf("条件单存在且未超时时本地不应平仓，Status = %q, 期望 OPEN", after.Status)
+	}
+	if _, ok := e.stopBreachSince[pos.ID]; !ok {
+		t.Error("价格击穿止损位后应开始兜底计时")
+	}
+}
+
+// TestMonitor_ActiveStopOrders_FallbackTimeout 验证本地兜底超时平仓：
+// 价格持续击穿止损位超过 stopFallbackDelay 后条件单仍未成交 → 主动撤单市价平仓。
+// （2026-08-11 HOMEUSDT 条件单全程未触发、持仓从 +18% 裸奔至 -7.3U 事故的修复验证）
+func TestMonitor_ActiveStopOrders_FallbackTimeout(t *testing.T) {
+	e, db := newTestEngine(t)
+	ctx := context.Background()
+	e.stopFallbackDelay = 60 * time.Millisecond
+
+	pos := openPositionWithOrders(t, e, db, "BTCUSDT", 50.0) // 止损价 = 45
+
+	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 44.0})
+	after, err := db.GetPositionByID(pos.ID)
+	if err != nil || after.Status != "OPEN" {
+		t.Fatalf("超时前不应平仓: status=%v err=%v", after.Status, err)
 	}
 
-	// 取消活跃委托（模拟条件单失效）→ 本地兜底平仓恢复生效
-	cancelActiveOrders(t, db)
+	time.Sleep(80 * time.Millisecond)
 	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 44.0})
 	after2, err := db.GetPositionByID(pos.ID)
 	if err != nil {
 		t.Fatalf("查询持仓失败: %v", err)
 	}
 	if after2.Status != "CLOSED" {
-		t.Fatalf("条件单失效后本地兜底应平仓，Status = %q, 期望 CLOSED", after2.Status)
+		t.Fatalf("超时后本地兜底应平仓，Status = %q, 期望 CLOSED", after2.Status)
 	}
 	if after2.CloseReason == nil || *after2.CloseReason != "STOP_LOSS" {
 		t.Errorf("CloseReason = %v, 期望 STOP_LOSS", after2.CloseReason)
+	}
+	if _, ok := e.stopBreachSince[pos.ID]; ok {
+		t.Error("平仓后兜底计时应清理")
+	}
+}
+
+// TestMonitor_ActiveStopOrders_FallbackRecoverResets 验证价格恢复后兜底计时重置：
+// 瞬时毛刺击穿后价格回到止损位上方，不应累积超时时间，避免误平仓。
+func TestMonitor_ActiveStopOrders_FallbackRecoverResets(t *testing.T) {
+	e, db := newTestEngine(t)
+	ctx := context.Background()
+	e.stopFallbackDelay = 50 * time.Millisecond
+
+	pos := openPositionWithOrders(t, e, db, "BTCUSDT", 50.0)
+
+	// 第一次击穿（44 < 45）→ 开始计时
+	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 44.0})
+	if _, ok := e.stopBreachSince[pos.ID]; !ok {
+		t.Fatal("首次击穿应开始兜底计时")
+	}
+	// 价格恢复至止损位上方 → 计时重置
+	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 46.0})
+	if _, ok := e.stopBreachSince[pos.ID]; ok {
+		t.Fatal("价格恢复后应重置兜底计时")
+	}
+	// 再次击穿：需重新计时满 stopFallbackDelay 才平仓
+	time.Sleep(20 * time.Millisecond)
+	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 44.0})
+	after, err := db.GetPositionByID(pos.ID)
+	if err != nil {
+		t.Fatalf("查询持仓失败: %v", err)
+	}
+	if after.Status != "OPEN" {
+		t.Fatalf("重新计时未满不应平仓，Status = %q, 期望 OPEN", after.Status)
+	}
+	time.Sleep(100 * time.Millisecond)
+	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 44.0})
+	after2, err := db.GetPositionByID(pos.ID)
+	if err != nil {
+		t.Fatalf("查询持仓失败: %v", err)
+	}
+	if after2.Status != "CLOSED" {
+		t.Fatalf("重新计时满后应平仓，Status = %q, 期望 CLOSED", after2.Status)
+	}
+}
+
+// TestMonitor_ActiveStopOrders_FallbackTrailing 验证移动止盈已激活时的兜底平仓原因：
+// 击穿移动止损位超时 → reason=TRAILING_STOP。
+func TestMonitor_ActiveStopOrders_FallbackTrailing(t *testing.T) {
+	e, db := newTestEngine(t)
+	ctx := context.Background()
+	e.stopFallbackDelay = 60 * time.Millisecond
+
+	pos := openPositionWithOrders(t, e, db, "BTCUSDT", 50.0)
+	hp := 55.0 // 假设价格曾冲到 +10%
+	stop := hp * (1 - e.cfg.TrailingCallback) // 55 * 0.97 = 53.35
+	if err := db.UpdateRiskState(pos.ID, &hp, true, stop); err != nil {
+		t.Fatalf("更新风控状态失败: %v", err)
+	}
+
+	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 53.0})
+	time.Sleep(80 * time.Millisecond)
+	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 53.0})
+	after, err := db.GetPositionByID(pos.ID)
+	if err != nil {
+		t.Fatalf("查询持仓失败: %v", err)
+	}
+	if after.Status != "CLOSED" {
+		t.Fatalf("超时后本地兜底应平仓，Status = %q, 期望 CLOSED", after.Status)
+	}
+	if after.CloseReason == nil || *after.CloseReason != "TRAILING_STOP" {
+		t.Errorf("CloseReason = %v, 期望 TRAILING_STOP", after.CloseReason)
+	}
+}
+
+// TestMonitor_CancelOrdersRestoresLocalClose 验证条件单撤销后本地兜底恢复即时平仓：
+// 这是原有双触发防护的保留行为（条件单失效 → 本地 monitorPositions 兜底生效），
+// 且该路径不依赖兜底超时。
+func TestMonitor_CancelOrdersRestoresLocalClose(t *testing.T) {
+	e, db := newTestEngine(t)
+	ctx := context.Background()
+	e.stopFallbackDelay = time.Hour // 超时设得足够长，验证"撤销条件单"路径不依赖超时
+
+	pos := openPositionWithOrders(t, e, db, "ETHUSDT", 100.0) // 止损价 = 90
+
+	// 取消活跃委托（模拟条件单失效）→ 本地兜底平仓恢复生效
+	cancelActiveOrders(t, db)
+	e.monitorPositions(ctx, map[string]float64{"ETHUSDT": 89.0})
+	after, err := db.GetPositionByID(pos.ID)
+	if err != nil {
+		t.Fatalf("查询持仓失败: %v", err)
+	}
+	if after.Status != "CLOSED" {
+		t.Fatalf("条件单失效后本地兜底应平仓，Status = %q, 期望 CLOSED", after.Status)
+	}
+	if after.CloseReason == nil || *after.CloseReason != "STOP_LOSS" {
+		t.Errorf("CloseReason = %v, 期望 STOP_LOSS", after.CloseReason)
 	}
 }
 
