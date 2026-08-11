@@ -368,6 +368,41 @@ func TestCanAddOn(t *testing.T) {
 	}
 }
 
+// TestCanAddOn_Threshold 独立追单门槛（-addonact）验证：
+// 门槛 >0 时按同币持仓极值判断，过滤"小冲高即追顶"；=0 时沿用移动止盈激活状态。
+func TestCanAddOn_Threshold(t *testing.T) {
+	e := testV6Engine()
+	e.cfg.EnableAddOn = true
+	e.cfg.MaxAddOnsPerSymbol = 2
+	e.cfg.AddOnActPct = 0.05 // 门槛 5%
+	c := candidate{symbol: "X", side: "LONG"}
+
+	// 首仓最高价 +3%（低于门槛）→ 不允许追
+	e.positions = append(e.positions, &Position{Symbol: "X", Side: "LONG", EntryPrice: 100, ExtremePrice: 103})
+	if e.canAddOn(c) {
+		t.Error("极值 +3% 低于门槛 5% 时不应允许追加")
+	}
+	// 首仓最高价 +6%（超过门槛）→ 允许追
+	e.positions[0].ExtremePrice = 106
+	if !e.canAddOn(c) {
+		t.Error("极值 +6% 达到门槛 5% 时应允许追加")
+	}
+	// 做空方向：极值下跌幅度判断
+	e2 := testV6Engine()
+	e2.cfg.EnableAddOn = true
+	e2.cfg.MaxAddOnsPerSymbol = 1
+	e2.cfg.AddOnActPct = 0.05
+	c2 := candidate{symbol: "Y", side: "SHORT"}
+	e2.positions = append(e2.positions, &Position{Symbol: "Y", Side: "SHORT", EntryPrice: 100, ExtremePrice: 96})
+	if e2.canAddOn(c2) {
+		t.Error("空头极值 -4% 未达门槛 -5%，不应允许追加")
+	}
+	e2.positions[0].ExtremePrice = 94
+	if !e2.canAddOn(c2) {
+		t.Error("空头极值 -6% 达到门槛 -5%，应允许追加")
+	}
+}
+
 // TestV6SignalChain 完整信号链: 构造挤压→突破序列，信号应触发；
 // 破坏 RSI 区间 / 费率过热否决 / 新币过滤后应静默。
 func TestV6SignalChain(t *testing.T) {

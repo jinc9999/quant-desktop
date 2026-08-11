@@ -113,6 +113,7 @@ type StrategyConfig struct {
 	CooldownAfterTrailingMin int     // 实验: 移动止盈平仓后的冷却分钟数（-1=统一用 CooldownMs；0=立即再入）
 	EnableAddOn              bool    // 实验: 启用追加仓位（同币移动止盈激活后再命中信号可加仓）
 	MaxAddOnsPerSymbol       int     // 实验: 单币最大追加次数（默认 1，即同币最多 1+1 两仓）
+	AddOnActPct              float64 // 实验: 追单激活门槛（0=与移动止盈激活一致；>0 要求同币持仓极值达到首仓入场价±该比例才允许追，过滤小冲高追顶）
 
 	// ===== S01 单因子实验开关（默认全关，不改变 S01 现有行为）=====
 	FundingVetoEnabled bool    // 实验: 费率过热否决（正费率 ≥ 分级阈值不追）
@@ -1321,13 +1322,23 @@ func (e *Engine) canAddOn(c candidate) bool {
 	}
 	count := 0
 	trailing := false
+	// 追单门槛：AddOnActPct>0 时要求同币持仓极值达到 首仓入场价×(1±AddOnActPct)
+	//（多头用最高价、空头用最低价），过滤"小冲高即追顶"；=0 时沿用移动止盈激活状态。
+	threshold := e.cfg.AddOnActPct
 	for _, p := range e.positions {
 		if p.Symbol != c.symbol {
 			continue
 		}
 		count++
-		if p.Side == c.side && p.TrailingActive {
-			trailing = true
+		if p.Side == c.side {
+			if threshold > 0 {
+				if (p.Side == "LONG" && p.ExtremePrice >= p.EntryPrice*(1+threshold)) ||
+					(p.Side == "SHORT" && p.ExtremePrice <= p.EntryPrice*(1-threshold)) {
+					trailing = true
+				}
+			} else if p.TrailingActive {
+				trailing = true
+			}
 		}
 	}
 	for _, p := range e.pending {
