@@ -1272,6 +1272,23 @@ func (c *Client) SyncServerTime(ctx context.Context) error {
 	return nil
 }
 
+// GetIncomeHistory 获取账户资金流水（已实现盈亏 / 手续费等）。
+// 用于幽灵单盈亏回填：以交易所真实 REALIZED_PNL/COMMISSION 对账本地记录，
+// 修复程序离线期间仓位被交易所平掉、本地盈亏记 0 的账目缺口。
+// incomeType: REALIZED_PNL / COMMISSION / FUNDING_FEE 等；空=全部
+// 返回: 按时间升序的流水（每页最多 1000 条，超出需按时间翻页）
+func (c *Client) GetIncomeHistory(ctx context.Context, incomeType string, startTime, endTime int64) ([]*futures.IncomeHistory, error) {
+	if c.isDryRun() {
+		return nil, nil
+	}
+	svc := c.futuresClient.NewGetIncomeHistoryService().
+		IncomeType(incomeType).
+		StartTime(startTime).
+		EndTime(endTime).
+		Limit(1000)
+	return svc.Do(ctx)
+}
+
 // GetPositionRisk 查询交易所持仓风险信息
 // 返回所有持仓（含未持仓的空条目），调用方需自行过滤 PositionAmt != 0 的条目。
 // ctx: 请求上下文
