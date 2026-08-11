@@ -38,8 +38,8 @@ func ValidateDailySummary(s *DailySummary) error {
 	if !dateRe.MatchString(s.SummaryDate) {
 		return fmt.Errorf("日期格式必须为 YYYY-MM-DD: %q", s.SummaryDate)
 	}
-	if s.SummaryType != "daily" && s.SummaryType != "weekly" && s.SummaryType != "auto" {
-		return fmt.Errorf("总结类型仅支持 daily/weekly/auto: %q", s.SummaryType)
+	if s.SummaryType != "daily" && s.SummaryType != "weekly" && s.SummaryType != "auto" && s.SummaryType != "morning" {
+		return fmt.Errorf("总结类型仅支持 daily/weekly/auto/morning: %q", s.SummaryType)
 	}
 	if s.Mode != "SIMULATION" && s.Mode != "LIVE" {
 		return fmt.Errorf("模式仅支持 SIMULATION/LIVE: %q", s.Mode)

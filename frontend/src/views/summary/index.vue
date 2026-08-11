@@ -15,6 +15,11 @@ const mode = ref("SIMULATION");
 const activeMode = ref("SIMULATION");
 const loading = ref(false);
 const list = ref<any[]>([]);
+
+/** 最新一条带市场解读的记录（每日 00:10 完整版 / 08:00 晨间速览），用于顶部展示 */
+const latestReport = computed(
+  () => list.value.find((r: any) => r.marketNotes && r.marketNotes.trim()) ?? null
+);
 const auto = ref<any>({ market: {}, modes: {}, currentMode: "SIMULATION" });
 
 /** 当前展示模式的自动总结 */
@@ -150,6 +155,14 @@ onUnmounted(() => {
           </el-radio-group>
           <span class="summary-hint">每 60 秒自动刷新</span>
         </div>
+      </div>
+
+      <!-- 市场解读（大白话，每日 00:10 完整版 / 08:00 晨间速览自动写入） -->
+      <div class="summary-section" v-if="latestReport">
+        <div class="section-title">
+          市场解读（{{ latestReport.summaryDate }} · {{ typeLabel(latestReport.summaryType) }}）
+        </div>
+        <pre class="market-note">{{ latestReport.marketNotes }}</pre>
       </div>
 
       <!-- 市场概况（全局） -->
@@ -440,5 +453,16 @@ onUnmounted(() => {
 }
 .text-neutral {
   color: var(--quant-text, #e0e0e0) !important;
+}
+
+.market-note {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  background: rgba(127, 127, 127, 0.08);
+  border-radius: 6px;
+  white-space: pre-line;
+  line-height: 1.7;
+  font-size: 13px;
+  font-family: inherit;
 }
 </style>
