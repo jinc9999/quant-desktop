@@ -52,6 +52,9 @@ type StrategyConfig struct {
 	MaxHoldBars          int     // 最长持仓 5m K 线数（0 = 关闭；超时按片收盘价平仓）
 	StallWinBars         int     // 无浮盈提前离场：入场后该 K 线数内最高浮盈仍 < StallGainPct 则平仓（0=关闭）
 	StallGainPct         float64 // 无浮盈离场阈值（0.005=0.5%）
+	AddOnSLPct           float64 // 追单专用固定止损（0=与首仓一致）
+	AddOnTActPct         float64 // 追单专用移动激活（0=与首仓一致）
+	AddOnCbPct           float64 // 追单专用回调（0=与首仓一致）
 	FeeRate              float64 // 单边手续费率（taker 0.0004 = 0.04%）
 	Mode                 string  // 信号范式: "momentum" 追涨 / "mr" 均值回归 / "trend" 趋势跟随
 
@@ -1149,6 +1152,7 @@ func (e *Engine) openPositions(candidates []candidate, now int64) {
 				continue
 			}
 		}
+		isAddOn := held[c.symbol]
 		// 破产保护: 可用权益（权益-占用保证金）不足以开一仓则停止开仓
 		// （v6 动态仓位由 v6Sizing 自行校验，不在此用固定保证金截断）
 		if e.cfg.Mode != "v6" && e.equity-e.marginInUse < e.cfg.PositionMarginUSDT {
@@ -1195,6 +1199,18 @@ func (e *Engine) openPositions(candidates []candidate, now int64) {
 			p.SLPct, p.TPPct, p.ActPct, p.CbPct, p.HoldBars = e.cfg.StopLossPct, e.cfg.TakeProfitPct, e.cfg.TrailingActivation, e.cfg.TrailingCallback, e.cfg.MaxHoldBars
 			p.Margin = e.cfg.PositionMarginUSDT * mult[i]
 			p.Notional = p.Margin * e.cfg.Leverage
+			// 追单专用风控（0=与首仓一致）：追单入场高、更脆弱，可单独收紧止损/提前激活/收紧回调
+			if isAddOn {
+				if e.cfg.AddOnSLPct > 0 {
+					p.SLPct = e.cfg.AddOnSLPct
+				}
+				if e.cfg.AddOnTActPct > 0 {
+					p.ActPct = e.cfg.AddOnTActPct
+				}
+				if e.cfg.AddOnCbPct > 0 {
+					p.CbPct = e.cfg.AddOnCbPct
+				}
+			}
 		}
 		// S01 回踩入场实验: momentum 模式信号后等待回踩+收复才成交
 		if e.cfg.Mode == "momentum" && e.cfg.RetracePct > 0 && c.ref > 0 {
