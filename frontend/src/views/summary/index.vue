@@ -23,7 +23,8 @@ const modeSummary = computed(() => {
   return modes[activeMode.value] || { trades: {}, suggestions: [] };
 });
 
-const typeLabel = (t: string) => (t === "weekly" ? "周结" : t === "auto" ? "自动" : "每日");
+const typeLabel = (t: string) =>
+  t === "weekly" ? "周结" : t === "auto" ? "自动" : t === "morning" ? "晨间" : "每日";
 let listTimer: ReturnType<typeof setInterval> | null = null;
 let chart: echarts.ECharts | null = null;
 
@@ -47,7 +48,17 @@ async function fetchList() {
     silent: true
   });
   if (res && res.ok) {
-    list.value = res.list ?? [];
+    // 每天只保留一条：优先 每日(daily 带市场解读) > 晨间(morning) > 自动(auto 纯盈亏)，
+    // 避免同一天出现多条记录（2026-08-11 新增市场总结后 daily/auto 并存）
+    const rank: Record<string, number> = { daily: 3, morning: 2, auto: 1 };
+    const byDate = new Map<string, any>();
+    for (const r of res.list ?? []) {
+      const cur = byDate.get(r.summaryDate);
+      if (!cur || (rank[r.summaryType] ?? 0) > (rank[cur.summaryType] ?? 0)) {
+        byDate.set(r.summaryDate, r);
+      }
+    }
+    list.value = [...byDate.values()].sort((a, b) => (a.summaryDate < b.summaryDate ? 1 : -1));
     renderChart();
   }
 }
