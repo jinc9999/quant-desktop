@@ -15,6 +15,7 @@ const mode = ref("SIMULATION");
 const activeMode = ref("SIMULATION");
 const loading = ref(false);
 const list = ref<any[]>([]);
+const recon = ref<any>(null);
 
 /** 最新一条带市场解读的记录（每日 00:10 完整版 / 08:00 晨间速览），用于顶部展示 */
 const latestReport = computed(
@@ -66,6 +67,12 @@ async function fetchList() {
     list.value = [...byDate.values()].sort((a, b) => (a.summaryDate < b.summaryDate ? 1 : -1));
     renderChart();
   }
+}
+
+/** 拉取账户对账（权益 vs 本地统计），一眼看出账目差额 */
+async function fetchRecon() {
+  const res = await callService(() => QuantService.GetAccountReconciliation(), { silent: true });
+  if (res) recon.value = res;
 }
 
 function renderChart() {
@@ -126,9 +133,11 @@ onMounted(async () => {
   await loadMode();
   await fetchAuto();
   await fetchList();
+  await fetchRecon();
   listTimer = setInterval(() => {
     fetchAuto();
     fetchList();
+    fetchRecon();
   }, 60000);
   window.addEventListener("resize", onResize);
 });
@@ -163,6 +172,34 @@ onUnmounted(() => {
           市场解读（{{ latestReport.summaryDate }} · {{ typeLabel(latestReport.summaryType) }}）
         </div>
         <pre class="market-note">{{ latestReport.marketNotes }}</pre>
+      </div>
+
+      <!-- 账户对账（权益 vs 本地统计） -->
+      <div class="summary-section" v-if="recon && recon.ok">
+        <div class="section-title">账户对账（权益 vs 本地统计）</div>
+        <div class="summary-grid">
+          <div class="summary-item">
+            <span class="sum-label">账户权益</span>
+            <span>{{ fmtNum(recon.equity) }} U</span>
+          </div>
+          <div class="summary-item">
+            <span class="sum-label">真实累计盈亏</span>
+            <span :class="chgClass(recon.trueNet)">{{ fmtNum(recon.trueNet, true) }} U</span>
+          </div>
+          <div class="summary-item">
+            <span class="sum-label">本地累计盈亏</span>
+            <span :class="chgClass(recon.localNet)">{{ fmtNum(recon.localNet, true) }} U</span>
+          </div>
+          <div class="summary-item">
+            <span class="sum-label">账目差额</span>
+            <span :class="Math.abs(recon.diff) > 1 ? 'text-red' : 'text-green'">
+              {{ fmtNum(recon.diff, true) }} U
+            </span>
+          </div>
+        </div>
+        <div class="draft-hint" v-if="Math.abs(recon.diff) > 1">
+          本地统计与账户存在差额（多为离线幽灵单/强平清算/成交价差），可用对账回填工具处理。
+        </div>
       </div>
 
       <!-- 市场概况（全局） -->

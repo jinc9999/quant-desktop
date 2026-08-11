@@ -1126,6 +1126,87 @@ func (s *QuantService) GetTradeStats() map[string]interface{} {
 	}
 }
 
+// GetAccountReconciliation 账户对账：账户权益 vs 本地统计盈亏，展示真实差额。
+// 背景：离线幽灵单/强平清算/手续费口径差异会让"本地每日盈亏"与账户权益对不上
+//（B 策略 9 笔幽灵单 -42.97U 曾完全没进账）。
+// 口径：
+//   equity        = 交易所账户权益（钱包 + 未实现）
+//   initial       = 初始转入（TRANSFER 流水合计）
+//   trueNet       = equity - initial（真实累计盈亏，含浮盈/手续费/清算/资金费）
+//   localNet      = 本地已实现盈亏 - 本地手续费（GetTradeStats 口径）
+//   diff          = trueNet - localNet（>0.5 说明本地统计缺账，需对账/回填）
+func (s *QuantService) GetAccountReconciliation() map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	empty := map[string]interface{}{
+		"equity": 0.0, "initial": 0.0, "trueNet": 0.0, "localNet": 0.0, "diff": 0.0, "ok": false,
+	}
+	if s.client == nil || s.db == nil {
+		return empty
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	bal, err := s.client.GetFuturesBalance(ctx)
+	if err != nil || bal == nil {
+		log.Printf("[Binding] 账户对账：查询权益失败: %v", err)
+		return empty
+	}
+	initial, err := s.fetchInitialTransfer(ctx)
+	if err != nil {
+		log.Printf("[Binding] 账户对账：查询初始入金失败: %v", err)
+		return empty
+	}
+	stats, err := s.db.GetClosedStats()
+	if err != nil {
+		log.Printf("[Binding] 账户对账：查询本地统计失败: %v", err)
+		return empty
+	}
+	equity := bal.TotalMarginBalance
+	trueNet := equity - initial
+	localNet := stats.NetPnl - stats.TotalFee
+	return map[string]interface{}{
+		"equity":  round2(equity),
+		"initial": round2(initial),
+		"trueNet": round2(trueNet),
+		"localNet": round2(localNet),
+		"diff":    round2(trueNet - localNet),
+		"ok":      true,
+	}
+}
+
+// fetchInitialTransfer 从交易所收入流水汇总初始转入（TRANSFER 中的正数入金）。
+// income 接口单次窗口限 90 天，按 90 天分块拉取最近 360 天。
+func (s *QuantService) fetchInitialTransfer(ctx context.Context) (float64, error) {
+	now := time.Now().UnixMilli()
+	start := now - 360*24*3600*1000
+	total := 0.0
+	cur := start
+	for cur < now {
+		end := cur + 90*24*3600*1000
+		if end > now {
+			end = now
+		}
+		list, err := s.client.GetIncomeHistory(ctx, "TRANSFER", cur, end)
+		if err != nil {
+			return 0, err
+		}
+		for _, h := range list {
+			var v float64
+			fmt.Sscanf(h.Income, "%f", &v)
+			if v > 0 {
+				total += v
+			}
+		}
+		if len(list) < 1000 {
+			cur = end + 1
+		} else {
+			cur = list[len(list)-1].Time + 1
+		}
+	}
+	return total, nil
+}
+
 // GetConfig 获取当前策略配置
 func (s *QuantService) GetConfig() binance.StrategyConfig {
 	s.mu.RLock()
