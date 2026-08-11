@@ -710,11 +710,17 @@ func (s *QuantService) computeMarketSummary() map[string]interface{} {
 // 否则视为行情接口坏数据（低流动性币 24h 涨跌幅/成交额偶发异常，如 AZTEC +131300%），
 // 不进涨跌幅榜。仅影响每日总结展示，不参与任何交易判定。
 func marketChangePlausible(change, quoteVolume float64) bool {
-	if math.Abs(change) <= 1000 {
-		return true
+	abs := math.Abs(change)
+	if abs > 3000 {
+		// 离谱涨幅（>3000%）一律视为行情接口坏数据/新上市噪音，不进涨跌幅榜。
+		// 坏数据常连成交额一起虚高（AZTEC +65450% 案例），成交量门槛拦不住，必须硬封顶。
+		return false
 	}
-	// 离谱涨幅需 ≥ 1 亿 USDT 成交额才可信（真实币圈狂热行情的最低量级）
-	return quoteVolume >= 1e8
+	if abs > 1000 {
+		// 千分级涨幅需 ≥ 1 亿 USDT 成交额才可信（真实币圈狂热行情的最低量级）
+		return quoteVolume >= 1e8
+	}
+	return true
 }
 
 // computeModeSummary 计算指定模式的今日交易总结（单币聚合 + 规则化建议）

@@ -761,3 +761,25 @@ func TestScreenKlineMode_VolumeSurge_Filter(t *testing.T) {
 		t.Errorf("放量不足应被过滤，len = %d, 期望 0", len(got))
 	}
 }
+
+// TestBuildRankOK_GlitchExcluded 验证 24h 排名池剔除离谱涨幅坏数据：
+// |24h 涨跌幅| > 3000% 的币即使成交额达标也不进入排名（AZTEC +65450% 案例），
+// 防止虚高涨幅把垃圾币选成开仓候选。
+func TestBuildRankOK_GlitchExcluded(t *testing.T) {
+	tickers := []binance.Ticker{
+		{Symbol: "BTCUSDT", QuoteVolume: 5e8, PriceChange: 2.0},
+		{Symbol: "ETHUSDT", QuoteVolume: 3e8, PriceChange: 1.5},
+		{Symbol: "AZTECUSDT", QuoteVolume: 2e8, PriceChange: 65450.0}, // 坏数据：涨幅虚高（成交额也虚高）
+		{Symbol: "NORMALUSDT", QuoteVolume: 2e8, PriceChange: 8.0},
+	}
+	ok := buildRankOK(tickers, 1e7, 1, 100) // 前 100%（3 个正常币应全部进入）
+	if ok["AZTECUSDT"] {
+		t.Error("离谱涨幅坏数据不应进入排名池")
+	}
+	if !ok["BTCUSDT"] || !ok["ETHUSDT"] || !ok["NORMALUSDT"] {
+		t.Error("正常币应进入前 50% 排名池")
+	}
+	if len(ok) != 3 {
+		t.Errorf("排名池应只含 3 个正常币，实际 %d", len(ok))
+	}
+}

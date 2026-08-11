@@ -191,6 +191,12 @@ func buildRankOK(tickers []binance.Ticker, minQuoteVolume float64, rankMode int,
 		if t.QuoteVolume < minQuoteVolume {
 			continue
 		}
+		// 坏数据防护：|24h 涨跌幅| > 3000% 视为行情接口坏数据（低流动性币偶发，
+		// 坏数据常连成交额一起虚高），不进入排名池，防止虚高涨幅把垃圾币选成开仓候选
+		//（AZTEC +65450% 案例：实际涨幅 -4.4%、成交额 66 万，纯展示与筛选噪音）。
+		if math.Abs(t.PriceChange) > 3000 {
+			continue
+		}
 		list = append(list, rankItem{sym: t.Symbol, v: t.PriceChange})
 	}
 	if len(list) == 0 {
