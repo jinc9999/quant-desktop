@@ -187,6 +187,12 @@ func (db *DB) DeletePosition(id int64) error {
 	return err
 }
 
+// UpdatePositionAmount 修正 OPEN 持仓数量（开仓结果确认：交易所真实成交数量回写）
+func (db *DB) UpdatePositionAmount(id int64, amount float64) error {
+	_, err := db.Conn.Exec(`UPDATE positions SET amount=? WHERE id=? AND status='OPEN'`, amount, id)
+	return err
+}
+
 // GetClosedPositions 获取已平仓持仓记录（按平仓时间降序）
 // limit: 返回条数上限（<=0 时默认 50）
 // 返回: []Position 已平仓持仓列表, error 错误信息

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,39 +55,44 @@ var structuralOpenErrors = map[int64]bool{
 // 检测交易所存在但本地 DB 无记录的"野仓位"，自动收养并纳入管理。
 const orphanScanInterval = 10
 
+// openConfirmTicks 开仓待确认的最大复核轮数（约 30 tick ≈ 7.5 分钟）。
+// 开仓后查询真实持仓失败时转入延迟复核，超时仍未确认则保持本地记录并告警。
+const openConfirmTicks = 30
+
 // Engine 策略引擎主结构
 type Engine struct {
-	cfg               binance.StrategyConfig
-	client            *binance.Client
-	ws                *binance.WsManager
-	db                *storage.DB
-	orderMgr          *order.Manager
-	breaker           *risk.CircuitBreaker // 熔断器：日亏/回撤达标后停止开新仓
-	window            *SlidingWindow
-	running           bool
-	stopCh            chan struct{}
-	mu                sync.RWMutex
-	tickCount         atomic.Int64
-	tickErrorCount    atomic.Int64                  // Tick 执行失败累计次数
-	startTime         time.Time                     // 引擎启动时间
-	warmupLogged      bool                          // 预热期提示是否已打印（避免每 tick 刷屏）
-	cooldown          map[string]time.Time          // symbol -> 平仓时间，冷却期内不再开仓
-	cooldownReason    map[string]string             // symbol -> 最近平仓原因（分原因冷却: 移动止盈可短冷却）
-	failedOpen        map[string]time.Time          // symbol -> 开仓失败时间，短期内不再重试
-	openBlocked       map[string]time.Time          // symbol -> 结构性开仓失败拉黑截止时间（12h，防反复刷屏）
-	closeRetry        map[int64]time.Time           // positionID -> 平仓失败重试冷却截止时间（3min，防强平模式刷屏）
-	stopBreachSince   map[int64]time.Time           // positionID -> 价格首次击穿有效止损位的时间（交易所条件单兜底计时）
-	stopFallbackDelay time.Duration                 // 条件单存在时，价格击穿止损位后等待条件单成交的最长时间，超时本地兜底平仓
-	stateMu           sync.Mutex                    // 保护并发开仓 goroutine 对 failedOpen/openBlocked 的读写
-	onError           func(context, message string) // 后台错误回调（推送到前端弹窗）
-	lastBreakerDay    string                        // 上次熔断检查日期（YYYY-MM-DD），跨天时重置日熔断
-	lastTickerRefresh time.Time                     // 最近一次 REST 全量行情刷新时间（WS 缺币自愈用）
-	tickerFullLogged  bool                          // 全量行情加载是否已写入日志（启动首次 + 缺币告警）
-	tickerLoadMsg     string                        // 最近一次全量行情加载信息（供前端展示）
-	mode              string                        // 引擎所属模式（SIMULATION/LIVE），自动记录每日总结用
-	engineCancel      context.CancelFunc            // engineCtx 的取消函数
-	stopRequested     bool                          // Stop 早于 Start 时记录停止请求，Start 启动前直接退出
-	lastBalanceErrLog atomic.Int64                  // 最近一次余额查询失败日志时间（Unix 毫秒），防刷屏
+	cfg                binance.StrategyConfig
+	client             *binance.Client
+	ws                 *binance.WsManager
+	db                 *storage.DB
+	orderMgr           *order.Manager
+	breaker            *risk.CircuitBreaker // 熔断器：日亏/回撤达标后停止开新仓
+	window             *SlidingWindow
+	running            bool
+	stopCh             chan struct{}
+	mu                 sync.RWMutex
+	tickCount          atomic.Int64
+	tickErrorCount     atomic.Int64                  // Tick 执行失败累计次数
+	startTime          time.Time                     // 引擎启动时间
+	warmupLogged       bool                          // 预热期提示是否已打印（避免每 tick 刷屏）
+	cooldown           map[string]time.Time          // symbol -> 平仓时间，冷却期内不再开仓
+	cooldownReason     map[string]string             // symbol -> 最近平仓原因（分原因冷却: 移动止盈可短冷却）
+	failedOpen         map[string]time.Time          // symbol -> 开仓失败时间，短期内不再重试
+	openBlocked        map[string]time.Time          // symbol -> 结构性开仓失败拉黑截止时间（12h，防反复刷屏）
+	closeRetry         map[int64]time.Time           // positionID -> 平仓失败重试冷却截止时间（3min，防强平模式刷屏）
+	stopBreachSince    map[int64]time.Time           // positionID -> 价格首次击穿有效止损位的时间（交易所条件单兜底计时）
+	stopFallbackDelay  time.Duration                 // 条件单存在时，价格击穿止损位后等待条件单成交的最长时间，超时本地兜底平仓
+	openConfirmPending map[int64]int                 // positionID -> 剩余复核轮数（开仓后未确认到真实持仓）
+	stateMu            sync.Mutex                    // 保护并发开仓 goroutine 对 failedOpen/openBlocked 的读写
+	onError            func(context, message string) // 后台错误回调（推送到前端弹窗）
+	lastBreakerDay     string                        // 上次熔断检查日期（YYYY-MM-DD），跨天时重置日熔断
+	lastTickerRefresh  time.Time                     // 最近一次 REST 全量行情刷新时间（WS 缺币自愈用）
+	tickerFullLogged   bool                          // 全量行情加载是否已写入日志（启动首次 + 缺币告警）
+	tickerLoadMsg      string                        // 最近一次全量行情加载信息（供前端展示）
+	mode               string                        // 引擎所属模式（SIMULATION/LIVE），自动记录每日总结用
+	engineCancel       context.CancelFunc            // engineCtx 的取消函数
+	stopRequested      bool                          // Stop 早于 Start 时记录停止请求，Start 启动前直接退出
+	lastBalanceErrLog  atomic.Int64                  // 最近一次余额查询失败日志时间（Unix 毫秒），防刷屏
 
 	// klineOpenCache: symbol -> 当前 K 线周期开盘价缓存。
 	// K 线开盘价在周期内不变，只需每周期拉取一次，降低 REST 调用量（K 线信号模式用）。
@@ -113,22 +119,23 @@ func NewEngine(cfg binance.StrategyConfig, client *binance.Client, ws *binance.W
 	// 采样间隔取自扫描间隔，用于推导基准匹配容差
 	sampleMs := int64(cfg.ScanIntervalSec) * 1000
 	e := &Engine{
-		cfg:            cfg,
-		client:         client,
-		ws:             ws,
-		db:             db,
-		orderMgr:       orderMgr,
-		window:         NewSlidingWindow(ParseTimeframeMs(cfg.Timeframe), sampleMs),
-		stopCh:         make(chan struct{}),
-		cooldown:       make(map[string]time.Time),
-		cooldownReason: make(map[string]string),
-		failedOpen:     make(map[string]time.Time),
-		openBlocked:    make(map[string]time.Time),
-		closeRetry:     make(map[int64]time.Time),
-		stopBreachSince: make(map[int64]time.Time),
-		stopFallbackDelay: 30 * time.Second, // 约 2 个 tick（ScanIntervalSec=15s），给交易所条件单留出成交窗口
-		klineOpenCache: make(map[string]klineOpenEntry),
-		newListLogged:  make(map[string]bool),
+		cfg:                cfg,
+		client:             client,
+		ws:                 ws,
+		db:                 db,
+		orderMgr:           orderMgr,
+		window:             NewSlidingWindow(ParseTimeframeMs(cfg.Timeframe), sampleMs),
+		stopCh:             make(chan struct{}),
+		cooldown:           make(map[string]time.Time),
+		cooldownReason:     make(map[string]string),
+		failedOpen:         make(map[string]time.Time),
+		openBlocked:        make(map[string]time.Time),
+		closeRetry:         make(map[int64]time.Time),
+		stopBreachSince:    make(map[int64]time.Time),
+		stopFallbackDelay:  30 * time.Second, // 约 2 个 tick（ScanIntervalSec=15s），给交易所条件单留出成交窗口
+		openConfirmPending: make(map[int64]int),
+		klineOpenCache:     make(map[string]klineOpenEntry),
+		newListLogged:      make(map[string]bool),
 	}
 	// 冷却期闭环修复（2026-08-08）：交易所条件单/回滚平仓完成后，
 	// 通知引擎写入冷却期——此前主平仓路径从不写冷却期，导致同币无限快速重复开仓。
@@ -496,6 +503,9 @@ func (e *Engine) runOnce(ctx context.Context) {
 
 	// 4.65 定期扫描孤儿仓位（交易所有但本地 DB 无的持仓），自动收养
 	e.scanOrphanPositions(ctx)
+
+	// 4.66 延迟复核开仓结果（开仓后未确认到真实持仓的仓位）
+	e.confirmPendingOpens(ctx)
 
 	// 4.7 自定义平仓监控（交易所止损单的备用保护）
 	// 策略自主判断止损/跟踪止盈条件，达标时市价平仓
@@ -1262,6 +1272,14 @@ func (e *Engine) openOne(ctx context.Context, symbol string, entryPrice, amount 
 	}
 	pos.ID = id
 
+	// 开仓结果确认（非干跑）：用交易所真实持仓核对数量，防幽灵仓/数量不符
+	//（凌晨 GUA/HOME 幽灵单即"本地记开仓、交易所无仓"一类；失败在此回滚，不挂条件单）
+	if e.client != nil && e.client.Mode() != "DRY_RUN" {
+		if err := e.confirmOpenPosition(ctx, pos, symbol); err != nil {
+			return nil, err // confirmOpenPosition 内部已删除本地记录并告警
+		}
+	}
+
 	// 挂交易所止损保护委托（STOP_MARKET + TRAILING_STOP_MARKET）
 	// 这是主保护机制：即使 Bot 崩溃/重启，交易所仍会自动触发止损
 	// 挂单失败时 orderMgr 内部会回滚（平仓 + 取消已挂委托）
@@ -1523,6 +1541,143 @@ func (e *Engine) checkStopFallback(ctx context.Context, pos *storage.Position, p
 		Amount:    pos.Amount,
 	})
 	e.closePosition(ctx, pos, price, reason)
+}
+
+// confirmOpenPosition 开仓结果确认：开仓后用交易所真实持仓核对数量。
+// 比较口径：交易所该币该方向的总持仓 vs 本地同币同方向全部 OPEN 数量合计
+// （同币 3 仓在交易所聚合为一个持仓，必须按合计核对）。
+//   - 数量一致（容差 0.5%）→ 正常；
+//   - 交易所无仓 → 开仓未落地，删除本地记录并返回错误（调用方回滚）；
+//   - 数量不符 → 按交易所真实数量修正本仓；
+//   - 查询失败 → 转入 openConfirmPending 延迟复核，不阻塞后续流程。
+func (e *Engine) confirmOpenPosition(ctx context.Context, pos *storage.Position, symbol string) error {
+	var actual float64
+	var qErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		var positions []binance.ExchangePosition
+		positions, qErr = e.client.GetPositionRisk(ctx, symbol)
+		if qErr != nil {
+			time.Sleep(time.Duration(attempt+1) * 400 * time.Millisecond)
+			continue
+		}
+		for _, p := range positions {
+			if p.Symbol == symbol && p.PositionSide == pos.Side && p.PositionAmt != 0 {
+				actual = math.Abs(p.PositionAmt)
+			}
+		}
+		qErr = nil
+		break
+	}
+	if qErr != nil {
+		e.openConfirmPending[pos.ID] = openConfirmTicks
+		msg := fmt.Sprintf("开仓待确认 %s 持仓#%d：查询真实持仓失败，%d 个 tick 内自动复核", symbol, pos.ID, openConfirmTicks)
+		log.Printf("[Strategy] ⚠ %s", msg)
+		e.db.InsertLog(&storage.TradeLog{
+			Timestamp: time.Now().UnixMilli(),
+			Level:     "warn",
+			Module:    "strategy",
+			Message:   msg,
+			Symbol:    symbol,
+			Amount:    pos.Amount,
+		})
+		return nil
+	}
+
+	totalLocal := e.totalOpenAmount(symbol, pos.Side)
+	if actual <= 0 {
+		msg := fmt.Sprintf("开仓确认失败 %s 持仓#%d：交易所无真实持仓，回滚本地记录", symbol, pos.ID)
+		log.Printf("[Strategy] ❌ %s", msg)
+		e.db.InsertLog(&storage.TradeLog{
+			Timestamp: time.Now().UnixMilli(),
+			Level:     "warn",
+			Module:    "strategy",
+			Message:   msg,
+			Symbol:    symbol,
+			Amount:    pos.Amount,
+		})
+		_ = e.db.DeletePosition(pos.ID)
+		delete(e.openConfirmPending, pos.ID)
+		return fmt.Errorf("开仓确认失败：交易所无持仓 %s", symbol)
+	}
+
+	tol := math.Max(1e-8, totalLocal*0.005)
+	if math.Abs(actual-totalLocal) <= tol {
+		delete(e.openConfirmPending, pos.ID)
+		log.Printf("[Strategy] ✅ 开仓确认 %s 持仓#%d：数量一致 %.6f", symbol, pos.ID, actual)
+		return nil
+	}
+	// 数量不符：按交易所真实数量修正本仓（同币合计口径）
+	newAmt := pos.Amount + (actual - totalLocal)
+	if newAmt <= 0 {
+		msg := fmt.Sprintf("开仓确认失败 %s 持仓#%d：交易所持仓 %.6f < 本地合计 %.6f，回滚本仓", symbol, pos.ID, actual, totalLocal)
+		log.Printf("[Strategy] ❌ %s", msg)
+		e.db.InsertLog(&storage.TradeLog{
+			Timestamp: time.Now().UnixMilli(),
+			Level:     "warn",
+			Module:    "strategy",
+			Message:   msg,
+			Symbol:    symbol,
+			Amount:    pos.Amount,
+		})
+		_ = e.db.DeletePosition(pos.ID)
+		delete(e.openConfirmPending, pos.ID)
+		return fmt.Errorf("开仓确认失败：交易所持仓不足 %s", symbol)
+	}
+	if err := e.db.UpdatePositionAmount(pos.ID, newAmt); err != nil {
+		log.Printf("[Strategy] ⚠ 开仓确认 %s 持仓#%d 数量修正写入失败: %v", symbol, pos.ID, err)
+	}
+	pos.Amount = newAmt
+	delete(e.openConfirmPending, pos.ID)
+	log.Printf("[Strategy] ⚠ 开仓确认 %s 持仓#%d：数量修正 %.6f → %.6f（交易所合计 %.6f）", symbol, pos.ID, pos.Amount-(actual-totalLocal), newAmt, actual)
+	e.db.InsertLog(&storage.TradeLog{
+		Timestamp: time.Now().UnixMilli(),
+		Level:     "warn",
+		Module:    "strategy",
+		Message:   fmt.Sprintf("开仓确认 %s 持仓#%d：数量修正为 %.6f（交易所真实持仓）", symbol, pos.ID, newAmt),
+		Symbol:    symbol,
+		Amount:    newAmt,
+	})
+	return nil
+}
+
+// confirmPendingOpens 延迟复核：每 tick 处理开仓后未能立即确认的持仓。
+func (e *Engine) confirmPendingOpens(ctx context.Context) {
+	if len(e.openConfirmPending) == 0 {
+		return
+	}
+	for id, remain := range e.openConfirmPending {
+		pos, err := e.db.GetPositionByID(id)
+		if err != nil || pos == nil || pos.Status != "OPEN" {
+			delete(e.openConfirmPending, id)
+			continue
+		}
+		if err := e.confirmOpenPosition(ctx, pos, pos.Symbol); err != nil {
+			// 复核发现交易所无仓/不足：先撤条件单再删本地记录
+			if e.orderMgr != nil {
+				_ = e.orderMgr.CancelRelatedOrders(ctx, pos.ID)
+			}
+			_ = e.db.DeletePosition(pos.ID)
+			delete(e.openConfirmPending, id)
+			continue
+		}
+		remain--
+		if remain <= 0 {
+			delete(e.openConfirmPending, id)
+			log.Printf("[Strategy] ⚠ 开仓确认超时 %s 持仓#%d：仍未能与交易所对账，保持本地记录", pos.Symbol, pos.ID)
+		} else {
+			e.openConfirmPending[id] = remain
+		}
+	}
+}
+
+// totalOpenAmount 本地同币同方向当前 OPEN 持仓数量合计（开仓确认的比对基准）。
+func (e *Engine) totalOpenAmount(symbol, side string) float64 {
+	var total float64
+	_ = e.db.Conn.QueryRow(
+		`SELECT COALESCE(SUM(amount),0) FROM positions WHERE status='OPEN' AND symbol=? AND side=?`,
+		symbol, side,
+	).Scan(&total)
+	return total
 }
 
 // hasActiveStopOrders 判断持仓是否已有活跃的交易所止损条件单（NEW / PARTIALLY_FILLED）。
