@@ -1923,6 +1923,47 @@ func TestMonitor_ActiveStopOrders_FallbackRecoverResets(t *testing.T) {
 	}
 }
 
+// TestMonitor_ActiveStopOrders_FallbackBufferIgnoresGrind 验证兜底缓冲带：
+// 价格贴着止损线磨（跌破幅度 <0.3%）不启动兜底计时，避免与正常工作的交易所条件单
+// 抢单产生重复平仓/幽灵单（SQD 14:50 贴线 0.01% 案例）；真跌破缓冲带才兜底。
+func TestMonitor_ActiveStopOrders_FallbackBufferIgnoresGrind(t *testing.T) {
+	e, db := newTestEngine(t)
+	ctx := context.Background()
+	e.stopFallbackDelay = 50 * time.Millisecond
+
+	pos := openPositionWithOrders(t, e, db, "BTCUSDT", 50.0) // 止损位 45
+	// 缓冲带下沿 = 45 * (1-0.003) = 44.865；44.95 属于贴线磨（仅低 0.11%）
+
+	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 44.95})
+	if _, ok := e.stopBreachSince[pos.ID]; ok {
+		t.Fatal("贴线磨（缓冲带内）不应启动兜底计时")
+	}
+	time.Sleep(80 * time.Millisecond)
+	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 44.95})
+	after, err := db.GetPositionByID(pos.ID)
+	if err != nil {
+		t.Fatalf("查询持仓失败: %v", err)
+	}
+	if after.Status != "OPEN" {
+		t.Fatalf("贴线磨超时也不应兜底平仓，Status = %q, 期望 OPEN", after.Status)
+	}
+
+	// 真跌破缓冲带（44.8 < 44.865）→ 开始计时，超时兜底平仓
+	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 44.8})
+	if _, ok := e.stopBreachSince[pos.ID]; !ok {
+		t.Fatal("真跌破缓冲带后应启动兜底计时")
+	}
+	time.Sleep(80 * time.Millisecond)
+	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 44.8})
+	after2, err := db.GetPositionByID(pos.ID)
+	if err != nil {
+		t.Fatalf("查询持仓失败: %v", err)
+	}
+	if after2.Status != "CLOSED" {
+		t.Fatalf("真跌破后超时应兜底平仓，Status = %q, 期望 CLOSED", after2.Status)
+	}
+}
+
 // TestMonitor_ActiveStopOrders_FallbackTrailing 验证移动止盈已激活时的兜底平仓原因：
 // 击穿移动止损位超时 → reason=TRAILING_STOP。
 func TestMonitor_ActiveStopOrders_FallbackTrailing(t *testing.T) {

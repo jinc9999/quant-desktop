@@ -1460,9 +1460,10 @@ func (e *Engine) monitorPositions(ctx context.Context, priceMap map[string]float
 // 而 monitorPositions 因"存在活跃条件单"跳过本地止损，持仓从 +18% 一路裸奔到 -7.3U，
 // 最后由 MAX_HOLD 强制平仓。本函数补上最后一道防线：
 //
-//  1. 价格击穿当前有效止损位（固定止损或移动止损）后开始计时；
+//  1. 价格真跌破当前有效止损位（固定止损或移动止损）缓冲带（0.3%）后开始计时；
 //  2. 计时超过 stopFallbackDelay（默认 30s，约 2 个 tick）条件单仍未成交 → 主动撤单市价平仓；
-//  3. 价格恢复至止损位上方则重置计时，避免瞬时毛刺误平仓。
+//  3. 价格回到缓冲带内则重置计时，贴线磨（差 0.01%）与插针弹回不触发，
+//     避免与正常工作的交易所条件单抢单造成重复平仓/幽灵单（SQD 14:50 案例）。
 //
 // 双触发竞态由 closePosition 的 -2022 幽灵清理兜底：若交易所条件单恰好先成交，
 // 本地市价平仓会收到 -2022，按 GHOST 幂等处理，不会产生反向仓位。
@@ -1472,11 +1473,15 @@ func (e *Engine) checkStopFallback(ctx context.Context, pos *storage.Position, p
 		return
 	}
 
+	// 兜底缓冲带：价格需真跌破止损位 0.3% 以上才计入兜底计时。
+	// 交易所条件单按标记价格触发，本地用最新价判断——贴线磨时标记价通常尚未越过止损线，
+	// 条件单马上会正常触发，本地不应抢跑（抢跑会产生重复平仓/幽灵单）。
+	const fallbackBuffer = 0.003
 	breached := false
 	if pos.Side == "SHORT" {
-		breached = price >= stopPrice // 做空：价格上涨击穿止损
+		breached = price >= stopPrice*(1+fallbackBuffer) // 做空：价格真涨破止损缓冲带
 	} else {
-		breached = price <= stopPrice // 做多：价格下跌击穿止损
+		breached = price <= stopPrice*(1-fallbackBuffer) // 做多：价格真跌破止损缓冲带
 	}
 	if !breached {
 		delete(e.stopBreachSince, pos.ID)
