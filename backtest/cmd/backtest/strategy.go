@@ -50,6 +50,8 @@ type StrategyConfig struct {
 	ExitClose            bool    // 退出检测用片收盘价而非片内高低价（近似 tick 采样，不捕捉片内插针）
 	TakeProfitPct        float64 // 固定止盈比例（0 = 关闭；>0 时价格达到该涨幅先止盈，与移动止盈先到先平）
 	MaxHoldBars          int     // 最长持仓 5m K 线数（0 = 关闭；超时按片收盘价平仓）
+	StallWinBars         int     // 无浮盈提前离场：入场后该 K 线数内最高浮盈仍 < StallGainPct 则平仓（0=关闭）
+	StallGainPct         float64 // 无浮盈离场阈值（0.005=0.5%）
 	FeeRate              float64 // 单边手续费率（taker 0.0004 = 0.04%）
 	Mode                 string  // 信号范式: "momentum" 追涨 / "mr" 均值回归 / "trend" 趋势跟随
 
@@ -1677,6 +1679,12 @@ func (e *Engine) monitorPositions(bars map[string]*bar) {
 							reason = "TRAILING_STOP"
 						}
 					}
+					// 无浮盈提前离场：入场 StallWinBars 根后最高浮盈仍低于阈值 → 平掉，避免磨到止损
+					if exitPx == 0 && e.cfg.StallWinBars > 0 && held >= e.cfg.StallWinBars &&
+						p.ExtremePrice <= p.EntryPrice*(1+e.cfg.StallGainPct) {
+						exitPx = b.close
+						reason = "STALL_EXIT"
+					}
 				}
 			} else { // SHORT
 				stop := p.EntryPrice * (1 + e.cfg.StopLossPct)
@@ -1710,6 +1718,11 @@ func (e *Engine) monitorPositions(bars map[string]*bar) {
 							exitPx = max2(b.open, trail)
 							reason = "TRAILING_STOP"
 						}
+					}
+					if exitPx == 0 && e.cfg.StallWinBars > 0 && held >= e.cfg.StallWinBars &&
+						p.ExtremePrice >= p.EntryPrice*(1-e.cfg.StallGainPct) {
+						exitPx = b.close
+						reason = "STALL_EXIT"
 					}
 				}
 			}
@@ -1748,6 +1761,12 @@ func (e *Engine) monitorPositions(bars map[string]*bar) {
 								exitPx = b.close
 								reason = "TAKER_EXIT"
 							}
+						}
+						// 无浮盈提前离场：入场 StallWinBars 根后最高浮盈仍低于阈值 → 平掉，避免磨到止损
+						if exitPx == 0 && e.cfg.StallWinBars > 0 && held >= e.cfg.StallWinBars &&
+							p.ExtremePrice <= p.EntryPrice*(1+e.cfg.StallGainPct) {
+							exitPx = b.close
+							reason = "STALL_EXIT"
 						}
 					}
 				} else if b.low <= stop {
@@ -1808,6 +1827,11 @@ func (e *Engine) monitorPositions(bars map[string]*bar) {
 								exitPx = max2(b.open, trail)
 								reason = "TRAILING_STOP"
 							}
+						}
+						if exitPx == 0 && e.cfg.StallWinBars > 0 && held >= e.cfg.StallWinBars &&
+							p.ExtremePrice >= p.EntryPrice*(1-e.cfg.StallGainPct) {
+							exitPx = b.close
+							reason = "STALL_EXIT"
 						}
 					}
 				} else if b.high >= stop {

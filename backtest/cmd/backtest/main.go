@@ -689,6 +689,8 @@ func main() {
 	maxposFlag := flag.Int("maxpos", 5, "最大同时持仓数（默认 5）")
 	tpFlag := flag.Float64("tp", 0.0, "固定止盈 %%（0 关闭，默认 0）")
 	holdFlag := flag.Int("hold", 0, "最大持仓分钟数（0 关闭，默认 0）")
+	stallwinFlag := flag.Int("stallwin", 0, "无浮盈提前离场：入场后 N 分钟内最高浮盈仍低于阈值则平仓（0 关闭）")
+	stallgainFlag := flag.Float64("stallgain", 0.5, "无浮盈离场阈值 %% （默认 0.5，与 -stallwin 配合）")
 	trailcdFlag := flag.Int("trailcd", -1, "S01 实验: 移动止盈平仓后冷却分钟数（-1=统一 CooldownMs；0=立即再入）")
 	addonFlag := flag.Bool("addon", false, "S01 实验: 启用追加仓位（同币移动止盈激活后再命中信号可加仓）")
 	addonmaxFlag := flag.Int("addonmax", 1, "S01 实验: 单币最大追加次数（默认 1 = 同币最多两仓）")
@@ -791,7 +793,9 @@ func main() {
 	cfg.TopN = *topnFlag
 	cfg.MaxOpenPositions = *maxposFlag
 	cfg.TakeProfitPct = *tpFlag / 100
-	cfg.MaxHoldBars = *holdFlag / 5 // 持仓分钟 → 5m 片数
+	cfg.MaxHoldBars = *holdFlag / 5      // 持仓分钟 → 5m 片数
+	cfg.StallWinBars = *stallwinFlag / 5 // 分钟 → 5m 片数
+	cfg.StallGainPct = *stallgainFlag / 100
 	cfg.CooldownAfterTrailingMin = *trailcdFlag
 	cfg.EnableAddOn = *addonFlag
 	cfg.MaxAddOnsPerSymbol = *addonmaxFlag
