@@ -1490,7 +1490,7 @@ func (e *Engine) checkStopFallback(ctx context.Context, pos *storage.Position, p
 			Timestamp: time.Now().UnixMilli(),
 			Level:     "warn",
 			Module:    "strategy",
-			Message:   fmt.Sprintf("⚠ %s 价格击穿止损位 %.6f（当前 %.6f），等待交易所条件单成交（%s 后本地兜底平仓）", pos.Symbol, stopPrice, price, e.stopFallbackDelay.Round(time.Second)),
+			Message:   fmt.Sprintf("⚠ %s 持仓#%d 价格击穿止损位 %.6f（当前 %.6f），等待交易所条件单成交（%s 后本地兜底平仓）", pos.Symbol, pos.ID, stopPrice, price, e.stopFallbackDelay.Round(time.Second)),
 			Symbol:    pos.Symbol,
 			Price:     price,
 			Amount:    pos.Amount,
@@ -1506,13 +1506,13 @@ func (e *Engine) checkStopFallback(ctx context.Context, pos *storage.Position, p
 	if pos.TrailingActive {
 		reason = "TRAILING_STOP"
 	}
-	log.Printf("[Strategy] ⚠ %s 条件单 %s 未成交，本地兜底平仓（价格 %.6f 击穿止损位 %.6f, reason=%s）",
-		pos.Symbol, e.stopFallbackDelay.Round(time.Second), price, stopPrice, reason)
+	log.Printf("[Strategy] ⚠ %s 持仓#%d 条件单 %s 未成交，本地兜底平仓（价格 %.6f 击穿止损位 %.6f, reason=%s）",
+		pos.Symbol, pos.ID, e.stopFallbackDelay.Round(time.Second), price, stopPrice, reason)
 	e.db.InsertLog(&storage.TradeLog{
 		Timestamp: time.Now().UnixMilli(),
 		Level:     "warn",
 		Module:    "strategy",
-		Message:   fmt.Sprintf("本地兜底平仓 %s reason=%s 价格=%.6f 止损位=%.6f（条件单 %s 未成交）", pos.Symbol, reason, price, stopPrice, e.stopFallbackDelay.Round(time.Second)),
+		Message:   fmt.Sprintf("本地兜底平仓 %s 持仓#%d reason=%s 价格=%.6f 止损位=%.6f（条件单 %s 未成交）", pos.Symbol, pos.ID, reason, price, stopPrice, e.stopFallbackDelay.Round(time.Second)),
 		Symbol:    pos.Symbol,
 		Price:     price,
 		Amount:    pos.Amount,
