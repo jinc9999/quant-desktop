@@ -85,6 +85,14 @@ const filteredOrders = computed(() => {
   return orders.value.filter(o => group.includes(o.status));
 });
 
+/** 分页：表格只渲染当前页，避免 744+ 行委托一次性渲染打满渲染进程（Mac 白屏同款问题） */
+const currentPage = ref(1);
+const pageSize = ref(50);
+const pagedOrders = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value;
+  return filteredOrders.value.slice(start, start + pageSize.value);
+});
+
 /**
  * 将毫秒时间戳格式化为 HH:mm:ss
  * @param ts 毫秒时间戳，为空或无效时返回 "-"
@@ -181,7 +189,14 @@ async function refreshOrders(showErrorFlag = false) {
     { silent: !showErrorFlag, context: "获取委托" }
   );
   if (list !== null) {
-    orders.value = (list || []) as OrderRow[];
+    const next = (list || []) as OrderRow[];
+    // 数据未变化时跳过赋值，避免整表无谓重渲染（744 行 × 3 秒刷新曾打满渲染进程）
+    if (JSON.stringify(next) !== JSON.stringify(orders.value)) {
+      orders.value = next;
+      // 当前页超出范围（数据变少）时回退到最后一页
+      const maxPage = Math.max(1, Math.ceil(filteredOrders.value.length / pageSize.value));
+      if (currentPage.value > maxPage) currentPage.value = maxPage;
+    }
   }
   loading.value = false;
 }
@@ -303,7 +318,7 @@ onUnmounted(() => {
 
     <!-- 状态筛选栏 -->
     <div class="filter-bar">
-      <el-radio-group v-model="statusFilter" size="small">
+      <el-radio-group v-model="statusFilter" size="small" @change="currentPage = 1">
         <el-radio-button label="all">全部 {{ orders.length }}</el-radio-button>
         <el-radio-button label="active">活跃 {{ activeCount }}</el-radio-button>
         <el-radio-button label="filled">已成交 {{ filledCount }}</el-radio-button>
@@ -314,7 +329,7 @@ onUnmounted(() => {
     <!-- 委托列表 -->
     <div class="quant-card">
       <el-table
-        :data="filteredOrders"
+        :data="pagedOrders"
         v-loading="loading"
         stripe
         row-key="id"
@@ -405,6 +420,18 @@ onUnmounted(() => {
         </el-table-column>
       </el-table>
 
+      <div class="pagination-bar">
+        <el-pagination
+          v-model:current-page="currentPage"
+          v-model:page-size="pageSize"
+          :total="filteredOrders.length"
+          :page-sizes="[20, 50, 100, 200]"
+          layout="total, sizes, prev, pager, next"
+          background
+          small
+        />
+      </div>
+
       <div v-if="filteredOrders.length === 0 && !loading" class="empty-state">
         {{ statusFilter === "all" ? "暂无委托" : "该状态下暂无委托" }}
       </div>
@@ -468,6 +495,12 @@ onUnmounted(() => {
   border: 1px solid var(--quant-border, #2c2f3a);
   border-radius: 8px;
   padding: 16px;
+}
+/* 分页栏 */
+.pagination-bar {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
 }
 /* 展开行事件区域 */
 .events-wrapper {
