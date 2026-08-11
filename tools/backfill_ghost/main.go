@@ -79,15 +79,25 @@ func main() {
 		}
 		byType := map[string]float64{}
 		byCnt := map[string]int{}
+		firstTime := map[string]int64{}
+		lastTime := map[string]int64{}
 		total := 0.0
 		for _, h := range list {
 			byType[h.typ] += h.val
 			byCnt[h.typ]++
+			if firstTime[h.typ] == 0 || h.time < firstTime[h.typ] {
+				firstTime[h.typ] = h.time
+			}
+			if h.time > lastTime[h.typ] {
+				lastTime[h.typ] = h.time
+			}
 			total += h.val
 		}
 		fmt.Printf("当前钱包余额: %.2fU\n", bal.TotalWalletBalance)
 		for t, v := range byType {
-			fmt.Printf("  %-16s %4d 条 %+10.4fU\n", t, byCnt[t], v)
+			f := time.UnixMilli(firstTime[t]).Format("01-02 15:04")
+			l := time.UnixMilli(lastTime[t]).Format("01-02 15:04")
+			fmt.Printf("  %-16s %4d 条 %+10.4fU  [%s ~ %s]\n", t, byCnt[t], v, f, l)
 		}
 		fmt.Printf("全部收入合计: %+.2fU\n", total)
 		fmt.Printf("推算初始余额 = 当前钱包 - 全部收入 = %.2fU\n", bal.TotalWalletBalance-total)
@@ -187,8 +197,9 @@ func main() {
 
 // incomeRow 资金流水条目（仅保留诊断所需字段）
 type incomeRow struct {
-	typ string
-	val float64
+	typ  string
+	val  float64
+	time int64
 }
 
 // fetchAllIncome 拉取全部类型资金流水（分页），供 --income-only 诊断账户收支全貌。
@@ -204,7 +215,7 @@ func fetchAllIncome(c *binance.Client, ctx context.Context, start, end int64) ([
 			break
 		}
 		for _, h := range list {
-			out = append(out, incomeRow{typ: h.IncomeType, val: parseF(h.Income)})
+			out = append(out, incomeRow{typ: h.IncomeType, val: parseF(h.Income), time: h.Time})
 		}
 		last := list[len(list)-1].Time
 		if last <= cur || len(list) < 1000 {
