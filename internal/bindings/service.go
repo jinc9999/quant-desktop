@@ -664,7 +664,7 @@ func (s *QuantService) computeMarketSummary() map[string]interface{} {
 		} else if t.PriceChange < 0 {
 			down++
 		}
-		if t.QuoteVolume >= 1e7 {
+		if t.QuoteVolume >= 1e7 && marketChangePlausible(t.PriceChange, t.QuoteVolume) {
 			if len(gainers) < 8 || t.PriceChange > gainers[len(gainers)-1].Change {
 				gainers = append(gainers, mv{t.Symbol, t.PriceChange, t.QuoteVolume})
 				sort.Slice(gainers, func(i, j int) bool { return gainers[i].Change > gainers[j].Change })
@@ -704,6 +704,17 @@ func (s *QuantService) computeMarketSummary() map[string]interface{} {
 		"topGainers":       gainList,
 		"topLosers":        lossList,
 	}
+}
+
+// marketChangePlausible 展示层合理性校验：24h 涨幅离谱（|x|>1000%）必须有足够成交额支撑，
+// 否则视为行情接口坏数据（低流动性币 24h 涨跌幅/成交额偶发异常，如 AZTEC +131300%），
+// 不进涨跌幅榜。仅影响每日总结展示，不参与任何交易判定。
+func marketChangePlausible(change, quoteVolume float64) bool {
+	if math.Abs(change) <= 1000 {
+		return true
+	}
+	// 离谱涨幅需 ≥ 1 亿 USDT 成交额才可信（真实币圈狂热行情的最低量级）
+	return quoteVolume >= 1e8
 }
 
 // computeModeSummary 计算指定模式的今日交易总结（单币聚合 + 规则化建议）

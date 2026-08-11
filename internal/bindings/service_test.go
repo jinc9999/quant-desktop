@@ -1025,3 +1025,26 @@ func TestMigratePersistedConfig_MaxAddOns(t *testing.T) {
 		t.Error("新配置（已含 maxAddOnsPerSymbol）不应触发迁移")
 	}
 }
+
+// TestMarketChangePlausible 市场榜展示层合理性校验：
+// 正常涨幅直接通过；离谱涨幅必须有足够成交额支撑，否则视为行情坏数据剔除
+// （背景：AZTECUSDT 24h 涨幅 +131300% 但真实成交额仅数十万 USDT，纯展示噪音）。
+func TestMarketChangePlausible(t *testing.T) {
+	cases := []struct {
+		change float64
+		volume float64
+		want   bool
+	}{
+		{30, 1e7, true},      // 正常涨幅，低成交额也允许展示
+		{500, 1e7, true},     // 大涨幅但未超阈值
+		{-900, 1e7, true},    // 大跌同理
+		{1500, 5e7, false},   // 离谱涨幅 + 5000万 成交额 → 坏数据
+		{131300, 2e7, false}, // AZTEC 场景：+131300% 但成交额不足 1 亿 → 剔除
+		{1500, 2e8, true},    // 离谱涨幅但成交额 ≥1 亿 → 可信真实行情，展示
+	}
+	for _, c := range cases {
+		if got := marketChangePlausible(c.change, c.volume); got != c.want {
+			t.Errorf("marketChangePlausible(change=%v, vol=%v) = %v, 期望 %v", c.change, c.volume, got, c.want)
+		}
+	}
+}
