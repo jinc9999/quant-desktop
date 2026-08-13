@@ -738,6 +738,7 @@ func main() {
 
 	analyzeCmd := flag.NewFlagSet("analyze", flag.ExitOnError)
 	analyzeProxy := analyzeCmd.String("proxy", os.Getenv("HTTPS_PROXY"), "HTTP 代理地址")
+	analyzeRaw := analyzeCmd.Bool("raw", false, "原始爆拉后续走势分析（默认=策略口径模拟）")
 
 	reportCmd := flag.NewFlagSet("report", flag.ExitOnError)
 	mode := reportCmd.String("mode", "SIMULATION", "SIMULATION / LIVE")
@@ -756,7 +757,13 @@ func main() {
 		}
 	case "analyze":
 		analyzeCmd.Parse(os.Args[2:])
-		if err := analyzeBurst(*analyzeProxy); err != nil {
+		var err error
+		if *analyzeRaw {
+			err = analyzeBurst(*analyzeProxy)
+		} else {
+			err = analyzeStrategy(*analyzeProxy)
+		}
+		if err != nil {
 			log.Fatalf("分析失败: %v", err)
 		}
 	case "report":
@@ -776,7 +783,7 @@ func main() {
 	}
 }
 
-// analyzeBurst 复盘分析：今天每根"5m 单根实体≥2.5%"的爆拉之后，
+// analyzeBurst 复盘分析（--raw）：今天每根"5m 单根实体≥2.5%"的爆拉之后，
 // 价格续涨情况 / 15m 累计是否突破 3% / 继续上涨幅度分布。
 func analyzeBurst(proxy string) error {
 	client := httpClient(proxy)
@@ -929,4 +936,217 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ==================== 策略口径模拟（analyze 默认）====================
+// 按 D 策略真实规则回放当天 5m 数据：
+//   入仓: 15m 累计(收盘 vs 周期开盘) ≥3%
+//   激活: 价格 ≥ 入场价×1.02 → 移动止盈开始（跟踪回调 3%）
+//   追单: 已激活且再次命中信号 → 追加独立单（同币最多 1+2=3 仓）
+//   平仓: 止损 -3% / 跟踪止盈(激活后从最高回撤3%) / 超时 180 分钟(36 根)
+//   冷却: 移动止盈平仓后 15 分钟可再入，止损/超时后 30 分钟
+//   名义: 每仓 100U（10U 保证金 × 10x，未按 5m 爆拉分桶放大，口径标注）
+
+type simPos struct {
+	entry    float64
+	extreme  float64
+	active   bool
+	heldBars int
+	addOn    bool
+	pnl      float64
+	reason   string
+}
+
+type simState struct {
+	positions []*simPos
+	cdUntil   int64 // 冷却截止（该币）
+	lastCD    string
+	signals   int
+	opens     int
+	addons    int
+	closed    []*simPos
+}
+
+func analyzeStrategy(proxy string) error {
+	client := httpClient(proxy)
+	tickers, err := fetchTickers(client)
+	if err != nil {
+		return fmt.Errorf("拉取行情失败: %w", err)
+	}
+	now := time.Now().In(beijing)
+	dayStart := beijingDayStartUTC(now)
+
+	pool := make([]ticker24, 0, len(tickers))
+	for _, t := range tickers {
+		if t.QuoteVolume >= minPoolVol {
+			pool = append(pool, t)
+		}
+	}
+
+	const (
+		nominal    = 100.0 // 每仓名义 100U
+		gainReq    = 3.0
+		slPct      = 0.03
+		actPct     = 0.02
+		cbPct      = 0.03
+		maxBars    = 36
+		cdTrail    = int64(15 * 60 * 1000)
+		cdStop     = int64(30 * 60 * 1000)
+		maxAddOn   = 2
+	)
+
+	var allClosed []*simPos
+	var totalSignals, totalOpens, totalAddons int
+	var dayPnl float64
+
+	for i, t := range pool {
+		if i >= 160 {
+			break
+		}
+		k5, err5 := fetchKlines(client, t.Symbol, "5m", 288)
+		if err5 != nil || len(k5) < 40 {
+			continue
+		}
+		k15, err15 := fetchKlines(client, t.Symbol, "15m", 96)
+		if err15 != nil {
+			continue
+		}
+		st := &simState{}
+		for j := 0; j < len(k5); j++ {
+			k := k5[j]
+			if k.openTime < dayStart {
+				continue
+			}
+			// 15m 周期 open
+			var co float64
+			for _, c := range k15 {
+				if c.openTime <= k.openTime {
+					co = c.open
+				} else {
+					break
+				}
+			}
+			cycleGain := 0.0
+			if co > 0 {
+				cycleGain = (k.close - co) / co * 100
+			}
+			signal := co > 0 && cycleGain >= gainReq
+
+			// 1) 现有持仓监控（先处理平仓再开仓，同根按保守顺序：止损→激活→跟踪→超时）
+			kept := st.positions[:0]
+			for _, p := range st.positions {
+				p.heldBars++
+				closed := false
+				if k.low <= p.entry*(1-slPct) {
+					p.pnl = (k.low - p.entry) / p.entry * nominal
+					p.reason = "STOP_LOSS"
+					closed = true
+				} else if !p.active && k.high >= p.entry*(1+actPct) {
+					p.active = true
+					p.extreme = k.high
+				} else if p.active {
+					if k.high > p.extreme {
+						p.extreme = k.high
+					}
+					if k.low <= p.extreme*(1-cbPct) {
+						p.pnl = (p.extreme*(1-cbPct) - p.entry) / p.entry * nominal
+						p.reason = "TRAILING"
+						closed = true
+					}
+				}
+				if !closed && p.heldBars >= maxBars {
+					p.pnl = (k.close - p.entry) / p.entry * nominal
+					p.reason = "MAX_HOLD"
+					closed = true
+				}
+				if closed {
+					dayPnl += p.pnl
+					allClosed = append(allClosed, p)
+					st.closed = append(st.closed, p)
+					if p.reason == "TRAILING" {
+						st.cdUntil = k.openTime + cdTrail
+						st.lastCD = "TRAILING"
+					} else {
+						st.cdUntil = k.openTime + cdStop
+						st.lastCD = p.reason
+					}
+				} else {
+					kept = append(kept, p)
+				}
+			}
+			st.positions = kept
+
+			// 2) 开仓/追单
+			if signal {
+				st.signals++
+				totalSignals++
+			}
+			if signal && k.openTime >= st.cdUntil {
+				if len(st.positions) == 0 {
+					st.positions = append(st.positions, &simPos{entry: k.close, extreme: k.close, heldBars: 1})
+					st.opens++
+					totalOpens++
+				} else {
+					// 追单：任一持仓已激活 且 同币未达上限
+					anyActive := false
+					for _, p := range st.positions {
+						if p.active {
+							anyActive = true
+							break
+						}
+					}
+					if anyActive && len(st.positions) < 1+maxAddOn {
+						st.positions = append(st.positions, &simPos{entry: k.close, extreme: k.close, heldBars: 1, addOn: true})
+						st.addons++
+						totalAddons++
+					}
+				}
+			}
+		}
+	}
+
+	if len(allClosed) == 0 {
+		fmt.Println("今天按策略口径暂无完整平仓样本")
+		return nil
+	}
+	n := len(allClosed)
+	wins, losses := 0, 0
+	winSum, lossSum := 0.0, 0.0
+	reasonCnt := map[string]int{}
+	activated := 0
+	addOnClosed := 0
+	for _, p := range allClosed {
+		reasonCnt[p.reason]++
+		if p.pnl > 0 {
+			wins++
+			winSum += p.pnl
+		} else {
+			losses++
+			lossSum += p.pnl
+		}
+		if p.addOn {
+			addOnClosed++
+		}
+	}
+	fmt.Printf("\n===== D 策略口径当日模拟（%s，10U×10x=100U/仓，未计手续费/滑点）=====\n", now.Format("2006-01-02"))
+	fmt.Println(fmtTable([]string{"指标", "数值", "说明"}, [][]string{
+		{"15m 信号次数", fmt.Sprintf("%d", totalSignals), "收盘 vs 15m 周期开盘 ≥3%"},
+		{"开仓次数", fmt.Sprintf("%d（追单 %d）", totalOpens, totalAddons), "含冷却过滤；同币最多 1+2 仓"},
+		{"已平仓", fmt.Sprintf("%d 笔", n), "当日已按规则平出的仓"},
+		{"胜率", fmt.Sprintf("%.1f%%", float64(wins)/float64(n)*100), fmt.Sprintf("盈利 %d / 亏损 %d", wins, losses)},
+		{"盈亏", fmt.Sprintf("%+.2f U", dayPnl), "按 100U 名义/仓"},
+		{"平均每笔", fmt.Sprintf("%+.2f U", dayPnl/float64(n)), ""},
+		{"止损/跟踪/超时", fmt.Sprintf("%d / %d / %d", reasonCnt["STOP_LOSS"], reasonCnt["TRAILING"], reasonCnt["MAX_HOLD"]), "平仓原因分布"},
+	}))
+	if reasonCnt["TRAILING"] > 0 {
+		activated = reasonCnt["TRAILING"]
+	}
+	fmt.Println("\n激活与追单（用平仓前激活状态近似）:")
+	fmt.Println(fmtTable([]string{"指标", "数值", "说明"}, [][]string{
+		{"移动止盈触发", fmt.Sprintf("%d 笔", activated), "最终以跟踪止盈离场（已激活）"},
+		{"追单平仓", fmt.Sprintf("%d 笔", addOnClosed), "追单单独离场笔数"},
+		{"追单占比", fmt.Sprintf("%.1f%%", float64(addOnClosed)/float64(n)*100), ""},
+	}))
+	fmt.Println("\n⚠ 口径：本模拟按 5m 收盘/高低价近似回放，未含手续费滑点、未按 5m 爆拉分桶放大仓位；用于复盘当日策略环境，非实盘对账。")
+	return nil
 }
