@@ -1547,7 +1547,7 @@ func (e *Engine) openOne(ctx context.Context, symbol string, entryPrice, amount 
 		cur, _ := e.ws.GetPrice(symbol)
 		if err := e.orderMgr.PlaceStopOrders(ctx, pos, e.cfg, cur); err != nil {
 			log.Printf("[Strategy] 挂止损委托失败 %s 持仓ID=%d: %v", symbol, pos.ID, err)
-			e.emitError("挂止损单", fmt.Sprintf("%s 挂止损条件单失败: %v", symbol, err))
+			e.emitError("挂止损单", fmt.Sprintf("%s 挂止损条件单失败，该仓已自动回滚平仓: %v", symbol, err))
 			return nil, err
 		}
 	}

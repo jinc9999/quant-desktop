@@ -494,7 +494,7 @@ func TestOnCloseFiredOnFilledClose(t *testing.T) {
 }
 
 // TestComputeStopPrices_Clamp 验证止损价/激活价的防 -2021 钳制：
-// 现价已穿越触发价时，将价格钳到现价外侧；无行情（currentPrice=0）时保持原值。
+// 价格已穿越触发价时，将触发价钳到基准价外侧 0.5%；无行情（基准=0）时保持原值。
 func TestComputeStopPrices_Clamp(t *testing.T) {
 	approx := func(name string, got, want float64) {
 		t.Helper()
@@ -507,23 +507,23 @@ func TestComputeStopPrices_Clamp(t *testing.T) {
 	approx("LONG 正常-止损", sp, 96)
 	approx("LONG 正常-激活", ap, 102)
 
-	// LONG 现价已涨 5%（105）：激活价应钳到 105*1.002，止损保持 96
+	// LONG 现价已涨 5%（105）：激活价应钳到 105*1.005，止损保持 96
 	sp, ap = computeStopPrices("LONG", 100, 0.04, 0.02, 105)
-	approx("LONG 上涨-激活钳制", ap, 105*1.002)
+	approx("LONG 上涨-激活钳制", ap, 105*1.005)
 	approx("LONG 上涨-止损不变", sp, 96)
 
-	// LONG 现价已跌 5%（95）：止损应钳到 95*0.998，激活保持 102
+	// LONG 现价已跌 5%（95）：止损应钳到 95*0.995，激活保持 102
 	sp, ap = computeStopPrices("LONG", 100, 0.04, 0.02, 95)
-	approx("LONG 下跌-止损钳制", sp, 95*0.998)
+	approx("LONG 下跌-止损钳制", sp, 95*0.995)
 	approx("LONG 下跌-激活不变", ap, 102)
 
-	// SHORT 现价已跌 5%（95）：激活(98)应钳到 95*0.998
+	// SHORT 现价已跌 5%（95）：激活(98)应钳到 95*0.995
 	sp, ap = computeStopPrices("SHORT", 100, 0.04, 0.02, 95)
-	approx("SHORT 下跌-激活钳制", ap, 95*0.998)
+	approx("SHORT 下跌-激活钳制", ap, 95*0.995)
 
-	// SHORT 现价已涨 5%（105）：止损(104)应钳到 105*1.002
+	// SHORT 现价已涨 5%（105）：止损(104)应钳到 105*1.005
 	sp, ap = computeStopPrices("SHORT", 100, 0.04, 0.02, 105)
-	approx("SHORT 上涨-止损钳制", sp, 105*1.002)
+	approx("SHORT 上涨-止损钳制", sp, 105*1.005)
 
 	// currentPrice=0（无行情）：不钳制，保持原值
 	sp, ap = computeStopPrices("LONG", 100, 0.04, 0.02, 0)

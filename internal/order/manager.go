@@ -99,30 +99,31 @@ func (m *Manager) insertOrder(order *storage.Order) (int64, error) {
 }
 
 // computeStopPrices 计算固定止损触发价与跟踪止盈激活价，并做防 -2021 钳制：
-// 开仓后现价若已穿越止损价/激活价（快速拉升或下杀），触发价必须钳到现价外侧，
-// 否则交易所返回 -2021 "Order would immediately trigger"。
-// - LONG：止损价低于现价（现价下方 0.2%），激活价高于现价（现价上方 0.2%）
+// 开仓后价格若已穿越止损价/激活价（快速拉升或下杀），触发价必须钳到基准价外侧
+//（0.5% 缓冲），否则交易所返回 -2021 "Order would immediately trigger"。
+// 基准价应为标记价（币安条件单按标记价判断），由调用方传入。
+// - LONG：止损价低于基准价（下方 0.5%），激活价高于基准价（上方 0.5%）
 // - SHORT：止损价高于现价，激活价低于现价
-func computeStopPrices(side string, entryPrice, stopLossPct, trailingActivation, currentPrice float64) (stopPrice, activationPrice float64) {
+func computeStopPrices(side string, entryPrice, stopLossPct, trailingActivation, clampBase float64) (stopPrice, activationPrice float64) {
 	if side == "SHORT" {
 		stopPrice = entryPrice * (1 + stopLossPct)
-		if currentPrice > 0 && stopPrice <= currentPrice {
-			stopPrice = currentPrice * 1.002
+		if clampBase > 0 && stopPrice <= clampBase {
+			stopPrice = clampBase * 1.005
 		}
 		activationPrice = entryPrice * (1 - trailingActivation)
-		if currentPrice > 0 && activationPrice >= currentPrice {
-			activationPrice = currentPrice * 0.998
+		if clampBase > 0 && activationPrice >= clampBase {
+			activationPrice = clampBase * 0.995
 		}
 		return stopPrice, activationPrice
 	}
 	// LONG
 	stopPrice = entryPrice * (1 - stopLossPct)
-	if currentPrice > 0 && stopPrice >= currentPrice {
-		stopPrice = currentPrice * 0.998
+	if clampBase > 0 && stopPrice >= clampBase {
+		stopPrice = clampBase * 0.995
 	}
 	activationPrice = entryPrice * (1 + trailingActivation)
-	if currentPrice > 0 && activationPrice <= currentPrice {
-		activationPrice = currentPrice * 1.002
+	if clampBase > 0 && activationPrice <= clampBase {
+		activationPrice = clampBase * 1.005
 	}
 	return stopPrice, activationPrice
 }
@@ -159,9 +160,14 @@ func (m *Manager) PlaceStopOrders(ctx context.Context, pos *storage.Position, cf
 		}
 	}
 
-	// 2. 计算固定止损触发价与跟踪止盈激活价（含防 -2021 钳制，见 computeStopPrices）
+	// 2. 计算固定止损触发价与跟踪止盈激活价（含防 -2021 钳制，见 computeStopPrices）。
+	// 钳制基准优先用标记价（币安条件单按标记价判断 -2021），失败回退最新价。
+	clampBase := currentPrice
+	if mark, merr := m.client.GetMarkPrice(ctx, pos.Symbol); merr == nil && mark > 0 {
+		clampBase = mark
+	}
 	stopPrice, activationPrice := computeStopPrices(
-		pos.Side, pos.EntryPrice, cfg.StopLossPct, cfg.TrailingActivation, currentPrice,
+		pos.Side, pos.EntryPrice, cfg.StopLossPct, cfg.TrailingActivation, clampBase,
 	)
 	var stopResult *binance.OrderResult
 	err = m.retryWithBackoff(ctx, func() error {

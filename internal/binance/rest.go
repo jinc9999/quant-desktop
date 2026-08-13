@@ -833,6 +833,23 @@ func (c *Client) GetKline5mMaxGain(ctx context.Context, symbol string, nowMs int
 	return maxGain5mFromKlines(lites, nowMs), nil
 }
 
+// GetMarkPrice 获取指定交易对标记价（与下单端一致：SIMULATION=demo / LIVE=实盘）。
+// 交易所条件单按标记价判断 -2021 "立即触发"，挂单钳制触发价必须用标记价而非最新成交价
+//（薄盘币最新价与标记价可差 0.5%+，用最新价钳制仍会 -2021）。
+func (c *Client) GetMarkPrice(ctx context.Context, symbol string) (float64, error) {
+	if c.isDryRun() {
+		return 100.0, nil
+	}
+	ps, err := c.futuresClient.NewPremiumIndexService().Symbol(symbol).Do(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("获取 %s 标记价失败: %w", symbol, err)
+	}
+	if len(ps) == 0 || ps[0].MarkPrice == "" {
+		return 0, fmt.Errorf("获取 %s 标记价失败: 无数据", symbol)
+	}
+	return mustParseFloat(ps[0].MarkPrice), nil
+}
+
 // OpenLong 市价多头开仓
 // symbol: 交易对（如 "BTCUSDT"）
 // amount: 数量
