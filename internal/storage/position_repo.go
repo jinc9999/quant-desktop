@@ -121,9 +121,10 @@ func (db *DB) UpdateRiskState(id int64, highestPrice *float64, trailingActive bo
 // GetTodayPnl 聚合查询今日已平仓盈亏
 // 返回: totalPnl 今日已实现盈亏总和, closedCount 今日平仓次数, err 错误信息
 func (db *DB) GetTodayPnl() (float64, int, error) {
-	// 计算今日零点（本地时区）的 Unix 毫秒时间戳
-	now := time.Now()
-	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	// 计算今日零点（北京时区，与 market_metrics 日报口径一致）的 Unix 毫秒时间戳
+	beijing := time.FixedZone("CST", 8*3600)
+	now := time.Now().In(beijing)
+	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, beijing)
 	startMs := todayStart.UnixMilli()
 
 	var totalPnl float64
