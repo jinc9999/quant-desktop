@@ -22,6 +22,7 @@ data/
 backtest/data/
 backtest/data_funding/
 backtest/data_replay/
+backtest/data_mark/
 backtest/backtest
 backtest/*.exe
 

@@ -26,6 +26,8 @@ import (
 type symbolStream struct {
 	symbol string
 	cr     *csv.Reader
+	markCr *csv.Reader // 标记价 K 线（-mark-data 提供且文件存在时；与行情 K 线同时间戳对齐）
+	markLead *float64  // 标记价文件首行（无表头时）暂存，供首根行情 K 线配对
 	cur    *bar
 	eof    bool
 }
@@ -37,7 +39,7 @@ type symbolStream struct {
 // 返回:
 //   - *symbolStream: 数据流实例
 //   - error: 打开或读取失败时返回错误
-func newSymbolStream(path string) (*symbolStream, error) {
+func newSymbolStream(path, markDir string) (*symbolStream, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -51,17 +53,59 @@ func newSymbolStream(path string) (*symbolStream, error) {
 	} else if err == nil {
 		// 不是表头，需要回退处理——直接以该行构造 cur
 		s := &symbolStream{symbol: strings.TrimSuffix(filepath.Base(path), ".csv"), cr: cr}
+		if markDir != "" {
+			s.openMark(filepath.Join(markDir, strings.TrimSuffix(filepath.Base(path), ".csv")+".csv"))
+		}
 		s.cur = parseBar(rec)
+		if s.cur != nil && s.markLead != nil {
+			s.cur.markClose = *s.markLead
+			s.markLead = nil
+		}
 		return s, nil
 	} else {
 		return nil, err
 	}
 	s := &symbolStream{symbol: strings.TrimSuffix(filepath.Base(path), ".csv"), cr: cr}
+	if markDir != "" {
+		s.openMark(filepath.Join(markDir, strings.TrimSuffix(filepath.Base(path), ".csv")+".csv"))
+	}
 	if err := s.next(); err != nil {
 		f.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// openMark 打开同币种标记价 K 线 CSV（存在时启用 MarkClose 多源验证）。
+// 首行若是表头则丢弃；若是数据行则暂存到 markLead（供首根行情 K 线配对），
+// 保证后续 next() 中行情行与标记价行按行号对齐。
+func (s *symbolStream) openMark(markPath string) {
+	mf, err := os.Open(markPath)
+	if err != nil {
+		return // 无标记价数据（该币未下载/未上市），MarkClose 保持 0
+	}
+	mr := csv.NewReader(mf)
+	mr.FieldsPerRecord = -1
+	if rec, err := mr.Read(); err == nil {
+		if !strings.HasPrefix(rec[0], "open_time") {
+			if v := markCloseOf(rec); v > 0 {
+				s.markLead = &v
+			}
+		}
+	}
+	s.markCr = mr
+}
+
+// markCloseOf 从标记价 K 线行取收盘价（[4]=close，与行情 K 线同格式）
+func markCloseOf(rec []string) float64 {
+	if len(rec) < 5 {
+		return 0
+	}
+	v, err := strconv.ParseFloat(rec[4], 64)
+	if err != nil {
+		return 0
+	}
+	return v
 }
 
 // parseBar 将一行 CSV 记录解析为 bar
@@ -119,6 +163,15 @@ func (s *symbolStream) next() error {
 	}
 	if b := parseBar(rec); b != nil {
 		s.cur = b
+		if s.markCr != nil {
+			if s.markLead != nil {
+				s.cur.markClose = *s.markLead
+				s.markLead = nil
+			} else if mrec, merr := s.markCr.Read(); merr == nil && len(mrec) >= 5 && mrec[0] == rec[0] {
+				s.cur.markClose = markCloseOf(mrec)
+			}
+			// 时间戳不匹配/读完：MarkClose 保持 0（该根无标记价，不做可信度过滤）
+		}
 		return nil
 	}
 	return s.next() // 跳过非法行
@@ -274,7 +327,7 @@ func parseDay(s string) (int64, error) {
 //
 // 返回:
 //   - []*symbolStream: 全部数据流
-func openStreams(dir string) []*symbolStream {
+func openStreams(dir, markDir string) []*symbolStream {
 	files, err := filepath.Glob(filepath.Join(dir, "*.csv"))
 	if err != nil {
 		fmt.Printf("[错误] 数据目录读取失败: %v\n", err)
@@ -283,7 +336,7 @@ func openStreams(dir string) []*symbolStream {
 	sort.Strings(files)
 	streams := make([]*symbolStream, 0, len(files))
 	for _, f := range files {
-		s, err := newSymbolStream(f)
+		s, err := newSymbolStream(f, markDir)
 		if err != nil {
 			fmt.Printf("[警告] 打开 %s 失败: %v\n", f, err)
 			continue
@@ -744,6 +797,7 @@ func safeDiv(a, b float64) float64 {
 // 参数由命令行 flag 提供（-data / -out / -start / -end）
 func main() {
 	dataDir := flag.String("data", "data", "5m CSV 数据目录")
+	markDataDir := flag.String("mark-data", "", "标记价 K 线 CSV 目录（与行情 K 线同时间戳；供收盘价可信度验证）")
 	outDir := flag.String("out", "out", "输出目录（trades.csv / equity.csv / report.svg）")
 	fundingDir := flag.String("funding-dir", "data_funding", "资金费率 CSV 数据目录（funding 范式使用）")
 	startFlag := flag.String("start", "", "回测起始日期 YYYY-MM-DD（默认不限制）")
@@ -755,6 +809,7 @@ func main() {
 	surgeFlag := flag.Float64("surge", 1.8, "放量倍数阈值（默认 1.8）")
 	surgeLookbackFlag := flag.Int("surge-lookback", 24, "放量基准窗口（5m K 线根数，默认 24=2小时）")
 	wickSurgeFlag := flag.Float64("wick-surge", 0, "防插针：信号根5m成交量/近24根均值<该值→疑似薄量插针过滤（0=关闭；建议 0.5~1.0）")
+	wickMarkDevFlag := flag.Float64("wick-mark-dev", 0, "防插针：信号根收盘价 vs 标记价收盘价偏差 % > 该值 → 疑似收盘价被插针污染，过滤（0=关闭；建议 0.5）")
 	slipFlag := flag.Float64("slip", 0, "S01/momentum 单边滑点 %%（0=关闭，默认 0）")
 	gainFlag := flag.Float64("gain", 5.0, "15m 实体涨幅门槛 %%（默认 5）")
 	minVolFlag := flag.Float64("minvol", 50000, "24h 成交额下限 USDT（默认 50000）")
@@ -870,7 +925,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	streams := openStreams(*dataDir)
+	streams := openStreams(*dataDir, *markDataDir)
 	if len(streams) == 0 {
 		fmt.Println("[错误] 无可用数据，请先运行 download 下载数据")
 		os.Exit(1)
@@ -886,6 +941,7 @@ func main() {
 	cfg.VolumeSurgeThreshold = *surgeFlag
 	cfg.SurgeLookback = *surgeLookbackFlag
 	cfg.WickMinSurge = *wickSurgeFlag
+	cfg.WickMarkDev = *wickMarkDevFlag
 	cfg.FlatSlippage = *slipFlag / 100
 	cfg.ClosedBarConfirm = *closedFlag
 	cfg.ExitClose = *exitModeFlag == "close"

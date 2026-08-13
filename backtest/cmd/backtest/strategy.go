@@ -23,6 +23,7 @@ type StrategyConfig struct {
 	VolumeSurgeThreshold float64 // 放量倍数阈值
 	SurgeLookback        int     // 放量基准窗口(K 线根数)
 	WickMinSurge         float64 // 防插针：信号根 5m 成交量 / 近 SurgeLookback 根均值 < 该值 → 疑似薄量插针，过滤（0=关闭）
+	WickMarkDev          float64 // 防插针：信号根收盘价 vs 标记价收盘价偏差 % > 该值 → 收盘价疑似被插针污染，过滤（0=关闭）
 	MaxPullbackPct       float64 // 山顶过滤器回撤上限(%)
 	MinTakerBuyPct       float64 // 15m 窗口主动买占比门槛(%)(0 关闭)
 	RetracePct           float64 // S01 回踩实验: 信号后回踩深度%(0 关闭)
@@ -455,6 +456,7 @@ type bar struct {
 	quoteVol float64
 	vol      float64
 	tbb      float64
+	markClose float64 // 同根标记价 K 线收盘价（-mark-data 提供时；0=无数据）
 }
 
 // max24h 返回最近 24h 窗口内最高价（全扫描 O(288)）
@@ -1081,6 +1083,14 @@ func (e *Engine) computeSignal(st *symbolState, b *bar, ready24 bool) (string, s
 		// → 疑似薄量插针（少数几笔把价格打到位，收盘价可信度低），过滤该信号。
 		if side == "LONG" && cfg.WickMinSurge > 0 && volumeSurge(st, b, cfg.SurgeLookback) < cfg.WickMinSurge {
 			return "", ""
+		}
+		// 防插针实验（--wick-mark-dev）：信号根收盘价 vs 标记价收盘价偏差超阈值
+		// → 收盘价可能被单笔插针污染（可信度低），过滤该信号。
+		if side == "LONG" && cfg.WickMarkDev > 0 && b.markClose > 0 {
+			dev := math.Abs(b.close-b.markClose) / b.markClose * 100
+			if dev > cfg.WickMarkDev {
+				return "", ""
+			}
 		}
 		// 山顶过滤器
 		if side == "LONG" {

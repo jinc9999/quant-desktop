@@ -32,8 +32,8 @@ import (
 	"time"
 )
 
-// BaseURL 币安官方历史数据站月度 K 线根地址
-const BaseURL = "https://data.binance.vision/data/futures/um/monthly/klines"
+// baseURL 币安官方历史数据站月度 K 线根地址（-mark 时切换为标记价 K 线）
+var baseURL = "https://data.binance.vision/data/futures/um/monthly/klines"
 
 // Interval 回测使用的 K 线周期
 const Interval = "5m"
@@ -123,7 +123,7 @@ func buildMonths(symbols []string, start, end string) ([]month, error) {
 			tasks = append(tasks, month{
 				symbol: sym,
 				ym:     ym,
-				url:    fmt.Sprintf("%s/%s/%s/%s-%s-%s.zip", BaseURL, sym, Interval, sym, Interval, ym),
+				url:    fmt.Sprintf("%s/%s/%s/%s-%s-%s.zip", baseURL, sym, Interval, sym, Interval, ym),
 			})
 		}
 	}
@@ -309,7 +309,14 @@ func main() {
 	workersFlag := flag.Int("workers", 8, "并发下载数")
 	dirFlag := flag.String("dir", "data", "数据输出目录")
 	proxyFlag := flag.String("proxy", "", "HTTP 代理地址（如 http://127.0.0.1:7897；拉取全量币种列表时必填）")
+	markFlag := flag.Bool("mark", false, "下载标记价 K 线（markPriceKlines）到 data_mark，供收盘价可信度验证用")
 	flag.Parse()
+	if *markFlag {
+		baseURL = "https://data.binance.vision/data/futures/um/monthly/markPriceKlines"
+		if *dirFlag == "data" {
+			*dirFlag = "data_mark"
+		}
+	}
 
 	// 代理提示（data.binance.vision 需网络可达，通常经本地代理）
 	fmt.Printf("环境代理: http_proxy=%q https_proxy=%q 指定代理: %q\n", os.Getenv("http_proxy"), os.Getenv("https_proxy"), *proxyFlag)
