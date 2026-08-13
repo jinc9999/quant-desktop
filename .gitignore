@@ -21,7 +21,9 @@ data/
 # 回测历史数据（14G+ 币安 K 线 + 资金费率 CSV），只留代码不入数据
 backtest/data/
 backtest/data_funding/
+backtest/data_replay/
 backtest/backtest
+backtest/*.exe
 
 # 回测输出与覆盖率（生成物）
 backtest/out_*/

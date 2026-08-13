@@ -47,7 +47,7 @@ type StrategyConfig struct {
 	OnlyShort            bool    // 仅做空（过滤掉 LONG 信号，用于只做空策略）
 	InitialEquity        float64 // 初始权益(USDT)
 	ClosedBarConfirm     bool    // 仅用已收盘 15m K 线评估实体信号（等收线，避免盘中追高）
-	ExitClose            bool    // 退出检测用片收盘价而非片内高低价（近似 tick 采样，不捕捉片内插针）
+	ExitClose            bool    // 退出检测用片收盘价而非片内高低价（乐观模型，看不到盘中插针；实盘等价于 ohlc）
 	TakeProfitPct        float64 // 固定止盈比例（0 = 关闭；>0 时价格达到该涨幅先止盈，与移动止盈先到先平）
 	MaxHoldBars          int     // 最长持仓 5m K 线数（0 = 关闭；超时按片收盘价平仓）
 	StallWinBars         int     // 无浮盈提前离场：入场后该 K 线数内最高浮盈仍 < StallGainPct 则平仓（0=关闭）

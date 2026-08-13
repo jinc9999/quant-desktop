@@ -755,7 +755,7 @@ func main() {
 	minVolFlag := flag.Float64("minvol", 50000, "24h 成交额下限 USDT（默认 50000）")
 	feeFlag := flag.Float64("fee", 0.04, "单边手续费率 %%taker（默认 0.04）")
 	closedFlag := flag.Bool("closed", true, "已收盘 15m K 线实体确认（默认 true）")
-	exitModeFlag := flag.String("exit-mode", "ohlc", "退出检测模式: ohlc=片内高低价(保守) / close=片收盘价(近似 tick 采样)")
+	exitModeFlag := flag.String("exit-mode", "ohlc", "退出检测模式: ohlc=片内高低价(保守,=实盘盘中价,默认) / close=片收盘价(乐观,不捕捉片内插针,禁止作通过标准)")
 	min24GainFlag := flag.Float64("min24gain", 5.0, "24h 涨幅门槛 %%（设 0 关闭，默认 5）")
 	pullbackFlag := flag.Float64("pullback", 9.0, "山顶过滤: 距24h高点最大回撤 %%（设大如 1000 关闭，默认 9）")
 	cooldownFlag := flag.Int("cooldown", 20, "平仓后冷却分钟数（默认 20）")
