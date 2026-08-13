@@ -887,6 +887,64 @@ func (c *Client) GetKline5mState(ctx context.Context, symbol string, nowMs int64
 	return kline5mStateFromLites(lites, nowMs), nil
 }
 
+// GetMarkKline5mClose 获取最新已收盘 5m 标记价 K 线收盘价（防插针可信度校验用）。
+// 币安 fapi 提供 markPriceKlines 接口（标记价 = 官方公告牌价，平滑、抗插针）；
+// 若标记价收盘价与行情收盘价偏差超过阈值，说明该根行情收盘价可能被单笔插针污染。
+// DRY_RUN 返回固定 100；拉取失败返回 error（调用方跳过校验，不误杀信号）。
+func (c *Client) GetMarkKline5mClose(ctx context.Context, symbol string, nowMs int64) (float64, int64, error) {
+	if c.isDryRun() {
+		return 100, nowMs - 300000, nil
+	}
+	if c.marketHTTP == nil || c.marketBase == "" {
+		return 0, 0, errors.New("实盘行情数据源未启用，跳过标记价校验")
+	}
+	u := fmt.Sprintf("%s/fapi/v1/markPriceKlines?symbol=%s&interval=5m&limit=2",
+		c.marketBase, url.QueryEscape(symbol))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	resp, err := c.marketHTTP.Do(req)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return 0, 0, fmt.Errorf("标记价K线接口返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var raw [][]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return 0, 0, err
+	}
+	// 取最新已收盘（openTime+5min <= nowMs）的一根标记价收盘价
+	bestClose, bestOpen := 0.0, int64(0)
+	for _, row := range raw {
+		if len(row) < 5 {
+			continue
+		}
+		var t int64
+		var s string
+		if err := json.Unmarshal(row[0], &t); err != nil {
+			continue
+		}
+		if t+300000 > nowMs {
+			continue // 未收盘
+		}
+		if err := json.Unmarshal(row[4], &s); err != nil {
+			continue
+		}
+		if t >= bestOpen {
+			bestOpen = t
+			bestClose = mustParseFloat(s)
+		}
+	}
+	if bestOpen == 0 {
+		return 0, 0, errors.New("无已收盘标记价K线")
+	}
+	return bestClose, bestOpen, nil
+}
+
 // getLiveKline5mMaxGain 从实盘域名拉取最近 4 根 5m K 线并计算当前 15m 周期最大 5m 涨幅
 // （模拟盘信号数据源，与 getLiveKlineInfo 一致走 fapi）。
 func (c *Client) getLiveKline5mMaxGain(ctx context.Context, symbol string, nowMs int64) (float64, error) {

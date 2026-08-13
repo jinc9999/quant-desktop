@@ -1,6 +1,7 @@
 package binance
 
 import (
+	"context"
 	"math"
 	"testing"
 )
@@ -69,5 +70,17 @@ func TestMaxGain5mFromKlines_FormingBarExcluded(t *testing.T) {
 	}
 	if got >= 3.9 {
 		t.Fatalf("未收盘 5m 实时价 106 被计入爆拉桶: maxGain=%v", got)
+	}
+}
+
+// TestGetMarkKline5mClose_DryRun DRY_RUN 模式返回固定标记价（防插针可信度校验的桩）。
+func TestGetMarkKline5mClose_DryRun(t *testing.T) {
+	c := NewClient("k", "s", "DRY_RUN", "", 0)
+	close, openTime, err := c.GetMarkKline5mClose(context.Background(), "BTCUSDT", 1_000_000)
+	if err != nil {
+		t.Fatalf("DRY_RUN 标记价K线不应报错: %v", err)
+	}
+	if close != 100 || openTime != 1_000_000-300000 {
+		t.Fatalf("DRY_RUN 标记价 close=%v openTime=%v, want 100/%d", close, openTime, 1_000_000-300000)
 	}
 }

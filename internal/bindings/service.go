@@ -121,6 +121,13 @@ func migratePersistedStrategyConfig(raw string) (bool, binance.StrategyConfig, e
 		saved.HardStopPct = dft.HardStopPct
 		migrated = true
 	}
+	// 防插针标记价可信度迁移：旧持久化配置缺少 wickMarkDev 键时补默认
+	// （D 版构建 -X defaultWickMarkDev=1 → 1.0%；A/B 默认 0=关闭）。
+	if !bytes.Contains([]byte(raw), []byte(`"wickMarkDev"`)) {
+		dft := binance.DefaultStrategyConfig()
+		saved.WickMarkDev = dft.WickMarkDev
+		migrated = true
+	}
 	// 最小成交额参数迁移：旧持久化配置中 24h 成交额下限仍为旧的 10 万 USDT 时，
 	// 升级为 1000 万 USDT（2026-08-07 用户要求）；用户显式保存的其他值不会被覆盖。
 	if saved.MinQuoteVolume == 100000 {

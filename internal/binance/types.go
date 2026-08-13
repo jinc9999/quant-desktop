@@ -173,6 +173,9 @@ type StrategyConfig struct {
 	// 只在 5m 收盘后按收盘价判定止损/跟踪，交易所仅保留 HardStopPct 灾难硬止损兜底（真崩才触发）。
 	ExitOnClose bool    `json:"exitOnClose"` // 收盘判定出场：0=盘中触发（A/B 默认），1=收盘判定（D 版构建默认）
 	HardStopPct float64 `json:"hardStopPct"` // 灾难硬止损比例（0=关闭；ExitOnClose 时 D 默认 0.08=8%）
+	// 防插针：信号根收盘价 vs 标记价收盘价偏差 % 超阈值 → 疑似收盘价被插针污染，不开仓
+	// （2026-08-14 全周期回测验证：1.0% 阈值误杀 0.18%、利润 -0.7%、回撤 -13.4%、净利/回撤 +15%）
+	WickMarkDev float64 `json:"wickMarkDev"` // 标记价可信度偏差阈值 %（0=关闭；D 版构建默认 1.0）
 }
 
 // DefaultStrategyConfig 返回默认策略配置（S01 v2 纯追涨，2026-08-08 全参数矩阵定稿）
@@ -221,6 +224,8 @@ var (
 	// 路1 收盘判定出场（D 版构建 -X ...defaultExitOnClose=1 -X ...defaultHardStopPct=0.08）
 	defaultExitOnClose = "0"
 	defaultHardStopPct = "0"
+	// 防插针标记价可信度（D 版构建 -X ...defaultWickMarkDev=1）
+	defaultWickMarkDev = "0"
 )
 
 // parseIntDefault 解析字符串为 int，失败时返回默认值（供 -X 覆盖的默认参数使用）
@@ -293,5 +298,6 @@ func DefaultStrategyConfig() StrategyConfig {
 		SmartSizeBoundary: parseFloatDefault(defaultSmartSizeBoundary, 2.5),
 		ExitOnClose:       parseBoolDefault(defaultExitOnClose, false),
 		HardStopPct:       parseFloatDefault(defaultHardStopPct, 0),
+		WickMarkDev:       parseFloatDefault(defaultWickMarkDev, 0),
 	}
 }

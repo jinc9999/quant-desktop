@@ -939,6 +939,25 @@ func (e *Engine) appendKlineCloseCandidates(ctx context.Context, tickers []binan
 		if gain < e.cfg.MinGainPct {
 			continue // 收盘未达标，不是机会
 		}
+		// 防插针标记价可信度校验（WickMarkDev）：收盘价 vs 标记价收盘价偏差超阈值
+		// → 该收盘价可能被单笔插针污染，不开仓（2026-08-14 全周期回测验证：
+		//   1.0% 阈值误杀 0.18%、利润 -0.7%、最大回撤 -13.4%、净利/回撤 +15%）。
+		if e.cfg.WickMarkDev > 0 && entry.close5m > 0 {
+			markClose, markOpen, merr := e.client.GetMarkKline5mClose(ctx, t.Symbol, now)
+			if merr == nil && markClose > 0 && markOpen == entry.close5mOpenTime {
+				dev := math.Abs(entry.close5m-markClose) / markClose * 100
+				if dev > e.cfg.WickMarkDev {
+					e.logAttemptOnce(&storage.OpenAttempt{
+						Ts: now, Tick: e.tickCount.Load(), Symbol: t.Symbol, Side: "LONG",
+						Stage: storage.StageCandidate, Reason: storage.ReasonMarkDev,
+						Gain15: gain, KlineOpen: entry.open,
+						Gain5m: entry.gain5mMax, Bucket: bucketOf5m(entry.gain5mMax),
+					})
+					continue // 收盘价可疑，跳过该信号（等下一根 K 线确认）
+				}
+			}
+			// 标记价拉取失败 / 无匹配 K 线：跳过校验（不误杀），下一根继续
+		}
 		a := &storage.OpenAttempt{
 			Ts: now, Tick: e.tickCount.Load(), Symbol: t.Symbol, Side: "LONG",
 			Stage: storage.StageCandidate, Reason: storage.ReasonKlineClose,

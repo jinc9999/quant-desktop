@@ -59,7 +59,8 @@ const strategyParams = ref({
   smartSizeBoundary: 2.5,      // 爆拉桶边界（%）
   // 路1 收盘判定出场（2026-08-14 全周期复验定案）：盘中触发止损=破产，收盘判定+8%灾难硬止损=正收益
   exitOnClose: false,          // 收盘判定出场：false=盘中触发（A/B 默认） true=收盘判定（D 默认）
-  hardStopPct: 0               // 灾难硬止损（%）：ExitOnClose 时 D 默认 8；0=关闭
+  hardStopPct: 0,              // 灾难硬止损（%）：ExitOnClose 时 D 默认 8；0=关闭
+  wickMarkDev: 0               // 防插针标记价可信度（%）：收盘价 vs 标记价收盘价偏差超阈值不开仓；D 默认 1.0；0=关闭
 });
 
 // 运行状态

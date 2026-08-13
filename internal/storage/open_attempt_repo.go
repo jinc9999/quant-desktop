@@ -58,6 +58,7 @@ const (
 	Reason24hGain         = "24h_gain"          // 24h 涨幅门槛
 	ReasonRank            = "rank"              // 24h 涨幅排名过滤
 	ReasonPullback        = "pullback"          // 山顶过滤器（距 24h 高点回撤过大）
+	ReasonMarkDev         = "mark_dev"          // 标记价可信度过滤：收盘价 vs 标记价收盘价偏差超阈值（防插针）
 	ReasonVolume          = "volume"            // 成交额校验不满足
 	ReasonFuturesOnly     = "futures_only"      // 无合约交易对
 	ReasonRoundZero       = "round_zero"        // 取整后数量为 0
@@ -84,6 +85,7 @@ var RuleBlockReasons = map[string]bool{
 	Reason24hGain:         true,
 	ReasonRank:            true,
 	ReasonPullback:        true,
+	ReasonMarkDev:         true,
 	ReasonVolume:          true,
 	ReasonFuturesOnly:     true,
 	ReasonRoundZero:       true,

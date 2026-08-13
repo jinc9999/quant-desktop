@@ -1336,6 +1336,7 @@ var ruleReasonCN = map[string]string{
 	"24h_gain":          "24h涨幅不足",
 	"rank":              "24h涨幅排名未通过",
 	"pullback":          "山顶过滤器",
+	"mark_dev":          "标记价偏差过滤（防插针）",
 	"volume":            "成交额不足",
 	"futures_only":      "无合约交易对",
 	"round_zero":        "取整后数量为0",
