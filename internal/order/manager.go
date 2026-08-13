@@ -162,9 +162,16 @@ func (m *Manager) PlaceStopOrders(ctx context.Context, pos *storage.Position, cf
 
 	// 2. 计算固定止损触发价与跟踪止盈激活价（含防 -2021 钳制，见 computeStopPrices）。
 	// 钳制基准优先用标记价（币安条件单按标记价判断 -2021），失败回退最新价。
+	// 注意：demo 平台标记价偶发失真（与最新价差可达 10%+，AKEUSDT 案例触发价被压到 entry 的 89% 导致爆仓）。
+	// 标记价与最新价偏差 >1.5% 时判定失真，回退用最新价钳制。
 	clampBase := currentPrice
 	if mark, merr := m.client.GetMarkPrice(ctx, pos.Symbol); merr == nil && mark > 0 {
-		clampBase = mark
+		if currentPrice <= 0 || math.Abs(mark-currentPrice)/currentPrice <= 0.015 {
+			clampBase = mark
+		} else {
+			log.Printf("[ORDER] ⚠ %s 标记价与最新价偏差 %.2f%%（标记 %.6f / 最新 %.6f），疑似 demo 失真，按最新价钳制",
+				pos.Symbol, math.Abs(mark-currentPrice)/currentPrice*100, mark, currentPrice)
+		}
 	}
 	stopPrice, activationPrice := computeStopPrices(
 		pos.Side, pos.EntryPrice, cfg.StopLossPct, cfg.TrailingActivation, clampBase,

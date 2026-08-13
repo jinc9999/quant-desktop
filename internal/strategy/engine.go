@@ -579,12 +579,17 @@ func (e *Engine) ensureProtectionOrders(ctx context.Context, priceMap map[string
 	}
 	for i := range positions {
 		pos := &positions[i]
-		if e.hasActiveStopOrders(pos.ID) {
-			continue
-		}
 		price, ok := priceMap[pos.Symbol]
 		if !ok || price <= 0 {
 			continue // 无实时价：不挂（防 -2021），本地 monitor 继续保护
+		}
+		// 失真条件单校正：已有止损触发价与 entry×0.97 偏差 >5%（demo 标记价失真历史问题）→ 撤掉按现价重挂
+		if e.hasDistortedStopOrder(pos) {
+			log.Printf("[Strategy] %s 持仓#%d 检测到失真止损触发价，取消并按现价 %.6f 重挂", pos.Symbol, pos.ID, price)
+			_ = e.orderMgr.CancelRelatedOrders(ctx, pos.ID)
+		}
+		if e.hasActiveStopOrders(pos.ID) {
+			continue
 		}
 		log.Printf("[Strategy] %s 持仓#%d 无保护委托，按现价 %.6f 补挂止损/跟踪条件单",
 			pos.Symbol, pos.ID, price)
@@ -592,6 +597,26 @@ func (e *Engine) ensureProtectionOrders(ctx context.Context, priceMap map[string
 			log.Printf("[Strategy] %s 持仓#%d 补挂条件单失败: %v", pos.Symbol, pos.ID, err)
 		}
 	}
+}
+
+// hasDistortedStopOrder 判断持仓已有止损触发价是否失真（与 entry×0.97 偏差 >5%）。
+// demo 标记价失真会把止损触发价压到极低（AKEUSDT 案例 entry 的 89%），导致止损形同虚设。
+func (e *Engine) hasDistortedStopOrder(pos *storage.Position) bool {
+	orders, err := e.db.GetOrdersByPosition(pos.ID)
+	if err != nil {
+		return false
+	}
+	expected := pos.EntryPrice * (1 - e.cfg.StopLossPct)
+	for _, o := range orders {
+		if o.OrderType == "STOP_MARKET" &&
+			(o.Status == "NEW" || o.Status == "PARTIALLY_FILLED") &&
+			o.StopPrice != nil {
+			if math.Abs(*o.StopPrice-expected) > expected*0.05 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // fetchTickers 获取全市场行情（P2）。
