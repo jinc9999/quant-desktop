@@ -27,6 +27,10 @@ const latest = computed(() => {
 
 const sim = computed(() => latest.value?.meta.sim || null);
 const buckets = computed<any[]>(() => latest.value?.meta.buckets || []);
+const rejects = computed<any[]>(() => latest.value?.meta.rejects || []);
+const gap = computed<any[]>(() => latest.value?.meta.gap || []);
+const reasonLabel = (r: string) =>
+  ({ maxpos: "全局10仓上限", cooldown: "冷却期内", no_active: "持仓未激活(无法追单)", addon_limit: "追单达上限" }[r] || r);
 
 /** 策略模拟指标行 */
 const simRows = computed<any[]>(() => {
@@ -127,6 +131,36 @@ onUnmounted(() => {
         <div v-else class="empty-state">三桶分析每小时自动生成，暂无数据不影响策略运行</div>
       </div>
 
+      <!-- 板块三：逐单明细 -->
+      <div class="summary-section">
+        <div class="section-title">逐单明细（可开未做 & 拦截）</div>
+        <div class="rule-note">
+          执行损耗 = 模拟规则可开但实际未成交（demo/tick 粒度/零星失败）；拦截 = 策略规则内未开（该挡）。
+          完整明细每小时自动更新。
+        </div>
+        <h4 class="sub-title">执行损耗（{{ gap.length }} 单）</h4>
+        <el-table v-if="gap.length" :data="gap" size="small" stripe>
+          <el-table-column prop="symbol" label="币种" min-width="110" />
+          <el-table-column prop="seq" label="第几单" width="70" align="right" />
+          <el-table-column prop="time" label="时间" width="70" />
+          <el-table-column prop="bucket" label="桶" width="90" />
+          <el-table-column label="类型" width="80">
+            <template #default="{ row }">{{ row.addOn ? "追单" : "首仓" }}</template>
+          </el-table-column>
+        </el-table>
+        <h4 class="sub-title">拦截明细（{{ rejects.length }} 单）</h4>
+        <el-table v-if="rejects.length" :data="rejects" size="small" stripe>
+          <el-table-column prop="symbol" label="币种" min-width="110" />
+          <el-table-column prop="seq" label="第几信号" width="80" align="right" />
+          <el-table-column prop="time" label="时间" width="70" />
+          <el-table-column prop="bucket" label="桶" width="90" />
+          <el-table-column label="原因" min-width="180">
+            <template #default="{ row }">{{ reasonLabel(row.reason) }}</template>
+          </el-table-column>
+        </el-table>
+        <div v-if="!rejects.length && !gap.length" class="empty-state">逐单明细每小时自动生成</div>
+      </div>
+
       <div class="rule-note footnote">
         口径：按 5m 收盘/高低价近似回放，未含手续费与滑点，用于复盘当日策略环境，非实盘对账。
       </div>
@@ -164,6 +198,12 @@ onUnmounted(() => {
 }
 .summary-section {
   margin-bottom: 20px;
+}
+.sub-title {
+  margin: 12px 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--quant-text-secondary, #9ca3af);
 }
 .section-title {
   font-size: 14px;

@@ -1445,6 +1445,21 @@ func analyzeStrategy(proxy, clientDB string) error {
 
 	// 写入 daily_summaries（type=strategy），供前端"每日策略总结"页展示
 	if clientDB != "" {
+		rejectList := make([]map[string]interface{}, 0, len(rejects))
+		for _, r := range rejects {
+			rejectList = append(rejectList, map[string]interface{}{
+				"symbol": r.symbol, "time": r.timeStr, "bucket": r.bucket, "reason": r.reason, "seq": r.seq,
+			})
+		}
+		gapSeq := map[string]int{}
+		gapList := make([]map[string]interface{}, 0, len(gap))
+		for _, g := range gap {
+			gapSeq[g.symbol]++
+			gapList = append(gapList, map[string]interface{}{
+				"symbol": g.symbol, "time": time.UnixMilli(g.ts).In(beijing).Format("15:04"),
+				"bucket": g.bucket, "seq": gapSeq[g.symbol], "addOn": g.addOn,
+			})
+		}
 		sim := map[string]interface{}{
 			"signals": totalSignals, "opens": totalOpens, "addons": totalAddons,
 			"closed": len(allClosed), "winRate": round2(safeDiv(float64(wins), float64(n))*100),
@@ -1457,7 +1472,7 @@ func analyzeStrategy(proxy, clientDB string) error {
 			},
 			"gap": gapCnt,
 		}
-		if err := writeStrategySummary(clientDB, sim, bucketList); err != nil {
+		if err := writeStrategySummary(clientDB, sim, bucketList, rejectList, gapList); err != nil {
 			log.Printf("⚠ 写入策略总结失败: %v", err)
 		} else {
 			log.Printf("✅ 已写入每日策略总结（%s）", clientDB)
@@ -1510,13 +1525,15 @@ func safeDiv(a, b float64) float64 {
 }
 
 // writeStrategySummary 将策略口径模拟与三桶分析写入客户端库 daily_summaries（type=strategy）
-func writeStrategySummary(clientDB string, sim map[string]interface{}, buckets []map[string]interface{}) error {
+func writeStrategySummary(clientDB string, sim map[string]interface{}, buckets []map[string]interface{}, rejects, gap []map[string]interface{}) error {
 	db, err := sql.Open("sqlite3", "file:"+clientDB+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	meta, _ := json.Marshal(map[string]interface{}{"sim": sim, "buckets": buckets})
+	meta, _ := json.Marshal(map[string]interface{}{
+		"sim": sim, "buckets": buckets, "rejects": rejects, "gap": gap,
+	})
 	now := time.Now().In(beijing)
 	date := now.Format("2006-01-02")
 	var id int64
