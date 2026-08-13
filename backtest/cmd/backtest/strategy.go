@@ -41,6 +41,7 @@ type StrategyConfig struct {
 	PositionMarginUSDT   float64 // 每仓保证金(USDT)
 	CooldownMs           int64   // 平仓后冷却(ms)
 	StopLossPct          float64 // 止损比例(0.08 = 8%)
+	HardSLPct            float64 // 灾难硬止损（ExitClose 模式下盘中穿透该线即平仓兜底；0=关闭）
 	TrailingActivation   float64 // 跟踪止盈激活涨幅(0.03 = 3%)
 	TrailingCallback     float64 // 跟踪止盈回撤比例(0.02 = 2%)
 	EnableShort          bool    // 是否允许做空
@@ -2007,8 +2008,11 @@ func (e *Engine) monitorPositions(bars map[string]*bar) {
 					}
 				}
 				if e.cfg.ExitClose {
-					// 收盘价模式（近似 aooo 的 tick 采样）: 仅当片收盘价触发，不捕捉片内插针
-					if b.close <= stop {
+					// 收盘价模式（乐观：仅片收盘价触发，不捕捉片内插针）；可叠加灾难硬止损兜底
+					if e.cfg.HardSLPct > 0 && b.low <= p.EntryPrice*(1-e.cfg.HardSLPct) {
+						exitPx = min2(b.open, p.EntryPrice*(1-e.cfg.HardSLPct))
+						reason = "HARD_STOP"
+					} else if b.close <= stop {
 						exitPx = min2(b.open, stop)
 						reason = "STOP_LOSS"
 					} else if p.TPPct > 0 && b.close >= tp {
@@ -2094,8 +2098,11 @@ func (e *Engine) monitorPositions(bars map[string]*bar) {
 					}
 				}
 				if e.cfg.ExitClose {
-					// 收盘价模式（近似 aooo 的 tick 采样）
-					if b.close >= stop {
+					// 收盘价模式（乐观：仅片收盘价触发，不捕捉片内插针）；可叠加灾难硬止损兜底
+					if e.cfg.HardSLPct > 0 && b.high >= p.EntryPrice*(1+e.cfg.HardSLPct) {
+						exitPx = max2(b.open, p.EntryPrice*(1+e.cfg.HardSLPct))
+						reason = "HARD_STOP"
+					} else if b.close >= stop {
 						exitPx = max2(b.open, stop)
 						reason = "STOP_LOSS"
 					} else if p.TPPct > 0 && b.close <= tp {

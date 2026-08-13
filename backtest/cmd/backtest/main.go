@@ -478,6 +478,7 @@ type Metrics struct {
 	SharpeRatio       float64
 	AvgHoldBars       float64
 	StopLossCount     int
+	HardStopCount     int
 	TrailingCount     int
 	TakeProfitCount   int     // 固定止盈平仓数
 	MaxHoldCount      int     // 超时平仓数
@@ -530,6 +531,8 @@ func computeMetrics(e *Engine) Metrics {
 		switch t.Reason {
 		case "STOP_LOSS":
 			m.StopLossCount++
+		case "HARD_STOP":
+			m.HardStopCount++
 		case "TRAILING_STOP":
 			m.TrailingCount++
 		case "TAKE_PROFIT":
@@ -687,7 +690,7 @@ func printReport(m Metrics, cfg *StrategyConfig, trades []*Trade) {
 	fmt.Printf("平均盈利: %.2fU  平均亏损: %.2fU\n", m.AvgWin, m.AvgLoss)
 	fmt.Printf("盈亏比(Profit Factor): %.2f\n", m.ProfitFactor)
 	fmt.Printf("平均持仓: %.1f 根 5m K 线\n", m.AvgHoldBars)
-	fmt.Printf("平仓原因: 止损 %d 笔 / 固定止盈 %d 笔 / 跟踪止盈 %d 笔 / 超时 %d 笔", m.StopLossCount, m.TakeProfitCount, m.TrailingCount, m.MaxHoldCount)
+	fmt.Printf("平仓原因: 止损 %d 笔 / 固定止盈 %d 笔 / 跟踪止盈 %d 笔 / 超时 %d 笔 / 灾难硬止损 %d 笔", m.StopLossCount, m.TakeProfitCount, m.TrailingCount, m.MaxHoldCount, m.HardStopCount)
 	if cfg.Mode == "v6" {
 		fmt.Printf(" / 波动率衰减 %d 笔 / 费率反转 %d 笔", m.ATRDecayCount, m.FundReversalCount)
 	}
@@ -746,6 +749,7 @@ func main() {
 	startFlag := flag.String("start", "", "回测起始日期 YYYY-MM-DD（默认不限制）")
 	endFlag := flag.String("end", "", "回测结束日期 YYYY-MM-DD（默认不限制）")
 	slFlag := flag.Float64("sl", 8.0, "止损比例 %%（默认 8）")
+	hardSlFlag := flag.Float64("hard-sl", 0, "灾难硬止损 %%（0=关闭；ExitClose 模式下盘中穿透该线即平仓兜底）")
 	actFlag := flag.Float64("act", 3.0, "跟踪止盈激活涨幅 %%（默认 3）")
 	cbFlag := flag.Float64("cb", 2.0, "跟踪止盈回调 %%（默认 2）")
 	surgeFlag := flag.Float64("surge", 1.8, "放量倍数阈值（默认 1.8）")
@@ -875,6 +879,7 @@ func main() {
 	cfg.MinGainPct = *gainFlag
 	cfg.MinQuoteVolume = *minVolFlag
 	cfg.StopLossPct = *slFlag / 100
+	cfg.HardSLPct = *hardSlFlag / 100
 	cfg.TrailingActivation = *actFlag / 100
 	cfg.TrailingCallback = *cbFlag / 100
 	cfg.VolumeSurgeThreshold = *surgeFlag
