@@ -76,7 +76,6 @@ type Engine struct {
 	tickCount          atomic.Int64
 	tickErrorCount     atomic.Int64                  // Tick 执行失败累计次数
 	startTime          time.Time                     // 引擎启动时间
-	warmupLogged       bool                          // 预热期提示是否已打印（避免每 tick 刷屏）
 	cooldown           map[string]time.Time          // symbol -> 平仓时间，冷却期内不再开仓
 	cooldownReason     map[string]string             // symbol -> 最近平仓原因（分原因冷却: 移动止盈可短冷却）
 	failedOpen         map[string]time.Time          // symbol -> 开仓失败时间，短期内不再重试
@@ -494,8 +493,8 @@ func (e *Engine) runOnce(ctx context.Context) {
 	var klineOpen map[string]float64
 	if e.cfg.SignalMode == "kline" {
 		klineOpen = e.buildKlineOpenMap(ctx, tickers, now, blockedNew)
-		// confirmWindowMs 在 kline 模式保留：供放量确认使用（最近 N 分钟成交量 vs 之前窗口）。
-		// 价格二次确认（ConfirmThreshold）对 kline 模式保持关闭，由 screener 内 !klineMode 守卫保证。
+		// confirmWindowMs 仅供 sliding 模式的价格二次确认使用；kline 模式不触发。
+		// 放量确认已移除（2026-08-13 回测验证负贡献），volumeSurgeThreshold 实参传 0 占位。
 	}
 	// 智慧版：从 K 线缓存构建 5m 爆拉因子表（SmartSizeMode=0 时为 nil，开仓逻辑不受影响）
 	if e.cfg.SmartSizeMode > 0 {
@@ -508,7 +507,7 @@ func (e *Engine) runOnce(ctx context.Context) {
 		e.smart5m = nil
 	}
 	candidates := ScreenSliding(e.window, filterTickers(tickers, blockedNew), priceMap, e.cfg.MinGainPct, e.cfg.Min24hGainPct, e.cfg.MinQuoteVolume, e.cfg.TopN, now,
-		e.cfg.EnableShort, confirmWindowMs, e.cfg.ConfirmThreshold, e.cfg.VolumeSurgeThreshold,
+		e.cfg.EnableShort, confirmWindowMs, e.cfg.ConfirmThreshold, 0,
 		e.cfg.SignalMode, klineOpen, e.cfg.MaxPullbackPct, rankOK)
 	screenDur := time.Since(screenStart)
 
@@ -1077,19 +1076,6 @@ func (e *Engine) openPositions(ctx context.Context, candidates []Candidate, pric
 	if len(candidates) == 0 {
 		return nil
 	}
-	// 启动预热保护：放量确认（最近 2 分钟 vs 前 13 分钟成交量速率）依赖本地滑动窗口，
-	// 该窗口从启动后才开始逐 tick 采样，需约 13~15 分钟才有完整前窗；窗口未满时放量检查
-	// fail-open（算不出就放行），等于少一道过滤。预热期内禁止一切开仓（含加仓）。
-	if e.cfg.WarmupMin > 0 && time.Since(e.startTime) < time.Duration(e.cfg.WarmupMin)*time.Minute {
-		if !e.warmupLogged {
-			e.warmupLogged = true
-			remain := time.Duration(e.cfg.WarmupMin)*time.Minute - time.Since(e.startTime)
-			log.Printf("[Strategy] 启动预热中（%d 分钟）：放量窗口未满暂不开仓，剩余 %v",
-				e.cfg.WarmupMin, remain.Round(time.Second))
-		}
-		return nil
-	}
-
 	// 已持有币种集合（去重，避免同一 Tick 内对同一币重复开仓）
 	held := make(map[string]bool, len(openPositions))
 	// 持仓明细：用于追加仓位判定（首仓入场价 / 同币持仓数 / 方向 / 移动止盈激活状态）
@@ -2290,15 +2276,8 @@ func (e *Engine) GetStartTime() time.Time {
 	return e.startTime
 }
 
-// GetWarmupRemainingSec 返回启动预热剩余秒数（0 = 不在预热期）
-// 预热期内禁止开仓（放量窗口未满），前端据此显示"预热中"状态点。
+// GetWarmupRemainingSec 返回启动预热剩余秒数。
+// 放量确认已移除（2026-08-13 回测验证负贡献），恒为 0，保留方法兼容前端状态字段。
 func (e *Engine) GetWarmupRemainingSec() int64 {
-	if e.cfg.WarmupMin <= 0 {
-		return 0
-	}
-	remain := time.Duration(e.cfg.WarmupMin)*time.Minute - time.Since(e.startTime)
-	if remain <= 0 {
-		return 0
-	}
-	return int64(remain.Seconds())
+	return 0
 }

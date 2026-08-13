@@ -104,14 +104,6 @@ func migratePersistedStrategyConfig(raw string) (bool, binance.StrategyConfig, e
 		saved.RankParam = dft.RankParam
 		migrated = true
 	}
-	// 启动预热字段迁移：旧持久化配置缺少 warmupMin 键时补默认值（15 分钟）。
-	// 放量确认依赖启动后本地成交量采样窗口（前 13+2 分钟），窗口未满时放量检查 fail-open；
-	// 预热保护可避免启动初期少一道放量过滤（A/B 策略共用）。
-	if !bytes.Contains([]byte(raw), []byte(`"warmupMin"`)) {
-		dft := binance.DefaultStrategyConfig()
-		saved.WarmupMin = dft.WarmupMin
-		migrated = true
-	}
 	// 策略标识迁移：旧持久化配置缺少 strategyName/strategyVersion 键时补默认
 	// （A/B 版构建期默认值不同，升级后各自显示自己的策略名与定版号）。
 	if !bytes.Contains([]byte(raw), []byte(`"strategyName"`)) {
@@ -146,10 +138,6 @@ func migratePersistedStrategyConfig(raw string) (bool, binance.StrategyConfig, e
 	}
 	if saved.CooldownMin == 60 {
 		saved.CooldownMin = 30
-		migrated = true
-	}
-	if saved.VolumeSurgeThreshold == 1.5 {
-		saved.VolumeSurgeThreshold = 1.2
 		migrated = true
 	}
 	return migrated, saved, nil

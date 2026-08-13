@@ -118,9 +118,6 @@ func TestDefaultStrategyConfig(t *testing.T) {
 	if cfg.ConfirmThreshold != 0 {
 		t.Errorf("ConfirmThreshold: 期望 0（kline 模式关闭价格二次确认）, 实际 %f", cfg.ConfirmThreshold)
 	}
-	if cfg.VolumeSurgeThreshold != 1.2 {
-		t.Errorf("VolumeSurgeThreshold: 期望 1.2（S01 v2 放量确认）, 实际 %f", cfg.VolumeSurgeThreshold)
-	}
 	if cfg.CooldownAfterTrailingMin != 15 {
 		t.Errorf("CooldownAfterTrailingMin: 期望 15（S01 v2 止盈后冷却）, 实际 %d", cfg.CooldownAfterTrailingMin)
 	}
@@ -904,9 +901,6 @@ func TestDefaultStrategyConfig_NewFields(t *testing.T) {
 	}
 	if cfg.ConfirmThreshold != 0 {
 		t.Errorf("ConfirmThreshold: 期望 0（kline 模式关闭价格二次确认）, 实际 %f", cfg.ConfirmThreshold)
-	}
-	if cfg.VolumeSurgeThreshold != 1.2 {
-		t.Errorf("VolumeSurgeThreshold: 期望 1.2（S01 v2 放量确认）, 实际 %f", cfg.VolumeSurgeThreshold)
 	}
 	if cfg.SignalMode != "kline" {
 		t.Errorf("SignalMode: 期望 kline, 实际 %s", cfg.SignalMode)

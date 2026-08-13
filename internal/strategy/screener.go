@@ -33,7 +33,7 @@ type Candidate struct {
 // enableShort: 是否启用做空筛选
 // confirmWindowMs: 短窗口确认时长（毫秒），0=关闭二次确认
 // confirmThreshold: 短窗口涨幅确认阈值（%），0=关闭
-// volumeSurgeThreshold: 成交量放大倍数阈值，0=关闭
+// volumeSurgeThreshold: 已废弃（2026-08-13 回测验证负贡献，放量确认移除），保留参数仅为兼容调用签名，恒传 0
 // signalMode: 信号模式（"kline" 或 "sliding"，其他值按 sliding 处理）
 // klineOpen: symbol -> 当前 K 线开盘价（kline 模式用；缺失的币保守跳过）
 // maxPullbackPct: 山顶过滤器（%）：当前价距 24h 最高/最低价回撤超过该值不追，0=关闭
@@ -137,20 +137,6 @@ func ScreenSliding(window *SlidingWindow, tickers []binance.Ticker, priceMap map
 			}
 			if side == "SHORT" && recentGain > -confirmThreshold {
 				continue // 做空：短窗口跌幅不够
-			}
-		}
-
-		// 放量确认（两种信号模式均生效）：最近 confirmWindowMs 窗口的成交量速率
-		// >= 之前窗口的 N 倍才追（防无量假突破）。kline 模式同样可用：
-		// 滑动窗口始终在采样，volume 数据齐全。
-		if volumeSurgeThreshold > 0 && confirmWindowMs > 0 {
-			// 之前窗口 = 总窗口 - 短窗口
-			priorMs := window.windowMs - confirmWindowMs
-			if priorMs > 0 {
-				surge, surgeReady := window.RecentVolumeSurge(t.Symbol, now, confirmWindowMs, priorMs)
-				if surgeReady && surge < volumeSurgeThreshold {
-					continue // 成交量不够，跳过
-				}
 			}
 		}
 

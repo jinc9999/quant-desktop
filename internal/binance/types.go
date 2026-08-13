@@ -151,7 +151,6 @@ type StrategyConfig struct {
 	MaxAddOnsPerSymbol       int     `json:"maxAddOnsPerSymbol"`       // 单币最大追加次数（默认 2 = 同币最多 1+2=3 仓；0=关闭追加）
 	ConfirmWindowMin         float64 `json:"confirmWindowMin"`         // 短窗口确认时长（分钟），0=关闭
 	ConfirmThreshold         float64 `json:"confirmThreshold"`         // 短窗口涨幅确认阈值（%），0=关闭
-	VolumeSurgeThreshold     float64 `json:"volumeSurgeThreshold"`     // 成交量放大倍数阈值，0=关闭
 	SignalMode               string  `json:"signalMode"`               // 信号模式：kline=15m K线实体实时检测（当前价相对K线开盘价），sliding=滑动窗口过程涨幅
 	MaxPullbackPct           float64 `json:"maxPullbackPct"`           // 山顶过滤器（%）：当前价距 24h 最高/最低价回撤超过该值不追（0=关闭）
 	TakeProfitPct            float64 `json:"takeProfitPct"`            // 固定止盈比例（0=关闭）：价格达到入场价*(1+该比例)先止盈，与跟踪止盈先到先平
@@ -159,7 +158,6 @@ type StrategyConfig struct {
 	EnableNewListingFilter   bool    `json:"enableNewListingFilter"`   // 新币过滤开关：过滤上市天数 <= NewListingMinDays 的新上市合约（默认开启）
 	NewListingMinDays        int     `json:"newListingMinDays"`        // 新币过滤天数阈值（天）：上市天数小于等于该值的合约不参与任何开仓（默认 60，0=关闭）
 	CooldownAfterTrailingMin int     `json:"cooldownAfterTrailingMin"` // 移动止盈平仓后的冷却分钟数（<0=统一用 CooldownMin；0=立即再入；默认 15）
-	WarmupMin                int     `json:"warmupMin"`                // 启动预热分钟数（默认 15，0=关闭）：放量确认依赖本地成交量采样窗口，启动后需约 15 分钟才完整，预热期内禁止开仓
 	// ===== 智慧版 D（5m 爆拉力度仓位，2026-08-13 三关验证通过）=====
 	// 回测口径：A 骨架 + 当前 15m 周期内最大 5m 收盘涨幅分桶调仓
 	//   >=SmartSizeBoundary%（默认 2.5）爆拉 → 仓位 ×SmartSizeHigh（默认 1.5）
@@ -259,7 +257,6 @@ func DefaultStrategyConfig() StrategyConfig {
 		MaxAddOnsPerSymbol:     2,       // 单币最多追加 2 次 = 同币 3 仓（2026-08-08 数据验证：2 次追加 +1,408U / 回撤 5.62%；第 4 仓边际递减 +519U）
 		ConfirmWindowMin:       2.0,     // 放量确认窗口 2 分钟：最近 2 分钟成交量速率 vs 之前 13 分钟
 		ConfirmThreshold:       0,       // 价格二次确认对 kline 模式关闭（K 线实体确认已过滤噪音）
-		VolumeSurgeThreshold:   1.2,     // 放量确认 1.2x（S01 v2：矩阵验证 1.5→1.2 小幅改善 +479U）
 		SignalMode:             "kline", // 15m K 线实体实时检测（默认）
 		MaxPullbackPct:         9.0,     // 距 24h 最高/最低回撤超 9% 不追
 		TakeProfitPct:          0,       // 固定止盈 0=关闭（纯跟踪，2026-08-04 用户否决 10% 封顶）；>0 时价格达到入场价*(1+该比例) 先止盈
@@ -272,9 +269,6 @@ func DefaultStrategyConfig() StrategyConfig {
 		// 实盘 tick 为 15 秒，取 15 分钟在回测口径内（0 与 15 分钟在 5m 回测粒度下差异 <0.3%）且
 		// 保留对 15 秒级极端追单的保护。止损后 30 分钟冷却防止追跌。
 		CooldownAfterTrailingMin: 15,
-		// 启动预热 15 分钟：放量确认（最近 2 分钟 vs 前 13 分钟）依赖启动后本地成交量采样窗口，
-		// 窗口未满时放量检查 fail-open（算不出就放行），预热期内禁止开仓可避免少一道放量过滤。
-		WarmupMin: 15,
 		// 智慧版 5m 爆拉仓位（D 版构建默认 1；A/B 保持 0=关闭）
 		SmartSizeMode:     parseIntDefault(defaultSmartSizeMode, 0),
 		SmartSizeHigh:     parseFloatDefault(defaultSmartSizeHigh, 1.5),

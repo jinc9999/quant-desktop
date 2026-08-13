@@ -9,7 +9,6 @@ func LockedProfileConfig(profile string) StrategyConfig {
 		StrategyVersion:         "C1.0_20260812",
 		ScanIntervalSec:         15,
 		Timeframe:               "15m",
-		WarmupMin:               15,   // 启动预热 15 分钟
 		TopN:                    10,   // 候选数量 Top 10
 		MaxOpenPositions:        15,   // 最大同时持仓 15
 		Leverage:                10,   // 10x 杠杆
@@ -26,7 +25,6 @@ func LockedProfileConfig(profile string) StrategyConfig {
 		MaxAddOnsPerSymbol:      2,    // 同币最多 1+2=3 仓
 		ConfirmWindowMin:        2.0,
 		ConfirmThreshold:        0,
-		VolumeSurgeThreshold:    1.2,
 		SignalMode:              "kline",
 		MaxPullbackPct:          9.0,
 		TakeProfitPct:           0,    // 固定止盈关闭（纯跟踪）

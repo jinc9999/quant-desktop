@@ -309,38 +309,6 @@ func TestRecentGainPct(t *testing.T) {
 	}
 }
 
-// TestRecentVolumeSurge 验证成交量放大倍数计算
-// 前 12 分钟每 30 秒成交量 1000，最近 3 分钟每 30 秒成交量 3000（放量 3 倍）
-// 边界取「最后一个 ts <= cutoff 的采样点」的累计值：recentVol=15000, priorVol=20000
-// surge = (15000/180000) / (20000/720000) = 3.0
-func TestRecentVolumeSurge(t *testing.T) {
-	w := NewSlidingWindow(15*60*1000, 30000)
-	now := int64(1000000)
-
-	// 前 12 分钟：每 30 秒成交量 1000（累计成交额每次增加 1000）
-	cumVol := 0.0
-	for i := 0; i < 24; i++ {
-		ts := now - int64(30-i)*30000
-		cumVol += 1000
-		w.Sample("VOLUSDT", 100.0, cumVol, ts)
-	}
-	// 最近 3 分钟：每 30 秒成交量 3000（放量 3 倍）
-	for i := 0; i < 6; i++ {
-		ts := now - int64(6-i)*30000
-		cumVol += 3000
-		w.Sample("VOLUSDT", 100.0, cumVol, ts)
-	}
-
-	surge, ready := w.RecentVolumeSurge("VOLUSDT", now, 180000, 720000)
-	if !ready {
-		t.Fatal("期望 ready=true")
-	}
-	// surge = (15000/180000) / (20000/720000) = 3.0（放量 3 倍）
-	if surge < 2.5 || surge > 3.5 {
-		t.Errorf("VolumeSurge = %f, 期望约 3.0", surge)
-	}
-}
-
 // TestSample_BackfillCache 验证 Sample 和 BackfillCache 的基本功能
 // BackfillCache 仅在无数据时写入初始点，已有数据时不覆盖
 func TestSample_BackfillCache(t *testing.T) {

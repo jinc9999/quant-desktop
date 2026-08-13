@@ -27,7 +27,6 @@ const strategyParams = ref({
   min24hGainPct: 4.0,
   rankMode: 0,                 // 24h 涨幅排名过滤：0=关闭 1=前N% 2=前M名（替代固定 24h 涨幅门槛）
   rankParam: 20,               // 排名参数：模式1=百分位(%) 模式2=名数
-  warmupMin: 15,               // 启动预热分钟数：放量窗口需约 15 分钟积累，预热期内不开仓（0=关闭）
   minQuoteVolume: 10000000,     // 最小成交额(USDT)：24h 累计成交额下限 1000 万（2026-08-07 10 万→1000 万）
   topN: 10,
   maxOpenPositions: 10,         // 最大同时持仓数（2026-08-04 5→10）
@@ -48,7 +47,6 @@ const strategyParams = ref({
   maxAddOnsPerSymbol: 2,       // 单币最大追加次数（默认 2 = 同币最多 1+2=3 仓；0=关闭追加）
   confirmWindowMin: 2,         // 放量确认窗口（分钟）：最近 N 分钟成交量 vs 之前窗口
   confirmThreshold: 0,         // 短窗口涨幅确认阈值（%），kline 模式下不生效
-  volumeSurgeThreshold: 1.2,   // 成交量放大倍数阈值（0=关闭；S01 v2: 1.5→1.2）
   signalMode: "kline",         // 信号模式：kline=15m K线实体实时检测 / sliding=滑动窗口（旧版）
   maxPullbackPct: 9.0,         // 山顶过滤器（%）：距 24h 最高/最低回撤超此值不追，0=关闭
   enableNewListingFilter: true, // 新币过滤：排除上市 60 天内的新合约（无历史数据、波动剧烈）
@@ -102,7 +100,6 @@ function toBackendConfig() {
     min24hGainPct: p.min24hGainPct,
     rankMode: p.rankMode,
     rankParam: p.rankParam,
-    warmupMin: p.warmupMin,
     minQuoteVolume: p.minQuoteVolume,
     topN: p.topN,
     maxOpenPositions: p.maxOpenPositions,
@@ -123,7 +120,6 @@ function toBackendConfig() {
     maxAddOnsPerSymbol: p.maxAddOnsPerSymbol,
     confirmWindowMin: p.confirmWindowMin,
     confirmThreshold: p.confirmThreshold,
-    volumeSurgeThreshold: p.volumeSurgeThreshold,
     signalMode: p.signalMode,
     maxPullbackPct: p.maxPullbackPct,
     enableNewListingFilter: p.enableNewListingFilter,
@@ -151,7 +147,6 @@ async function loadConfig() {
       min24hGainPct: cfg.min24hGainPct ?? 5.0,
       rankMode: cfg.rankMode ?? 0,
       rankParam: cfg.rankParam ?? 20,
-      warmupMin: cfg.warmupMin ?? 15,
       minQuoteVolume: cfg.minQuoteVolume,
       topN: cfg.topN ?? 8,
       maxOpenPositions: cfg.maxOpenPositions,
@@ -172,7 +167,6 @@ async function loadConfig() {
       maxAddOnsPerSymbol: cfg.maxAddOnsPerSymbol ?? 2,
       confirmWindowMin: cfg.confirmWindowMin ?? 2,
       confirmThreshold: cfg.confirmThreshold ?? 0,
-      volumeSurgeThreshold: cfg.volumeSurgeThreshold ?? 1.2,
       signalMode: cfg.signalMode ?? "kline",
       maxPullbackPct: cfg.maxPullbackPct ?? 9.0,
       enableNewListingFilter: cfg.enableNewListingFilter ?? true,
@@ -556,11 +550,6 @@ onUnmounted(() => {
               <el-input-number v-model="strategyParams.rankParam" :min="1" :max="100" :step="1" />
             </el-tooltip>
           </el-form-item>
-          <el-form-item label="启动预热(分钟)">
-            <el-tooltip content="程序启动后这段时间不开仓：放量确认（最近2分钟 vs 前13分钟）依赖本地成交量采样窗口，启动后需约15分钟才完整，窗口未满时放量检查自动放行，预热保护可避免少这道过滤（A/B 共用，0=关闭）" placement="top">
-              <el-input-number v-model="strategyParams.warmupMin" :min="0" :max="120" :step="5" />
-            </el-tooltip>
-          </el-form-item>
           <el-form-item label="信号模式">
             <el-tooltip content="kline=当前 15m K 线相对开盘价实时检测（真上涨确认，推荐）；sliding=滑动窗口过程涨幅（旧版，插针也算涨，易假信号）" placement="top">
               <el-select v-model="strategyParams.signalMode" style="width: 200px">
@@ -615,11 +604,6 @@ onUnmounted(() => {
           <el-form-item label="确认阈值(%)">
             <el-tooltip content="短窗口内最小涨跌幅，0=关闭二次确认" placement="top">
               <el-input-number v-model="strategyParams.confirmThreshold" :min="0" :max="10" :step="0.5" />
-            </el-tooltip>
-          </el-form-item>
-          <el-form-item label="放量倍数">
-            <el-tooltip content="最近成交量需达到之前的N倍，0=关闭" placement="top">
-              <el-input-number v-model="strategyParams.volumeSurgeThreshold" :min="0" :max="5" :step="0.1" />
             </el-tooltip>
           </el-form-item>
         </el-form>

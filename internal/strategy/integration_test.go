@@ -141,11 +141,6 @@ func TestBoundary_EmptyWindow(t *testing.T) {
 		t.Error("空窗口 RecentGainPct 期望 ready=false")
 	}
 
-	// 空窗口 RecentVolumeSurge
-	_, ready2 := w.RecentVolumeSurge("BTCUSDT", now, 180000, 720000)
-	if ready2 {
-		t.Error("空窗口 RecentVolumeSurge 期望 ready=false")
-	}
 }
 
 // TestBoundary_ZeroThreshold 验证阈值为 0 时关闭确认
