@@ -736,6 +736,9 @@ func main() {
 	collectCmd := flag.NewFlagSet("collect", flag.ExitOnError)
 	proxy := collectCmd.String("proxy", os.Getenv("HTTPS_PROXY"), "HTTP 代理地址")
 
+	analyzeCmd := flag.NewFlagSet("analyze", flag.ExitOnError)
+	analyzeProxy := analyzeCmd.String("proxy", os.Getenv("HTTPS_PROXY"), "HTTP 代理地址")
+
 	reportCmd := flag.NewFlagSet("report", flag.ExitOnError)
 	mode := reportCmd.String("mode", "SIMULATION", "SIMULATION / LIVE")
 	typ := reportCmd.String("type", "daily", "daily / weekly / monthly / yearly")
@@ -750,6 +753,11 @@ func main() {
 		collectCmd.Parse(os.Args[2:])
 		if err := collect(*proxy); err != nil {
 			log.Fatalf("采集失败: %v", err)
+		}
+	case "analyze":
+		analyzeCmd.Parse(os.Args[2:])
+		if err := analyzeBurst(*analyzeProxy); err != nil {
+			log.Fatalf("分析失败: %v", err)
 		}
 	case "report":
 		reportCmd.Parse(os.Args[2:])
@@ -766,4 +774,159 @@ func main() {
 		fmt.Println("未知命令:", os.Args[1])
 		os.Exit(1)
 	}
+}
+
+// analyzeBurst 复盘分析：今天每根"5m 单根实体≥2.5%"的爆拉之后，
+// 价格续涨情况 / 15m 累计是否突破 3% / 继续上涨幅度分布。
+func analyzeBurst(proxy string) error {
+	client := httpClient(proxy)
+	tickers, err := fetchTickers(client)
+	if err != nil {
+		return fmt.Errorf("拉取行情失败: %w", err)
+	}
+	now := time.Now().In(beijing)
+	dayStart := beijingDayStartUTC(now)
+
+	pool := make([]ticker24, 0, len(tickers))
+	for _, t := range tickers {
+		if t.QuoteVolume >= minPoolVol {
+			pool = append(pool, t)
+		}
+	}
+
+	type event struct {
+		symbol       string
+		burstGain    float64 // 爆拉 5m 实体 %
+		cycleOpen    float64 // 所在 15m 周期开盘价
+		cycleGain    float64 // 爆拉收盘时 15m 累计 %
+		maxGainAfter float64 // 爆拉后 6 根 5m 内相对爆拉收盘的最大涨幅 %
+		reach3       bool    // 爆拉后 15m 累计（含后续 3 根）达到 3%
+		endGain      float64 // 爆拉后 6 根 5m 收盘相对爆拉收盘 %
+	}
+	var events []event
+
+	for i, t := range pool {
+		if i >= 160 {
+			break
+		}
+		k5, err5 := fetchKlines(client, t.Symbol, "5m", 288)
+		if err5 != nil || len(k5) < 4 {
+			continue
+		}
+		k15, err15 := fetchKlines(client, t.Symbol, "15m", 96)
+		if err15 != nil {
+			continue
+		}
+		// 构建 15m 周期 open 查找（按时间）
+		for j := 1; j < len(k5)-6; j++ {
+			k := k5[j]
+			if k.openTime < dayStart || k.open <= 0 {
+				continue
+			}
+			burst := (k.close - k.open) / k.open * 100
+			if burst < 2.5 {
+				continue
+			}
+			// 所在 15m 周期 open
+			var co float64
+			for _, c := range k15 {
+				if c.openTime <= k.openTime {
+					co = c.open
+				} else {
+					break
+				}
+			}
+			if co <= 0 {
+				continue
+			}
+			cycleGain := (k.close - co) / co * 100
+			// 爆拉后 6 根 5m 的最高价/收盘
+			hmax, cend := k.close, k.close
+			for z := j + 1; z <= j+6 && z < len(k5); z++ {
+				if k5[z].high > hmax {
+					hmax = k5[z].high
+				}
+				cend = k5[z].close
+			}
+			maxGainAfter := (hmax - k.close) / k.close * 100
+			endGain := (cend - k.close) / k.close * 100
+			// 爆拉后 3 根内 15m 累计是否达 3%（后续 5m 最高 vs 周期 open）
+			reach3 := cycleGain >= 3
+			for z := j + 1; z <= j+3 && z < len(k5); z++ {
+				if k5[z].high >= co*1.03 {
+					reach3 = true
+					break
+				}
+			}
+			events = append(events, event{
+				symbol: t.Symbol, burstGain: burst, cycleOpen: co, cycleGain: cycleGain,
+				maxGainAfter: maxGainAfter, reach3: reach3, endGain: endGain,
+			})
+		}
+	}
+
+	if len(events) == 0 {
+		fmt.Println("今天没有 5m 爆拉事件")
+		return nil
+	}
+	// 汇总
+	symbols := map[string]bool{}
+	reach3N, reach3AtBurst, upN, flatN := 0, 0, 0, 0
+	upSum, reach3CycleSum := 0.0, 0.0
+	buckets := map[string]int{"≤0%(回落)": 0, "0~1%": 0, "1~3%": 0, "3~5%": 0, ">5%": 0}
+	for _, e := range events {
+		symbols[e.symbol] = true
+		if e.cycleGain >= 3 {
+			reach3AtBurst++
+		}
+		if e.reach3 {
+			reach3N++
+			reach3CycleSum += e.cycleGain
+		}
+		if e.maxGainAfter > 0 {
+			upN++
+			upSum += e.maxGainAfter
+		} else {
+			flatN++
+		}
+		switch {
+		case e.maxGainAfter <= 0:
+			buckets["≤0%(回落)"]++
+		case e.maxGainAfter < 1:
+			buckets["0~1%"]++
+		case e.maxGainAfter < 3:
+			buckets["1~3%"]++
+		case e.maxGainAfter < 5:
+			buckets["3~5%"]++
+		default:
+			buckets[">5%"]++
+		}
+	}
+	n := len(events)
+	pct := func(v int) string { return fmt.Sprintf("%.1f%%", float64(v)/float64(n)*100) }
+	fmt.Printf("\n===== 今日 5m 爆拉复盘（%s，池内成交额≥2000万）=====\n", now.Format("2006-01-02"))
+	fmt.Println(fmtTable([]string{"指标", "数值", "说明"}, [][]string{
+		{"爆拉事件", fmt.Sprintf("%d 币 / %d 次", len(symbols), n), "5m 单根实体≥2.5%"},
+		{"爆拉时已达标", fmt.Sprintf("%d 次（%s）", reach3AtBurst, pct(reach3AtBurst)), "爆拉收盘时该 15m 累计已≥3%"},
+		{"爆拉后达 3%", fmt.Sprintf("%d 次（%s）", reach3N, pct(reach3N)), "爆拉后 3 根 5m 内 15m 累计触及 3%"},
+		{"爆拉后续涨", fmt.Sprintf("%d 次（%s）", upN, pct(upN)), "爆拉后 6 根 5m 内最高价高于爆拉收盘"},
+		{"爆拉后回落", fmt.Sprintf("%d 次（%s）", flatN, pct(flatN)), "爆拉后未再创新高"},
+		{"平均续涨幅度", fmt.Sprintf("+%.2f%%", upSum/float64(maxInt(upN, 1))), "续涨事件平均最大涨幅"},
+	}))
+	fmt.Println("\n续涨幅度分布（相对爆拉收盘价，6 根 5m 内最高）:")
+	fmt.Println(fmtTable([]string{"区间", "次数", "占比"}, [][]string{
+		{"≤0%（回落）", fmt.Sprintf("%d", buckets["≤0%(回落)"]), pct(buckets["≤0%(回落)"])},
+		{"0~1%", fmt.Sprintf("%d", buckets["0~1%"]), pct(buckets["0~1%"])},
+		{"1~3%", fmt.Sprintf("%d", buckets["1~3%"]), pct(buckets["1~3%"])},
+		{"3~5%", fmt.Sprintf("%d", buckets["3~5%"]), pct(buckets["3~5%"])},
+		{">5%", fmt.Sprintf("%d", buckets[">5%"]), pct(buckets[">5%"])},
+	}))
+	return nil
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
