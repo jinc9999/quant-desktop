@@ -1443,6 +1443,115 @@ func (s *QuantService) GetOrderSyncStatus() map[string]interface{} {
 	return s.orderMgr.GetSyncStatus()
 }
 
+// GetWickPreventionData 插针预防模块数据：今日插针监控（按小时）+ 方案效果 + 建议列表。
+// 数据源（均为真实落库记录）：
+//   - open_attempts.reason=mark_dev：标记价可信度过滤拦截次数（防插针开仓）
+//   - trade_logs 含"插针守卫"：本地兜底前的多源验证拦下次数（疑似插针不平仓）
+//   - positions：今日平仓/止损次数（被动方案效果）
+func (s *QuantService) GetWickPreventionData() map[string]interface{} {
+	res := map[string]interface{}{"ok": false}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.db == nil {
+		res["message"] = "数据库未初始化"
+		return res
+	}
+	beijing := time.FixedZone("CST", 8*3600)
+	now := time.Now().In(beijing)
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, beijing).UnixMilli()
+
+	hourly := make([]map[string]interface{}, 0, 24)
+	markDevTotal, wickGuardTotal := 0, 0
+	for h := 0; h < 24; h++ {
+		hourly = append(hourly, map[string]interface{}{"hour": h, "markDev": 0, "wickGuard": 0})
+	}
+	// 标记价偏差过滤拦截（按北京小时）
+	rows, err := s.db.Conn.Query(
+		`SELECT ((ts/3600000)+8)%24, COUNT(*) FROM open_attempts
+		 WHERE ts>=? AND reason='mark_dev' GROUP BY ((ts/3600000)+8)%24`, dayStart)
+	if err == nil {
+		for rows.Next() {
+			var h, c int
+			if rows.Scan(&h, &c) == nil && h >= 0 && h < 24 {
+				hourly[h]["markDev"] = c
+				markDevTotal += c
+			}
+		}
+		rows.Close()
+	}
+	// 插针守卫拦下（按北京小时）
+	rows, err = s.db.Conn.Query(
+		`SELECT ((timestamp/3600000)+8)%24, COUNT(*) FROM trade_logs
+		 WHERE timestamp>=? AND message LIKE '%插针守卫%' GROUP BY ((timestamp/3600000)+8)%24`, dayStart)
+	if err == nil {
+		for rows.Next() {
+			var h, c int
+			if rows.Scan(&h, &c) == nil && h >= 0 && h < 24 {
+				hourly[h]["wickGuard"] = c
+				wickGuardTotal += c
+			}
+		}
+		rows.Close()
+	}
+	// 今日平仓 / 止损
+	closedTotal, stopLossTotal := 0, 0
+	if err := s.db.Conn.QueryRow(
+		`SELECT COUNT(*), COALESCE(SUM(CASE WHEN close_reason='STOP_LOSS' THEN 1 ELSE 0 END),0)
+		 FROM positions WHERE status='CLOSED' AND closed_at>=?`, dayStart).Scan(&closedTotal, &stopLossTotal); err != nil {
+		log.Printf("[Binding] 查询今日平仓统计失败: %v", err)
+	}
+	suggestions, err := s.db.ListWickSuggestions()
+	if err != nil {
+		log.Printf("[Binding] 查询插针建议失败: %v", err)
+		suggestions = []storage.WickSuggestion{}
+	}
+	res["ok"] = true
+	res["mode"] = s.mode
+	res["today"] = map[string]interface{}{
+		"markDevBlocks":  markDevTotal,
+		"wickGuardBlocks": wickGuardTotal,
+		"closedTotal":    closedTotal,
+		"stopLossTotal":  stopLossTotal,
+		"hourly":         hourly,
+	}
+	res["suggestions"] = suggestions
+	return res
+}
+
+// SubmitWickSuggestion 提交一条插针预防建议（默认待处理）
+func (s *QuantService) SubmitWickSuggestion(content string) map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.db == nil {
+		return map[string]interface{}{"ok": false, "message": "数据库未初始化"}
+	}
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return map[string]interface{}{"ok": false, "message": "建议内容不能为空"}
+	}
+	id, err := s.db.InsertWickSuggestion(content)
+	if err != nil {
+		return map[string]interface{}{"ok": false, "message": err.Error()}
+	}
+	return map[string]interface{}{"ok": true, "id": id}
+}
+
+// UpdateWickSuggestion 更新建议处理状态与备注（pending/adopted/rejected）
+func (s *QuantService) UpdateWickSuggestion(id int64, status, note string) map[string]interface{} {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.db == nil {
+		return map[string]interface{}{"ok": false, "message": "数据库未初始化"}
+	}
+	if status != storage.WickSuggestionPending && status != storage.WickSuggestionAdopted && status != storage.WickSuggestionRejected {
+		return map[string]interface{}{"ok": false, "message": "无效状态（pending/adopted/rejected）"}
+	}
+	if err := s.db.UpdateWickSuggestionStatus(id, status, strings.TrimSpace(note)); err != nil {
+		return map[string]interface{}{"ok": false, "message": err.Error()}
+	}
+	return map[string]interface{}{"ok": true}
+}
+
 // waitForEngineExit 等待所有策略引擎 goroutine 退出，超时返回 false。
 // 不持有 s.mu 的引擎 goroutine 不需要该锁，因此可在持有锁时调用。
 func (s *QuantService) waitForEngineExit(timeout time.Duration) bool {

@@ -220,6 +220,15 @@ CREATE TABLE IF NOT EXISTS engine_heartbeat (
     tick INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_engine_heartbeat_ts ON engine_heartbeat(ts);
+
+CREATE TABLE IF NOT EXISTS wick_suggestions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    content TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    note TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
 `
 	_, err := db.Conn.Exec(schema)
 	if err != nil {

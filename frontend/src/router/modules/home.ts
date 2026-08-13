@@ -172,6 +172,15 @@ const children = isC
           title: "每日策略总结",
           icon: "ep/data-analysis"
         }
+      },
+      {
+        path: "/wick-prevention",
+        name: "WickPrevention",
+        component: () => import("@/views/wick-prevention/index.vue"),
+        meta: {
+          title: "插针预防",
+          icon: "ep/umbrella"
+        }
       }
     ];
 
