@@ -517,6 +517,12 @@ func isTransientErr(err error) bool {
 	return false
 }
 
+// IsTransientErr 导出瞬时网络错误判断（EOF / connection reset / timeout 等），
+// 供开仓链路的瞬时错误重试使用。
+func IsTransientErr(err error) bool {
+	return isTransientErr(err)
+}
+
 // marketTickerRaw 实盘 24hr 行情原始 JSON（数据源解耦用）
 type marketTickerRaw struct {
 	Symbol             string `json:"symbol"`
@@ -734,10 +740,19 @@ func (c *Client) GetKlineInfo(ctx context.Context, symbol, interval string) (Kli
 	return ki, nil
 }
 
-// klineLite K 线最小字段（5m 爆拉计算用）
+// klineLite K 线最小字段（5m 爆拉计算 + 收盘对齐信号用）
 type klineLite struct {
 	openTime int64
 	closePx  float64
+	highPx   float64
+}
+
+// Kline5mState 最新已收盘 5m K 线状态（智慧版：仓位因子 + 收盘判定 + 激活判定共用一次拉取）
+type Kline5mState struct {
+	Close5m         float64 // 最新已收盘 5m K 线收盘价（5m 收盘对齐信号口径）
+	High5m          float64 // 最新已收盘 5m K 线最高价（激活判定用，与回测 5m high 口径一致）
+	Close5mOpenTime int64   // 该 5m K 线开盘时间（去重用）
+	Gain5mMax       float64 // 当前 15m 周期内最大 5m 收盘涨幅%（智慧版仓位因子）
 }
 
 // maxGain5mFromKlines 计算 nowMs 所在 15m 周期内最大 5m 收盘涨幅%（智慧版仓位因子）。
@@ -768,6 +783,96 @@ func maxGain5mFromKlines(klines []klineLite, nowMs int64) float64 {
 		}
 	}
 	return mx
+}
+
+// kline5mStateFromLites 从 5m K 线切片提取最新已收盘 K 线状态 + 当前 15m 周期最大 5m 涨幅。
+// 已收盘判定：openTime + 5min <= nowMs（币安 K 线 openTime 为周期起点）。
+func kline5mStateFromLites(klines []klineLite, nowMs int64) Kline5mState {
+	var st Kline5mState
+	for _, k := range klines {
+		if k.openTime+300000 <= nowMs && k.openTime >= st.Close5mOpenTime {
+			st.Close5mOpenTime = k.openTime
+			st.Close5m = k.closePx
+			st.High5m = k.highPx
+		}
+	}
+	st.Gain5mMax = maxGain5mFromKlines(klines, nowMs)
+	return st
+}
+
+// getLiveKline5mState 从实盘域名拉取最近 4 根 5m K 线并计算 5m 状态
+// （模拟盘信号数据源，与 getLiveKlineInfo 一致走 fapi）。
+func (c *Client) getLiveKline5mState(ctx context.Context, symbol string, nowMs int64) (Kline5mState, error) {
+	var st Kline5mState
+	if c.marketHTTP == nil || c.marketBase == "" {
+		return st, errors.New("实盘行情数据源未启用")
+	}
+	u := fmt.Sprintf("%s/fapi/v1/klines?symbol=%s&interval=5m&limit=4",
+		c.marketBase, url.QueryEscape(symbol))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return st, err
+	}
+	resp, err := c.marketHTTP.Do(req)
+	if err != nil {
+		return st, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return st, fmt.Errorf("实盘5m K线接口返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var raw [][]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return st, err
+	}
+	klines := make([]klineLite, 0, len(raw))
+	for _, row := range raw {
+		if len(row) < 5 {
+			continue
+		}
+		var t int64
+		var s string
+		if err := json.Unmarshal(row[0], &t); err != nil {
+			continue
+		}
+		if err := json.Unmarshal(row[4], &s); err != nil {
+			continue
+		}
+		k := klineLite{openTime: t, closePx: mustParseFloat(s)}
+		if len(row) > 2 {
+			_ = json.Unmarshal(row[2], &s)
+			k.highPx = mustParseFloat(s)
+		}
+		klines = append(klines, k)
+	}
+	return kline5mStateFromLites(klines, nowMs), nil
+}
+
+// GetKline5mState 获取最新已收盘 5m K 线状态 + 当前 15m 周期最大 5m 收盘涨幅%。
+// 智慧版（SmartSizeMode>0）在 buildKlineOpenMap 中调用，替代独立的 GetKline5mMaxGain，
+// 一次拉取同时供：5m 爆拉仓位因子、5m 收盘对齐开仓判定、K 线高点激活判定。
+// 模拟盘同样走实盘行情源（与信号判定一致，订单仍发 demo）；DRY_RUN 返回固定模拟值。
+func (c *Client) GetKline5mState(ctx context.Context, symbol string, nowMs int64) (Kline5mState, error) {
+	if c.isDryRun() {
+		return Kline5mState{Close5m: 100, High5m: 100, Close5mOpenTime: nowMs - 300000, Gain5mMax: 0}, nil
+	}
+	if c.marketHTTP != nil {
+		return c.getLiveKline5mState(ctx, symbol, nowMs)
+	}
+	klines, err := c.futuresClient.NewKlinesService().Symbol(symbol).Interval("5m").Limit(4).Do(ctx)
+	if err != nil {
+		return Kline5mState{}, fmt.Errorf("获取 %s 5m K线失败: %w", symbol, err)
+	}
+	lites := make([]klineLite, 0, len(klines))
+	for _, k := range klines {
+		lites = append(lites, klineLite{
+			openTime: k.OpenTime,
+			closePx:  mustParseFloat(k.Close),
+			highPx:   mustParseFloat(k.High),
+		})
+	}
+	return kline5mStateFromLites(lites, nowMs), nil
 }
 
 // getLiveKline5mMaxGain 从实盘域名拉取最近 4 根 5m K 线并计算当前 15m 周期最大 5m 涨幅

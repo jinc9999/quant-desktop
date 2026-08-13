@@ -28,7 +28,8 @@ const latest = computed(() => {
 const sim = computed(() => latest.value?.meta.sim || null);
 const buckets = computed<any[]>(() => latest.value?.meta.buckets || []);
 const rejects = computed<any[]>(() => latest.value?.meta.rejects || []);
-const gap = computed<any[]>(() => latest.value?.meta.gap || []);
+/** 逐单归因明细（成交/拦截=该挡/激活错配/执行失败/余额不足/数据缺口/信号未触发/未运行/未归因） */
+const details = computed<any[]>(() => latest.value?.meta.details || latest.value?.meta.gap || []);
 /** 按币种分组折叠：每币一行（未做成单数/执行损耗/拦截），点击展开明细 */
 const detailGroups = computed<any[]>(() => {
   const groups = new Map<string, any>();
@@ -37,8 +38,10 @@ const detailGroups = computed<any[]>(() => {
     g.children.push(item);
     groups.set(item.symbol, g);
   };
-  (gap.value || []).forEach((i: any) => {
-    push({ ...i, kind: "执行损耗", kindLabel: i.addOn ? "追单" : "首仓" });
+  (details.value || []).forEach((i: any) => {
+    if (i.cls === "成交") return; // 成交不进"没做成"列表
+    const kind = i.cls === "拦截" ? "拦截" : "执行损耗";
+    push({ ...i, kind, kindLabel: i.addOn ? "追单" : "首仓" });
   });
   (rejects.value || []).forEach((i: any) => {
     push({ ...i, kind: "拦截", kindLabel: reasonLabel(i.reason) });
@@ -53,7 +56,11 @@ const detailGroups = computed<any[]>(() => {
     .sort((a, b) => b.total - a.total);
 });
 const reasonLabel = (r: string) =>
-  ({ maxpos: "全局10仓上限", cooldown: "冷却期内", no_active: "持仓未激活(无法追单)", addon_limit: "追单达上限" }[r] || r);
+  ({
+    maxpos: "全局10仓上限", cooldown: "冷却期内", no_active: "持仓未激活(无法追单)",
+    addon_limit: "追单达上限", new_listing: "新币过滤", volume: "成交额不足",
+    rank: "24h涨幅排名未通过", pullback: "山顶过滤器", balance: "余额不足", slots: "槽位已满"
+  }[r] || r);
 
 /** 策略模拟指标行 */
 const simRows = computed<any[]>(() => {
@@ -132,8 +139,8 @@ onUnmounted(() => {
       <div class="summary-section">
         <div class="section-title">每日可开仓漏斗（首仓 + 追单，一一对应）</div>
         <div class="rule-note">
-          首仓机会 = 15m≥3% 且可开；追单机会 = 同币已激活且未达 3 仓；少做 = 机会 − 实际。
-          合计可开 = 首仓机会 + 追单机会。
+          机会 = 15m≥3% 且可开（追单=已激活且未达 3 仓）；成交 = 客户端真实开仓（同币 ±45 分钟匹配）；
+          拦截 = 策略规则内未开（该挡）；损耗 = 执行层真实原因（激活错配/失败/余额/数据缺口/采样差）。
         </div>
         <el-table v-if="buckets.length" :data="buckets" size="small" stripe>
           <el-table-column prop="bucket" label="桶" min-width="70" />
@@ -163,6 +170,12 @@ onUnmounted(() => {
           </el-table-column>
           <el-table-column label="合计少做" width="86" align="right">
             <template #default="{ row }">{{ row.first - row.actualFirst + row.addon - row.actualAddon }}</template>
+          </el-table-column>
+          <el-table-column label="拦截(该挡)" width="90" align="right">
+            <template #default="{ row }">{{ row.rule ?? 0 }}</template>
+          </el-table-column>
+          <el-table-column label="执行损耗" width="90" align="right">
+            <template #default="{ row }">{{ row.loss ?? 0 }}</template>
           </el-table-column>
         </el-table>
         <div v-else class="empty-state">漏斗统计每小时自动生成</div>
@@ -198,7 +211,8 @@ onUnmounted(() => {
       <div class="summary-section">
         <div class="section-title">"有机会但没做成"的单（{{ detailGroups.length }} 个币 · 点击展开）</div>
         <div class="rule-note">
-          执行损耗 = 模拟规则可开但实际未成交（demo/tick 粒度/零星失败）；拦截 = 策略规则内未开（该挡）。
+          拦截 = 策略规则内未开（该挡）；执行损耗 = 模拟规则可开但实际未成交，已按真实原因细分：
+          激活错配 / 交易所失败（错误码）/ 余额不足 / 数据缺口 / 信号未触发（tick 采样差）/ 客户端未运行。
           完整明细每小时自动更新。
         </div>
         <el-table v-if="detailGroups.length" :data="detailGroups" size="small" stripe>
@@ -215,7 +229,7 @@ onUnmounted(() => {
                 </el-table-column>
                 <el-table-column label="说明" min-width="200">
                   <template #default="{ row: c }">
-                    {{ c.kind === "执行损耗" ? "模拟可开但实际未成交" : reasonLabel(c.reason) }}
+                    {{ c.why || reasonLabel(c.reason) }}
                   </template>
                 </el-table-column>
               </el-table>

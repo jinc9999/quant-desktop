@@ -1002,6 +1002,208 @@ func loadActualTrades(clientDB string, dayStart int64) ([]actualTrade, error) {
 	return out, nil
 }
 
+// ==================== 开仓尝试与在线窗口（转化率归因数据） ====================
+
+// attemptRow 客户端开仓尝试记录（open_attempts 表，新构建才有）
+type attemptRow struct {
+	Ts        int64
+	Symbol    string
+	Stage     string // candidate / selected / attempted / filled / failed
+	Reason    string // 拒绝原因（cooldown / no_active / balance ...）
+	Bucket    string
+	ErrorCode int64
+}
+
+func loadAttempts(clientDB string, dayStart int64) ([]attemptRow, bool, error) {
+	if clientDB == "" {
+		return nil, false, nil
+	}
+	db, err := sql.Open("sqlite3", "file:"+clientDB+"?mode=ro")
+	if err != nil {
+		return nil, false, err
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT ts, symbol, stage, reason, ifnull(bucket,''), ifnull(error_code,0)
+		FROM open_attempts WHERE ts >= ? ORDER BY ts`, dayStart)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return nil, false, nil // 旧构建无此表：无法逐单归因
+		}
+		return nil, false, err
+	}
+	defer rows.Close()
+	var out []attemptRow
+	for rows.Next() {
+		var a attemptRow
+		if err := rows.Scan(&a.Ts, &a.Symbol, &a.Stage, &a.Reason, &a.Bucket, &a.ErrorCode); err != nil {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out, true, rows.Err()
+}
+
+func loadHeartbeats(clientDB string, dayStart int64) ([]int64, bool, error) {
+	if clientDB == "" {
+		return nil, false, nil
+	}
+	db, err := sql.Open("sqlite3", "file:"+clientDB+"?mode=ro")
+	if err != nil {
+		return nil, false, err
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT ts FROM engine_heartbeat WHERE ts >= ? ORDER BY ts`, dayStart)
+	if err != nil {
+		if strings.Contains(err.Error(), "no such table") {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var t int64
+		if err := rows.Scan(&t); err != nil {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out, true, rows.Err()
+}
+
+// onlineAt 判断时刻 t 策略是否在线：心跳表存在 |最近心跳 - t| <= 3 分钟（心跳每 1 分钟一条）。
+// 返回（是否在线, 是否有心跳数据）；无心跳数据（旧构建）时按「未归因」处理。
+func onlineAt(beats []int64, t int64) (bool, bool) {
+	if len(beats) == 0 {
+		return false, false
+	}
+	i := sort.Search(len(beats), func(i int) bool { return beats[i] >= t })
+	best := int64(1) << 62
+	if i < len(beats) {
+		if d := beats[i] - t; d < best {
+			best = d
+		}
+	}
+	if i > 0 {
+		if d := t - beats[i-1]; d < best {
+			best = d
+		}
+	}
+	return best <= 3*60*1000, true
+}
+
+// 归因结果分类（与 daily_summaries feature_json.lossClass 对应）
+const (
+	clsFill       = "成交"
+	clsRule       = "拦截"
+	clsActivation = "激活错配"
+	clsOrderFail  = "执行失败"
+	clsBalance    = "余额不足"
+	clsDataGap    = "数据缺口"
+	clsSignalRace = "信号未触发"
+	clsOffline    = "客户端未运行"
+	clsUnknown    = "未归因"
+)
+
+// ruleReasonCN 客户端规则拒绝原因中文名（拦截 = 策略规则内未开，该挡）
+var ruleReasonCN = map[string]string{
+	"maxpos":            "全局10仓上限",
+	"cooldown":          "冷却期内",
+	"no_active":         "持仓未激活无法追单",
+	"addon_limit":       "同币追单达上限",
+	"addon_disabled":    "追加仓关闭",
+	"addon_side":        "追单方向不一致",
+	"new_listing":       "新币过滤",
+	"24h_gain":          "24h涨幅不足",
+	"rank":              "24h涨幅排名未通过",
+	"pullback":          "山顶过滤器",
+	"volume":            "成交额不足",
+	"futures_only":      "无合约交易对",
+	"round_zero":        "取整后数量为0",
+	"open_failed_cd":    "开仓失败冷却中",
+	"open_blocked":      "结构性失败拉黑",
+	"breaker":           "熔断触发",
+	"slots":             "槽位已满",
+	"no_price":          "无实时价",
+	"balance_query_fail": "余额查询失败",
+	"kline_missing":     "K线数据缺失",
+}
+
+func isRuleReason(r string) bool {
+	_, ok := ruleReasonCN[r]
+	return ok
+}
+
+// attemptPriority 尝试记录的具体程度（越小越具体，用于 ±10min 窗口内选最贴切的记录）
+func attemptPriority(a attemptRow, so simOpenRec) int {
+	switch {
+	case a.Stage == "failed":
+		return 1
+	case a.Reason == "balance":
+		return 2
+	case a.Reason == "kline_missing":
+		return 3
+	case a.Reason == "no_active" && so.addOn:
+		return 4 // 激活错配：模拟判可追单、客户端未激活
+	case a.Reason == "no_active":
+		return 5
+	case isRuleReason(a.Reason):
+		return 5
+	case a.Stage == "selected" || a.Stage == "attempted" || a.Stage == "filled":
+		return 6
+	default:
+		return 7 // candidate 兜底
+	}
+}
+
+// classifySim 对一条模拟可开机会做归因（调用方负责先做成交匹配）。
+// 返回（分类, 说明）。
+func classifySim(so simOpenRec, attempts []attemptRow, beats []int64) (string, string) {
+	best := -1
+	bestPrio := 99
+	bestD := int64(10 * 60 * 1000) // ±10 分钟窗口（5m K 线开盘时间 vs 客户端实时动作）
+	for i := range attempts {
+		d := attempts[i].Ts - so.ts
+		if d < 0 {
+			d = -d
+		}
+		if d > bestD {
+			continue
+		}
+		prio := attemptPriority(attempts[i], so)
+		if prio < bestPrio {
+			bestPrio = prio
+			best = i
+		}
+	}
+	if best >= 0 {
+		a := attempts[best]
+		switch {
+		case a.Stage == "failed":
+			return clsOrderFail, fmt.Sprintf("执行损耗-交易所拒绝 code=%d", a.ErrorCode)
+		case a.Reason == "balance":
+			return clsBalance, "执行损耗-余额不足（逐候选预算）"
+		case a.Reason == "kline_missing":
+			return clsDataGap, "执行损耗-15m K线拉取失败"
+		case a.Reason == "no_active" && so.addOn:
+			return clsActivation, "执行损耗-模拟判可追单但客户端未激活（K线高点补判已修复）"
+		case a.Reason == "no_active":
+			return clsRule, "拦截-该挡（持仓未激活无法追单）"
+		case isRuleReason(a.Reason):
+			return clsRule, "拦截-该挡（" + ruleReasonCN[a.Reason] + "）"
+		default:
+			return clsSignalRace, "信号未触发（客户端看到候选但无成交/失败记录）"
+		}
+	}
+	if on, known := onlineAt(beats, so.ts); known {
+		if on {
+			return clsSignalRace, "信号未触发（tick采样差/收盘判定未覆盖）"
+		}
+		return clsOffline, "客户端未运行（不计损耗）"
+	}
+	return clsUnknown, "旧构建无尝试记录，无法归因"
+}
+
 // ==================== 策略口径模拟（analyze 默认）====================
 // 按 D 策略真实规则回放当天 5m 数据：
 //   入仓: 15m 累计(收盘 vs 周期开盘) ≥3%
@@ -1047,6 +1249,13 @@ type simOpenRec struct {
 	ts      int64
 	bucket  string
 	addOn   bool
+}
+
+// simDetail 一条模拟可开机会的归因结果（分类 + 说明）
+type simDetail struct {
+	so  simOpenRec
+	cls string
+	why string
 }
 
 func analyzeStrategy(proxy, clientDB string) error {
@@ -1101,6 +1310,17 @@ func analyzeStrategy(proxy, clientDB string) error {
 	var actuals []actualTrade
 	if clientDB != "" {
 		actuals, _ = loadActualTrades(clientDB, dayStart)
+	}
+	// 开仓尝试 + 引擎心跳（转化率逐单归因；旧构建无表时为空）
+	var attempts []attemptRow
+	var beats []int64
+	if clientDB != "" {
+		attempts, _, _ = loadAttempts(clientDB, dayStart)
+		beats, _, _ = loadHeartbeats(clientDB, dayStart)
+	}
+	attemptsBySym := map[string][]attemptRow{}
+	for _, a := range attempts {
+		attemptsBySym[a.Symbol] = append(attemptsBySym[a.Symbol], a)
 	}
 	actualByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
 	actualPnlByBucket := map[string]float64{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
@@ -1328,10 +1548,6 @@ func analyzeStrategy(proxy, clientDB string) error {
 		}
 	}
 
-	if len(allClosed) == 0 {
-		fmt.Println("今天按策略口径暂无完整平仓样本")
-		return nil
-	}
 	n := len(allClosed)
 	wins, losses := 0, 0
 	winSum, lossSum := 0.0, 0.0
@@ -1372,88 +1588,148 @@ func analyzeStrategy(proxy, clientDB string) error {
 	}))
 	fmt.Println("\n⚠ 口径：本模拟按 5m 收盘/高低价近似回放，未含手续费滑点、未按 5m 爆拉分桶放大仓位；用于复盘当日策略环境，非实盘对账。")
 
-	// 三桶分析（按开仓时 5m 爆拉分桶）
-	// 每日可开仓漏斗（首仓/追单 机会-实际-少做）
+	// ==================== 转化率归因：模拟机会 → 成交 / 拦截(该挡) / 执行损耗 ====================
+	// 1) 实际成交匹配：同币 + 时间窗 ±45min 贪婪匹配（替代旧版按序号硬匹配，
+	//    消除 SKYAIUSDT 19:40 机会 / 19:45 成交 之类的时间错位假损耗）
+	simMatched := make([]bool, len(simOpens))
+	actUsed := make([]bool, len(actuals))
+	for i, so := range simOpens {
+		best, bestD := -1, int64(45*60*1000)
+		for j, a := range actuals {
+			if actUsed[j] || a.Symbol != so.symbol {
+				continue
+			}
+			d := a.Opened - so.ts
+			if d < 0 {
+				d = -d
+			}
+			if d < bestD {
+				bestD = d
+				best = j
+			}
+		}
+		if best >= 0 {
+			actUsed[best] = true
+			simMatched[i] = true
+		}
+	}
+	// 2) 未成交的逐条归因（拦截=该挡 / 执行损耗=真因 / 未运行 / 未归因）
+	var details []simDetail
+	for i, so := range simOpens {
+		cls, why := clsFill, "实际成交"
+		if !simMatched[i] {
+			cls, why = classifySim(so, attemptsBySym[so.symbol], beats)
+		}
+		details = append(details, simDetail{so: so, cls: cls, why: why})
+	}
+	// 客户端多开（模拟无对应机会但实际成交，实时通道更早入场等）
+	extraOpens := 0
+	for _, used := range actUsed {
+		if !used {
+			extraOpens++
+		}
+	}
+
+	// 3) 汇总：按桶 × 首仓/追单
+	type aggRow struct {
+		firstOpp, firstFill, firstRule, firstLoss, firstOff, firstUnk int
+		addonOpp, addonFill, addonRule, addonLoss, addonOff, addonUnk  int
+	}
+	aggs := map[string]*aggRow{}
+	for _, name := range []string{"爆拉桶", "中间桶", "温和桶"} {
+		aggs[name] = &aggRow{}
+	}
+	totalAgg := &aggRow{}
+	count := func(ar *aggRow, d simDetail) {
+		if d.so.addOn {
+			ar.addonOpp++
+			switch d.cls {
+			case clsFill:
+				ar.addonFill++
+			case clsRule:
+				ar.addonRule++
+			case clsOffline:
+				ar.addonOff++
+			case clsUnknown:
+				ar.addonUnk++
+			default: // 执行损耗类
+				ar.addonLoss++
+			}
+		} else {
+			ar.firstOpp++
+			switch d.cls {
+			case clsFill:
+				ar.firstFill++
+			case clsRule:
+				ar.firstRule++
+			case clsOffline:
+				ar.firstOff++
+			case clsUnknown:
+				ar.firstUnk++
+			default:
+				ar.firstLoss++
+			}
+		}
+	}
+	for _, d := range details {
+		count(aggs[d.so.bucket], d)
+		count(totalAgg, d)
+	}
+	// 4) 每日可开仓漏斗（转化率口径：成交/机会；拦截=该挡，损耗=执行层真因）
+	fmt.Println("\n每日可开仓漏斗（策略规则可做，含10仓上限；拦截=策略规则内未开=该挡；损耗=执行层真实原因）:")
+	fh := []string{"桶", "首仓机会", "首仓成交", "首仓拦截", "首仓损耗", "追单机会", "追单成交", "追单拦截", "追单损耗", "机会合计", "成交合计", "转化率"}
 	var funnelRows [][]string
-	tFirst, tActFirst, tAddon, tActAddon := 0, 0, 0, 0
-	for _, name := range []string{"爆拉桶", "中间桶", "温和桶"} {
-		f := simFirstByBucket[name]
-		af := actFirstByBucket[name]
-		ad := simAddonByBucket[name]
-		aa := actAddonByBucket[name]
-		tFirst += f
-		tActFirst += af
-		tAddon += ad
-		tActAddon += aa
-		funnelRows = append(funnelRows, []string{
-			name, fmt.Sprintf("%d", f), fmt.Sprintf("%d", af), fmt.Sprintf("%d", f-af),
-			fmt.Sprintf("%d", ad), fmt.Sprintf("%d", aa), fmt.Sprintf("%d", ad-aa),
-			fmt.Sprintf("%d", f+ad), fmt.Sprintf("%d", af+aa), fmt.Sprintf("%d", (f-af)+(ad-aa)),
-		})
-	}
-	funnelRows = append(funnelRows, []string{
-		"合计", fmt.Sprintf("%d", tFirst), fmt.Sprintf("%d", tActFirst), fmt.Sprintf("%d", tFirst-tActFirst),
-		fmt.Sprintf("%d", tAddon), fmt.Sprintf("%d", tActAddon), fmt.Sprintf("%d", tAddon-tActAddon),
-		fmt.Sprintf("%d", tFirst+tAddon), fmt.Sprintf("%d", tActFirst+tActAddon), fmt.Sprintf("%d", (tFirst-tActFirst)+(tAddon-tActAddon)),
-	})
-	fmt.Println("\n每日可开仓漏斗（策略规则可做，含10仓上限；首仓=15m≥3%且可开，追单=同币已激活且未达3仓）:")
-	fmt.Println(fmtTable([]string{"桶", "首仓机会", "实际首仓", "首仓少做", "追单机会", "实际追单", "追单少做", "合计可开", "实际合计", "合计少做"}, funnelRows))
-
-	fmt.Println("\n三桶分析 · 可开仓机会 vs 实际（可开仓机会=策略规则下能开的动作数（含追单、含全局10仓上限）；实际=客户端库当天开仓；少做=可开-实际）:")
-	var bucketRows [][]string
-	var bucketList []map[string]interface{}
-	for _, name := range []string{"爆拉桶", "中间桶", "温和桶"} {
-		b := buckets[name]
-		opportunity := b.opens // 可开仓机会 = 策略规则模拟能开的动作数（含追单）
-		actual := actualByBucket[name]
-		missed := opportunity - actual
-		if missed < 0 {
-			missed = 0
-		}
+	appendFunnel := func(name string, a *aggRow) {
+		opp := a.firstOpp + a.addonOpp
+		fill := a.firstFill + a.addonFill
 		conv := 0.0
-		if opportunity > 0 {
-			conv = float64(actual) / float64(opportunity) * 100
+		if opp > 0 {
+			conv = float64(fill) / float64(opp) * 100
 		}
-		bucketRows = append(bucketRows, []string{
+		funnelRows = append(funnelRows, []string{
 			name,
-			fmt.Sprintf("%d", opportunity),
-			fmt.Sprintf("%d", actual),
-			fmt.Sprintf("%+.2f U", actualPnlByBucket[name]),
-			fmt.Sprintf("%d", missed),
-			fmt.Sprintf("%.1f%%", conv),
-		})
-		bucketList = append(bucketList, map[string]interface{}{
-			"bucket": name, "opportunity": opportunity, "actual": actual,
-			"actualPnl": round2(actualPnlByBucket[name]), "missed": missed, "conversion": round2(conv),
-			"first": simFirstByBucket[name], "actualFirst": actFirstByBucket[name],
-			"addon": simAddonByBucket[name], "actualAddon": actAddonByBucket[name],
+			fmt.Sprintf("%d", a.firstOpp), fmt.Sprintf("%d", a.firstFill),
+			fmt.Sprintf("%d", a.firstRule), fmt.Sprintf("%d", a.firstLoss),
+			fmt.Sprintf("%d", a.addonOpp), fmt.Sprintf("%d", a.addonFill),
+			fmt.Sprintf("%d", a.addonRule), fmt.Sprintf("%d", a.addonLoss),
+			fmt.Sprintf("%d", opp), fmt.Sprintf("%d", fill), fmt.Sprintf("%.1f%%", conv),
 		})
 	}
-	// 合计行
-	tOpp, tAct, tPnl, tMiss := 0, 0, 0.0, 0
-	tConv := 0.0
-	for _, bkt := range []string{"爆拉桶", "中间桶", "温和桶"} {
-		b := buckets[bkt]
-		tOpp += b.opens
-		tAct += actualByBucket[bkt]
-		tPnl += actualPnlByBucket[bkt]
-		tMiss += b.opens - actualByBucket[bkt]
+	for _, name := range []string{"爆拉桶", "中间桶", "温和桶"} {
+		appendFunnel(name, aggs[name])
 	}
-	if tOpp > 0 {
-		tConv = float64(tAct) / float64(tOpp) * 100
-	}
-	bucketRows = append(bucketRows, []string{
-		"合计", fmt.Sprintf("%d", tOpp), fmt.Sprintf("%d", tAct),
-		fmt.Sprintf("%+.2f U", tPnl), fmt.Sprintf("%d", tMiss), fmt.Sprintf("%.1f%%", tConv),
-	})
-	bucketList = append(bucketList, map[string]interface{}{
-		"bucket": "合计", "opportunity": tOpp, "actual": tAct,
-		"actualPnl": round2(tPnl), "missed": tMiss, "conversion": round2(tConv),
-		"first": tFirst, "actualFirst": tActFirst, "addon": tAddon, "actualAddon": tActAddon,
-	})
-	fmt.Println(fmtTable([]string{"桶", "可开仓机会", "实际开仓", "实际盈亏", "少做", "转化率"}, bucketRows))
+	appendFunnel("合计", totalAgg)
+	fmt.Println(fmtTable(fh, funnelRows))
+	fmt.Printf("客户端多开（模拟无对应机会但实际成交，多为实时通道更早入场）: %d 笔\n", extraOpens)
 
-	// ==================== 逐单根因明细 ====================
+	// 5) 逐单归因分类汇总（执行损耗拆到真实原因）
+	clsTotal := map[string]int{}
+	clsByBucket := map[string]map[string]int{}
+	for _, name := range []string{"爆拉桶", "中间桶", "温和桶"} {
+		clsByBucket[name] = map[string]int{}
+	}
+	for _, d := range details {
+		clsTotal[d.cls]++
+		clsByBucket[d.so.bucket][d.cls]++
+	}
+	fmt.Println("\n逐单归因汇总（每笔模拟机会的最终去向）:")
+	clsNames := []string{clsFill, clsRule, clsActivation, clsOrderFail, clsBalance, clsDataGap, clsSignalRace, clsOffline, clsUnknown}
+	var clsRows [][]string
+	for _, name := range []string{"爆拉桶", "中间桶", "温和桶"} {
+		row := []string{name}
+		for _, c := range clsNames {
+			row = append(row, fmt.Sprintf("%d", clsByBucket[name][c]))
+		}
+		clsRows = append(clsRows, row)
+	}
+	totalRow := []string{"合计"}
+	for _, c := range clsNames {
+		totalRow = append(totalRow, fmt.Sprintf("%d", clsTotal[c]))
+	}
+	clsRows = append(clsRows, totalRow)
+	fmt.Println(fmtTable(append([]string{"桶"}, clsNames...), clsRows))
+
+	// ==================== 逐单拦截明细（策略规则内未开 = 该挡） ====================
 	rejectCnt := map[string]int{"maxpos": 0, "cooldown": 0, "no_active": 0, "addon_limit": 0}
 	rejectNames := map[string]string{
 		"maxpos":      "全局10仓上限",
@@ -1464,74 +1740,55 @@ func analyzeStrategy(proxy, clientDB string) error {
 	for _, r := range rejects {
 		rejectCnt[r.reason]++
 	}
-	fmt.Println("\n逐单拦截明细（策略规则内未开仓的信号，按原因）:")
+	fmt.Println("\n逐单拦截明细（策略规则内未开 = 该挡；模拟侧按原口径）:")
 	var rejectRows [][]string
 	for _, k := range []string{"maxpos", "cooldown", "no_active", "addon_limit"} {
 		rejectRows = append(rejectRows, []string{rejectNames[k], fmt.Sprintf("%d", rejectCnt[k])})
 	}
 	fmt.Println(fmtTable([]string{"拦截原因", "次数"}, rejectRows))
 
-	// 执行损耗差集：按币按序号精确匹配（同币第 n 个模拟开仓对应第 n 个实际开仓，
-	// 模拟多出的单即"可开但实际未成交"，demo/tick/零星失败等执行损耗）
-	simBySym := map[string][]simOpenRec{}
-	for _, so := range simOpens {
-		simBySym[so.symbol] = append(simBySym[so.symbol], so)
-	}
-	actBySym := map[string][]actualTrade{}
-	for _, a := range actuals {
-		actBySym[a.Symbol] = append(actBySym[a.Symbol], a)
-	}
-	var gap []simOpenRec
-	for sym, sims := range simBySym {
-		acts := actBySym[sym]
-		for i, so := range sims {
-			if i >= len(acts) {
-				gap = append(gap, so)
-			}
+	// 客户端侧规则拦截（该挡，新增归因）：从逐单归因中提取
+	clientRuleCnt := map[string]int{}
+	for _, d := range details {
+		if d.cls == clsRule {
+			clientRuleCnt[d.why]++
 		}
 	}
-	gapCnt := map[string]int{}
-	for _, g := range gap {
-		gapCnt[g.bucket]++
+	if len(clientRuleCnt) > 0 {
+		var crRows [][]string
+		for k, v := range clientRuleCnt {
+			crRows = append(crRows, []string{strings.TrimPrefix(strings.TrimSuffix(k, "）"), "拦截-该挡（"), fmt.Sprintf("%d", v)})
+		}
+		sort.Slice(crRows, func(i, j int) bool { return crRows[i][1] > crRows[j][1] })
+		fmt.Println(fmtTable([]string{"客户端侧拦截（该挡，新增归因）", "次数"}, crRows))
 	}
-	fmt.Println("\n执行损耗明细（模拟规则可开但实际未成交，demo/tick粒度/零星失败）:")
-	var gapRows [][]string
-	for _, bkt := range []string{"爆拉桶", "中间桶", "温和桶"} {
-		gapRows = append(gapRows, []string{bkt, fmt.Sprintf("%d", gapCnt[bkt])})
-	}
-	fmt.Println(fmtTable([]string{"桶", "执行损耗单数"}, gapRows))
 
-	// 明细样例（每原因前 8 条）
-	fmt.Println("\n明细样例（完整明细见 market_data/analysis_<date>.csv）:")
+	// 明细样例（完整明细见 CSV）
+	fmt.Println("\n明细样例（完整明细见 market_data/analysis_<date>.csv，每小时自动更新）:")
 	shown := map[string]int{}
 	for _, r := range rejects {
-		if shown[r.reason] >= 8 {
+		if shown[r.reason] >= 5 {
 			continue
 		}
 		shown[r.reason]++
-		fmt.Printf("  [%s] #%03d %-12s %s %s\n", rejectNames[r.reason], r.seq, r.symbol, r.timeStr, r.bucket)
+		fmt.Printf("  [拦截-该挡] #%03d %-12s %s %s\n", r.seq, r.symbol, r.timeStr, r.bucket)
 	}
-	gapBySym := map[string]int{}
-	for _, g := range gap {
-		gapBySym[g.symbol]++
-	}
-	gapShown := 0
-	for _, g := range gap {
-		if gapShown >= 15 {
-			break
+	clsShown := map[string]int{}
+	for _, d := range details {
+		if d.cls == clsFill || clsShown[d.cls] >= 8 {
+			continue
 		}
-		gapShown++
-		seq := gapBySym[g.symbol] - countAfter(gap, g) + 1
+		clsShown[d.cls]++
 		tag := "首仓"
-		if g.addOn {
+		if d.so.addOn {
 			tag = "追单"
 		}
-		fmt.Printf("  [执行损耗] %-12s #%03d %s %s %s\n", g.symbol, seq, time.UnixMilli(g.ts).In(beijing).Format("15:04"), g.bucket, tag)
+		fmt.Printf("  [%s] %-12s %s %s %s\n", d.cls, d.so.symbol, time.UnixMilli(d.so.ts).In(beijing).Format("15:04"), d.so.bucket, tag)
 	}
 
-	// 完整明细写 CSV
+	// 完整明细写 CSV（每小时计划任务自动覆盖更新）
 	date := now.Format("2006-01-02")
-	if err := writeAnalysisCSV(date, rejects, gap); err != nil {
+	if err := writeAnalysisCSV(date, rejects, details); err != nil {
 		log.Printf("⚠ 写分析明细 CSV 失败: %v", err)
 	}
 
@@ -1543,28 +1800,59 @@ func analyzeStrategy(proxy, clientDB string) error {
 				"symbol": r.symbol, "time": r.timeStr, "bucket": r.bucket, "reason": r.reason, "seq": r.seq,
 			})
 		}
-		gapSeq := map[string]int{}
-		gapList := make([]map[string]interface{}, 0, len(gap))
-		for _, g := range gap {
-			gapSeq[g.symbol]++
-			gapList = append(gapList, map[string]interface{}{
-				"symbol": g.symbol, "time": time.UnixMilli(g.ts).In(beijing).Format("15:04"),
-				"bucket": g.bucket, "seq": gapSeq[g.symbol], "addOn": g.addOn,
+		detailList := make([]map[string]interface{}, 0, len(details))
+		for _, d := range details {
+			detailList = append(detailList, map[string]interface{}{
+				"symbol": d.so.symbol, "time": time.UnixMilli(d.so.ts).In(beijing).Format("15:04"),
+				"bucket": d.so.bucket, "addOn": d.so.addOn, "cls": d.cls, "why": d.why,
 			})
 		}
+		bucketList := make([]map[string]interface{}, 0, 4)
+		for _, name := range []string{"爆拉桶", "中间桶", "温和桶"} {
+			a := aggs[name]
+			opp := a.firstOpp + a.addonOpp
+			fill := a.firstFill + a.addonFill
+			conv := 0.0
+			if opp > 0 {
+				conv = float64(fill) / float64(opp) * 100
+			}
+			bucketList = append(bucketList, map[string]interface{}{
+				"bucket": name, "opportunity": opp, "actual": fill,
+				"actualPnl": round2(actualPnlByBucket[name]), "conversion": round2(conv),
+				"first": a.firstOpp, "actualFirst": a.firstFill,
+				"addon": a.addonOpp, "actualAddon": a.addonFill,
+				"rule": a.firstRule + a.addonRule, "loss": a.firstLoss + a.addonLoss,
+				"offline": a.firstOff + a.addonOff, "unknown": a.firstUnk + a.addonUnk,
+			})
+		}
+		totalOpp := totalAgg.firstOpp + totalAgg.addonOpp
+		totalFill := totalAgg.firstFill + totalAgg.addonFill
+		totalConv := 0.0
+		if totalOpp > 0 {
+			totalConv = float64(totalFill) / float64(totalOpp) * 100
+		}
+		bucketList = append(bucketList, map[string]interface{}{
+			"bucket": "合计", "opportunity": totalOpp, "actual": totalFill,
+			"actualPnl": round2(actualPnlByBucket["爆拉桶"] + actualPnlByBucket["中间桶"] + actualPnlByBucket["温和桶"]),
+			"conversion": round2(totalConv),
+			"first": totalAgg.firstOpp, "actualFirst": totalAgg.firstFill,
+			"addon": totalAgg.addonOpp, "actualAddon": totalAgg.addonFill,
+			"rule": totalAgg.firstRule + totalAgg.addonRule, "loss": totalAgg.firstLoss + totalAgg.addonLoss,
+			"offline": totalAgg.firstOff + totalAgg.addonOff, "unknown": totalAgg.firstUnk + totalAgg.addonUnk,
+		})
 		sim := map[string]interface{}{
 			"signals": totalSignals, "opens": totalOpens, "addons": totalAddons,
 			"closed": len(allClosed), "winRate": round2(safeDiv(float64(wins), float64(n))*100),
 			"pnl": round2(dayPnl), "avg": round2(safeDiv(dayPnl, float64(n))),
 			"stop": reasonCnt["STOP_LOSS"], "trail": reasonCnt["TRAILING"], "maxhold": reasonCnt["MAX_HOLD"],
-			"addonClosed": addOnClosed,
+			"addonClosed": addOnClosed, "extraOpens": extraOpens,
 			"rejects": map[string]interface{}{
 				"maxpos": rejectCnt["maxpos"], "cooldown": rejectCnt["cooldown"],
 				"noActive": rejectCnt["no_active"], "addonLimit": rejectCnt["addon_limit"],
 			},
-			"gap": gapCnt,
+			"lossClass": clsTotal,
 		}
-		if err := writeStrategySummary(clientDB, sim, bucketList, rejectList, gapList); err != nil {
+		if err := writeStrategySummary(clientDB, sim, bucketList, rejectList, detailList); err != nil {
 			log.Printf("⚠ 写入策略总结失败: %v", err)
 		} else {
 			log.Printf("✅ 已写入每日策略总结（%s）", clientDB)
@@ -1573,8 +1861,8 @@ func analyzeStrategy(proxy, clientDB string) error {
 	return nil
 }
 
-// writeAnalysisCSV 输出逐单拦截与执行损耗明细（可打开查看每一单）
-func writeAnalysisCSV(date string, rejects []rejectRec, gap []simOpenRec) error {
+// writeAnalysisCSV 输出逐单拦截（该挡）与执行损耗归因明细（每小时计划任务自动覆盖更新）
+func writeAnalysisCSV(date string, rejects []rejectRec, details []simDetail) error {
 	path := fmt.Sprintf(`D:\0001_ba-A - 03\market_data\analysis_%s.csv`, date)
 	f, err := os.Create(path)
 	if err != nil {
@@ -1585,26 +1873,20 @@ func writeAnalysisCSV(date string, rejects []rejectRec, gap []simOpenRec) error 
 	defer w.Flush()
 	w.Write([]string{"类型", "币种", "时间", "桶", "原因/说明"})
 	for _, r := range rejects {
-		w.Write([]string{"拦截", r.symbol, r.timeStr, r.bucket, r.reason})
-	}
-	for _, g := range gap {
-		why := "执行损耗(模拟可开实际未成交)"
-		if g.addOn {
-			why += "-追单"
+		why := "拦截-该挡（" + r.reason + "）"
+		if cn, ok := ruleReasonCN[r.reason]; ok {
+			why = "拦截-该挡（" + cn + "）"
 		}
-		w.Write([]string{"执行损耗", g.symbol, time.UnixMilli(g.ts).In(beijing).Format("15:04"), g.bucket, why})
+		w.Write([]string{"拦截", r.symbol, r.timeStr, r.bucket, why})
+	}
+	for _, d := range details {
+		tag := "首仓"
+		if d.so.addOn {
+			tag = "追单"
+		}
+		w.Write([]string{d.cls + "-" + tag, d.so.symbol, time.UnixMilli(d.so.ts).In(beijing).Format("15:04"), d.so.bucket, d.why})
 	}
 	return w.Error()
-}
-
-func countAfter(list []simOpenRec, target simOpenRec) int {
-	n := 0
-	for _, g := range list {
-		if g.symbol == target.symbol && g.ts > target.ts {
-			n++
-		}
-	}
-	return n
 }
 
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
@@ -1616,15 +1898,15 @@ func safeDiv(a, b float64) float64 {
 	return a / b
 }
 
-// writeStrategySummary 将策略口径模拟与三桶分析写入客户端库 daily_summaries（type=strategy）
-func writeStrategySummary(clientDB string, sim map[string]interface{}, buckets []map[string]interface{}, rejects, gap []map[string]interface{}) error {
+// writeStrategySummary 将策略口径模拟、漏斗归因与逐单明细写入客户端库 daily_summaries（type=strategy）
+func writeStrategySummary(clientDB string, sim map[string]interface{}, buckets []map[string]interface{}, rejects, details []map[string]interface{}) error {
 	db, err := sql.Open("sqlite3", "file:"+clientDB+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 	meta, _ := json.Marshal(map[string]interface{}{
-		"sim": sim, "buckets": buckets, "rejects": rejects, "gap": gap,
+		"sim": sim, "buckets": buckets, "rejects": rejects, "details": details,
 	})
 	now := time.Now().In(beijing)
 	date := now.Format("2006-01-02")

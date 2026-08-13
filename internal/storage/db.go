@@ -189,6 +189,37 @@ CREATE TABLE IF NOT EXISTS data_audit_log (
     created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_mode_time ON data_audit_log(mode, created_at);
+
+CREATE TABLE IF NOT EXISTS open_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    tick INTEGER NOT NULL DEFAULT 0,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL DEFAULT 'LONG',
+    stage TEXT NOT NULL DEFAULT 'candidate',
+    reason TEXT NOT NULL DEFAULT '',
+    gain15 REAL DEFAULT 0,
+    kline_open REAL DEFAULT 0,
+    gain5m REAL DEFAULT -1,
+    bucket TEXT NOT NULL DEFAULT '',
+    margin REAL DEFAULT 0,
+    qty REAL DEFAULT 0,
+    error_code INTEGER DEFAULT 0,
+    error_msg TEXT DEFAULT '',
+    retry_count INTEGER DEFAULT 0,
+    latency_ms INTEGER DEFAULT 0,
+    position_id INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_open_attempts_ts ON open_attempts(ts);
+CREATE INDEX IF NOT EXISTS idx_open_attempts_symbol ON open_attempts(symbol, ts);
+
+CREATE TABLE IF NOT EXISTS engine_heartbeat (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    mode TEXT NOT NULL DEFAULT '',
+    tick INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_engine_heartbeat_ts ON engine_heartbeat(ts);
 `
 	_, err := db.Conn.Exec(schema)
 	if err != nil {
