@@ -536,6 +536,12 @@ func (e *Engine) runOnce(ctx context.Context) {
 	// 4.65 定期扫描孤儿仓位（交易所有但本地 DB 无的持仓），自动收养
 	e.scanOrphanPositions(ctx)
 
+	// 4.66 保护委托补齐：OPEN 持仓若没有活跃保护条件单且有实时价，按现价补挂
+	// （重启/条件单被交易所取消后的自愈；有现价才能安全钳制触发价，防 -2021 误平）
+	if tick <= 1 || tick%20 == 0 {
+		e.ensureProtectionOrders(ctx, priceMap)
+	}
+
 	// 4.66 延迟复核开仓结果（开仓后未确认到真实持仓的仓位）
 	e.confirmPendingOpens(ctx)
 
@@ -558,6 +564,34 @@ func (e *Engine) runOnce(ctx context.Context) {
 		tick, len(candidates), len(opened), time.Since(start).Round(time.Millisecond),
 		fetchDur.Round(time.Millisecond), screenDur.Round(time.Millisecond),
 		openDur.Round(time.Millisecond))
+}
+
+// ensureProtectionOrders 为所有缺少保护条件单的 OPEN 持仓补挂止损/跟踪委托。
+// 幂等：hasActiveStopOrders 已只认平仓类条件单（开仓市价单不误判）。
+// 无实时价的持仓跳过（保留本地 monitor 保护），有价才挂（computeStopPrices 会按现价钳制触发价）。
+func (e *Engine) ensureProtectionOrders(ctx context.Context, priceMap map[string]float64) {
+	if e.orderMgr == nil {
+		return
+	}
+	positions, err := e.db.GetOpenPositions()
+	if err != nil {
+		return
+	}
+	for i := range positions {
+		pos := &positions[i]
+		if e.hasActiveStopOrders(pos.ID) {
+			continue
+		}
+		price, ok := priceMap[pos.Symbol]
+		if !ok || price <= 0 {
+			continue // 无实时价：不挂（防 -2021），本地 monitor 继续保护
+		}
+		log.Printf("[Strategy] %s 持仓#%d 无保护委托，按现价 %.6f 补挂止损/跟踪条件单",
+			pos.Symbol, pos.ID, price)
+		if err := e.orderMgr.PlaceStopOrders(ctx, pos, e.cfg, price); err != nil {
+			log.Printf("[Strategy] %s 持仓#%d 补挂条件单失败: %v", pos.Symbol, pos.ID, err)
+		}
+	}
 }
 
 // fetchTickers 获取全市场行情（P2）。
