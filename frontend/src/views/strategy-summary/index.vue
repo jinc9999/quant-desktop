@@ -105,23 +105,23 @@ onUnmounted(() => {
       <div class="summary-section">
         <div class="section-title">三桶分析（按开仓时 5m 爆拉分档）</div>
         <div class="rule-note">
-          仓位按策略倍数：爆拉桶（5m 单根 ≥2.5%）×1.5 / 中间桶（2%~2.5%）×1.0 / 温和桶（&lt;2%）×0.7
+          市场机会 = 15m≥3% 信号按桶；实际开仓 = 客户端库当天真实开仓；少做 = 机会 − 实际。
+          仓位倍数：爆拉桶（5m 单根 ≥2.5%）×1.5 / 中间桶 ×1.0 / 温和桶 ×0.7
         </div>
         <el-table v-if="buckets.length" :data="buckets" size="small" stripe>
-          <el-table-column prop="bucket" label="桶" min-width="100" />
-          <el-table-column prop="opens" label="开仓" min-width="70" align="right" />
-          <el-table-column prop="closed" label="平仓" min-width="70" align="right" />
-          <el-table-column label="胜率" min-width="80" align="right">
-            <template #default="{ row }">{{ Number(row.winRate).toFixed(1) }}%</template>
-          </el-table-column>
-          <el-table-column label="盈亏(U)" min-width="100" align="right">
+          <el-table-column prop="bucket" label="桶" min-width="90" />
+          <el-table-column prop="signals" label="市场机会" min-width="90" align="right" />
+          <el-table-column prop="simOpens" label="模拟开仓" min-width="90" align="right" />
+          <el-table-column prop="actual" label="实际开仓" min-width="90" align="right" />
+          <el-table-column label="实际盈亏(U)" min-width="100" align="right">
             <template #default="{ row }">
-              <span :class="chgClass(row.pnl)">{{ fmtNum(row.pnl, true) }}</span>
+              <span :class="chgClass(row.actualPnl)">{{ fmtNum(row.actualPnl, true) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="平均每笔(U)" min-width="110" align="right">
+          <el-table-column prop="missed" label="少做" min-width="70" align="right" />
+          <el-table-column label="转化率" min-width="90" align="right">
             <template #default="{ row }">
-              <span :class="chgClass(row.avg)">{{ fmtNum(row.avg, true) }}</span>
+              <span>{{ Number(row.conversion).toFixed(1) }}%</span>
             </template>
           </el-table-column>
         </el-table>
