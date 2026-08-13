@@ -754,6 +754,7 @@ func main() {
 	cbFlag := flag.Float64("cb", 2.0, "跟踪止盈回调 %%（默认 2）")
 	surgeFlag := flag.Float64("surge", 1.8, "放量倍数阈值（默认 1.8）")
 	surgeLookbackFlag := flag.Int("surge-lookback", 24, "放量基准窗口（5m K 线根数，默认 24=2小时）")
+	wickSurgeFlag := flag.Float64("wick-surge", 0, "防插针：信号根5m成交量/近24根均值<该值→疑似薄量插针过滤（0=关闭；建议 0.5~1.0）")
 	slipFlag := flag.Float64("slip", 0, "S01/momentum 单边滑点 %%（0=关闭，默认 0）")
 	gainFlag := flag.Float64("gain", 5.0, "15m 实体涨幅门槛 %%（默认 5）")
 	minVolFlag := flag.Float64("minvol", 50000, "24h 成交额下限 USDT（默认 50000）")
@@ -884,6 +885,7 @@ func main() {
 	cfg.TrailingCallback = *cbFlag / 100
 	cfg.VolumeSurgeThreshold = *surgeFlag
 	cfg.SurgeLookback = *surgeLookbackFlag
+	cfg.WickMinSurge = *wickSurgeFlag
 	cfg.FlatSlippage = *slipFlag / 100
 	cfg.ClosedBarConfirm = *closedFlag
 	cfg.ExitClose = *exitModeFlag == "close"

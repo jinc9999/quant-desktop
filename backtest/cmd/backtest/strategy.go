@@ -22,6 +22,7 @@ type StrategyConfig struct {
 	MinQuoteVolume       float64 // 24h 成交额下限(USDT)
 	VolumeSurgeThreshold float64 // 放量倍数阈值
 	SurgeLookback        int     // 放量基准窗口(K 线根数)
+	WickMinSurge         float64 // 防插针：信号根 5m 成交量 / 近 SurgeLookback 根均值 < 该值 → 疑似薄量插针，过滤（0=关闭）
 	MaxPullbackPct       float64 // 山顶过滤器回撤上限(%)
 	MinTakerBuyPct       float64 // 15m 窗口主动买占比门槛(%)(0 关闭)
 	RetracePct           float64 // S01 回踩实验: 信号后回踩深度%(0 关闭)
@@ -1074,6 +1075,11 @@ func (e *Engine) computeSignal(st *symbolState, b *bar, ready24 bool) (string, s
 		}
 		// 放量确认
 		if volumeSurge(st, b, cfg.SurgeLookback) < cfg.VolumeSurgeThreshold {
+			return "", ""
+		}
+		// 防插针实验（--wick-surge）：信号根 5m 成交量低于近 SurgeLookback 根均值的该倍数
+		// → 疑似薄量插针（少数几笔把价格打到位，收盘价可信度低），过滤该信号。
+		if side == "LONG" && cfg.WickMinSurge > 0 && volumeSurge(st, b, cfg.SurgeLookback) < cfg.WickMinSurge {
 			return "", ""
 		}
 		// 山顶过滤器
