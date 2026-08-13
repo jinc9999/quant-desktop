@@ -59,20 +59,7 @@ const data = ref<DashboardData>({
 });
 
 const loading = ref(true);
-/** 每日总结数据 */
-const summary = ref<{
-  market: any;
-  trades: any;
-  suggestions: string[];
-}>({ market: {}, trades: {}, suggestions: [] });
-/** 当前展示的总结模式（默认跟随程序当前模式，可手动切换） */
-const activeMode = ref("SIMULATION");
-const modeSummary = computed(() => {
-  const modes = (summary.value as any).modes || {};
-  return modes[activeMode.value] || { trades: {}, suggestions: [] };
-});
 let timer: ReturnType<typeof setInterval> | null = null;
-let summaryTimer: ReturnType<typeof setInterval> | null = null;
 
 /** 格式化运行时间为 HH:MM:SS */
 const runtimeText = computed(() => {
@@ -168,50 +155,13 @@ async function fetchData() {
   loading.value = false;
 }
 
-/** 拉取每日总结 */
-async function fetchSummary() {
-  const res = await callService(() => QuantService.GetDailySummary(), { silent: true });
-  if (res) {
-    summary.value = {
-      market: res.market ?? {},
-      trades: res.trades ?? {},
-      suggestions: res.suggestions ?? []
-    };
-    // 自动跟随当前模式（模拟盘/实盘），同时保留手动切换能力
-    if (res.currentMode) activeMode.value = res.currentMode;
-  }
-}
-
-/** 格式化成交额（亿/万） */
-function fmtVolume(v: number): string {
-  if (!v || v <= 0) return "--";
-  if (v >= 1e8) return (v / 1e8).toFixed(1) + " 亿";
-  if (v >= 1e4) return (v / 1e4).toFixed(0) + " 万";
-  return v.toFixed(0);
-}
-
-/** 涨跌颜色 */
-function chgClass(v: number): string {
-  if (v > 0) return "text-green";
-  if (v < 0) return "text-red";
-  return "text-neutral";
-}
-
-function fmtChg(v: number): string {
-  if (v === undefined || v === null) return "--";
-  return (v > 0 ? "+" : "") + v.toFixed(2) + "%";
-}
-
 onMounted(() => {
   fetchData();
-  fetchSummary();
   timer = setInterval(fetchData, 2000);
-  summaryTimer = setInterval(fetchSummary, 60000);
 });
 
 onUnmounted(() => {
   if (timer) clearInterval(timer);
-  if (summaryTimer) clearInterval(summaryTimer);
 });
 </script>
 
@@ -370,123 +320,6 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 每日总结 -->
-    <div class="quant-card summary-panel">
-      <div class="card-header">
-        <span class="card-title">每日总结</span>
-        <div class="summary-tools">
-          <el-radio-group v-model="activeMode" size="small">
-            <el-radio-button value="SIMULATION">模拟盘</el-radio-button>
-            <el-radio-button value="LIVE">实盘</el-radio-button>
-          </el-radio-group>
-          <span class="summary-hint">每 60 秒自动刷新</span>
-        </div>
-      </div>
-
-      <!-- 市场概况 -->
-      <div class="summary-section">
-        <div class="section-title">市场概况（24h）</div>
-        <div class="summary-grid">
-          <div class="summary-item">
-            <span class="sum-label">上涨 / 下跌</span>
-            <span>
-              <b class="text-green">{{ summary.market.up ?? 0 }}</b>
-              /
-              <b class="text-red">{{ summary.market.down ?? 0 }}</b>
-              <span class="sum-sub">（共 {{ summary.market.total ?? 0 }}）</span>
-            </span>
-          </div>
-          <div class="summary-item">
-            <span class="sum-label">中位涨跌</span>
-            <span :class="chgClass(summary.market.medianChange ?? 0)">{{
-              fmtChg(summary.market.medianChange)
-            }}</span>
-          </div>
-          <div class="summary-item">
-            <span class="sum-label">平均涨跌</span>
-            <span :class="chgClass(summary.market.avgChange ?? 0)">{{
-              fmtChg(summary.market.avgChange)
-            }}</span>
-          </div>
-          <div class="summary-item">
-            <span class="sum-label">总成交额</span>
-            <span>{{ fmtVolume(summary.market.totalQuoteVolume) }} U</span>
-          </div>
-        </div>
-        <div class="mover-row" v-if="summary.market.topGainers && summary.market.topGainers.length">
-          <div class="mover-col">
-            <div class="mover-title text-green">领涨</div>
-            <div v-for="g in summary.market.topGainers.slice(0, 5)" :key="g.symbol" class="mover-item">
-              <span>{{ g.symbol }}</span>
-              <span class="text-green">{{ fmtChg(g.change) }}</span>
-            </div>
-          </div>
-          <div class="mover-col">
-            <div class="mover-title text-red">领跌</div>
-            <div v-for="g in summary.market.topLosers.slice(0, 5)" :key="g.symbol" class="mover-item">
-              <span>{{ g.symbol }}</span>
-              <span class="text-red">{{ fmtChg(g.change) }}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 今日交易 -->
-      <div class="summary-section">
-        <div class="section-title">今日交易</div>
-        <div class="summary-grid">
-          <div class="summary-item">
-            <span class="sum-label">平仓笔数</span>
-            <span>{{ modeSummary.trades.closedCount ?? 0 }}</span>
-          </div>
-          <div class="summary-item">
-            <span class="sum-label">今日盈亏</span>
-            <span :class="chgClass(modeSummary.trades.todayPnl ?? 0)">{{
-              fmtNum(modeSummary.trades.todayPnl ?? 0, true)
-            }} U</span>
-          </div>
-          <div class="summary-item">
-            <span class="sum-label">胜率</span>
-            <span>{{ (modeSummary.trades.winRate ?? 0).toFixed(1) }}%</span>
-          </div>
-          <div class="summary-item">
-            <span class="sum-label">止损 / 跟踪止盈</span>
-            <span>{{ modeSummary.trades.stopCount ?? 0 }} / {{ modeSummary.trades.trailCount ?? 0 }}</span>
-          </div>
-        </div>
-        <el-table :data="modeSummary.trades.byCoin ?? []" size="small" stripe class="coin-table">
-          <el-table-column prop="symbol" label="币种" min-width="110" />
-          <el-table-column prop="trades" label="交易次数" min-width="80" align="right" />
-          <el-table-column prop="pnl" label="盈亏(U)" min-width="100" align="right">
-            <template #default="{ row }">
-              <span :class="chgClass(row.pnl)">{{ fmtNum(row.pnl, true) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="winRate" label="胜率" min-width="80" align="right">
-            <template #default="{ row }">{{ row.winRate.toFixed(1) }}%</template>
-          </el-table-column>
-          <el-table-column prop="avgHoldMin" label="平均持仓(分)" min-width="100" align="right" />
-          <el-table-column prop="avgWinPct" label="均盈%" min-width="80" align="right">
-            <template #default="{ row }">
-              <span class="text-green">{{ fmtChg(row.avgWinPct) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="avgLossPct" label="均亏%" min-width="80" align="right">
-            <template #default="{ row }">
-              <span class="text-red">{{ fmtChg(row.avgLossPct) }}</span>
-            </template>
-          </el-table-column>
-        </el-table>
-      </div>
-
-      <!-- 改进建议 -->
-      <div class="summary-section" v-if="modeSummary.suggestions.length">
-        <div class="section-title">改进建议</div>
-        <ul class="suggest-list">
-          <li v-for="(s, i) in modeSummary.suggestions" :key="i">{{ s }}</li>
-        </ul>
-      </div>
-    </div>
   </div>
 </template>
 

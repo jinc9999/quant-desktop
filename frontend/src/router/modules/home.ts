@@ -73,6 +73,15 @@ const children = isC
         }
       },
       {
+        path: "/strategy-summary",
+        name: "StrategySummary",
+        component: () => import("@/views/strategy-summary/index.vue"),
+        meta: {
+          title: "每日策略总结",
+          icon: "ep/data-analysis"
+        }
+      },
+      {
         path: "/service",
         name: "Service",
         component: () => import("@/views/service/index.vue"),
@@ -153,6 +162,15 @@ const children = isC
         meta: {
           title: "每日总结",
           icon: "ep/notebook"
+        }
+      },
+      {
+        path: "/strategy-summary",
+        name: "StrategySummary",
+        component: () => import("@/views/strategy-summary/index.vue"),
+        meta: {
+          title: "每日策略总结",
+          icon: "ep/data-analysis"
         }
       }
     ];

@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -739,6 +740,7 @@ func main() {
 	analyzeCmd := flag.NewFlagSet("analyze", flag.ExitOnError)
 	analyzeProxy := analyzeCmd.String("proxy", os.Getenv("HTTPS_PROXY"), "HTTP 代理地址")
 	analyzeRaw := analyzeCmd.Bool("raw", false, "原始爆拉后续走势分析（默认=策略口径模拟）")
+	analyzeDB := analyzeCmd.String("db", "", "客户端数据库路径（写入每日策略总结）")
 
 	reportCmd := flag.NewFlagSet("report", flag.ExitOnError)
 	mode := reportCmd.String("mode", "SIMULATION", "SIMULATION / LIVE")
@@ -761,7 +763,7 @@ func main() {
 		if *analyzeRaw {
 			err = analyzeBurst(*analyzeProxy)
 		} else {
-			err = analyzeStrategy(*analyzeProxy)
+			err = analyzeStrategy(*analyzeProxy, *analyzeDB)
 		}
 		if err != nil {
 			log.Fatalf("分析失败: %v", err)
@@ -938,6 +940,20 @@ func maxInt(a, b int) int {
 	return b
 }
 
+// max5mEntity 开仓时当前 15m 周期内最大 5m 实体涨幅（桶判定口径）
+func max5mEntity(k5 []kline, j int) float64 {
+	mx := 0.0
+	for z := j; z >= 0 && z > j-3; z-- {
+		if k5[z].open > 0 {
+			e := (k5[z].close - k5[z].open) / k5[z].open * 100
+			if e > mx {
+				mx = e
+			}
+		}
+	}
+	return mx
+}
+
 // ==================== 策略口径模拟（analyze 默认）====================
 // 按 D 策略真实规则回放当天 5m 数据：
 //   入仓: 15m 累计(收盘 vs 周期开盘) ≥3%
@@ -953,6 +969,8 @@ type simPos struct {
 	active   bool
 	heldBars int
 	addOn    bool
+	bucket   string
+	mult     float64
 	pnl      float64
 	reason   string
 }
@@ -967,7 +985,7 @@ type simState struct {
 	closed    []*simPos
 }
 
-func analyzeStrategy(proxy string) error {
+func analyzeStrategy(proxy, clientDB string) error {
 	client := httpClient(proxy)
 	tickers, err := fetchTickers(client)
 	if err != nil {
@@ -998,6 +1016,16 @@ func analyzeStrategy(proxy string) error {
 	var allClosed []*simPos
 	var totalSignals, totalOpens, totalAddons int
 	var dayPnl float64
+	type bucketStat struct {
+		opens, closed, wins int
+		pnl                 float64
+	}
+	buckets := map[string]*bucketStat{
+		"爆拉桶": {},
+		"中间桶": {},
+		"温和桶": {},
+	}
+	bucketMult := map[string]float64{"爆拉桶": 1.5, "中间桶": 1.0, "温和桶": 0.7}
 
 	for i, t := range pool {
 		if i >= 160 {
@@ -1038,7 +1066,7 @@ func analyzeStrategy(proxy string) error {
 				p.heldBars++
 				closed := false
 				if k.low <= p.entry*(1-slPct) {
-					p.pnl = (k.low - p.entry) / p.entry * nominal
+					p.pnl = (k.low - p.entry) / p.entry * nominal * p.mult
 					p.reason = "STOP_LOSS"
 					closed = true
 				} else if !p.active && k.high >= p.entry*(1+actPct) {
@@ -1049,13 +1077,13 @@ func analyzeStrategy(proxy string) error {
 						p.extreme = k.high
 					}
 					if k.low <= p.extreme*(1-cbPct) {
-						p.pnl = (p.extreme*(1-cbPct) - p.entry) / p.entry * nominal
+						p.pnl = (p.extreme*(1-cbPct) - p.entry) / p.entry * nominal * p.mult
 						p.reason = "TRAILING"
 						closed = true
 					}
 				}
 				if !closed && p.heldBars >= maxBars {
-					p.pnl = (k.close - p.entry) / p.entry * nominal
+					p.pnl = (k.close - p.entry) / p.entry * nominal * p.mult
 					p.reason = "MAX_HOLD"
 					closed = true
 				}
@@ -1063,6 +1091,13 @@ func analyzeStrategy(proxy string) error {
 					dayPnl += p.pnl
 					allClosed = append(allClosed, p)
 					st.closed = append(st.closed, p)
+					if b := buckets[p.bucket]; b != nil {
+						b.closed++
+						b.pnl += p.pnl
+						if p.pnl > 0 {
+							b.wins++
+						}
+					}
 					if p.reason == "TRAILING" {
 						st.cdUntil = k.openTime + cdTrail
 						st.lastCD = "TRAILING"
@@ -1082,10 +1117,20 @@ func analyzeStrategy(proxy string) error {
 				totalSignals++
 			}
 			if signal && k.openTime >= st.cdUntil {
+				m5 := max5mEntity(k5, j)
+				bkt := "温和桶"
+				switch {
+				case m5 >= 2.5:
+					bkt = "爆拉桶"
+				case m5 >= 2:
+					bkt = "中间桶"
+				}
+				mult := bucketMult[bkt]
 				if len(st.positions) == 0 {
-					st.positions = append(st.positions, &simPos{entry: k.close, extreme: k.close, heldBars: 1})
+					st.positions = append(st.positions, &simPos{entry: k.close, extreme: k.close, heldBars: 1, bucket: bkt, mult: mult})
 					st.opens++
 					totalOpens++
+					buckets[bkt].opens++
 				} else {
 					// 追单：任一持仓已激活 且 同币未达上限
 					anyActive := false
@@ -1096,9 +1141,10 @@ func analyzeStrategy(proxy string) error {
 						}
 					}
 					if anyActive && len(st.positions) < 1+maxAddOn {
-						st.positions = append(st.positions, &simPos{entry: k.close, extreme: k.close, heldBars: 1, addOn: true})
+						st.positions = append(st.positions, &simPos{entry: k.close, extreme: k.close, heldBars: 1, addOn: true, bucket: bkt, mult: mult})
 						st.addons++
 						totalAddons++
+						buckets[bkt].opens++
 					}
 				}
 			}
@@ -1148,5 +1194,78 @@ func analyzeStrategy(proxy string) error {
 		{"追单占比", fmt.Sprintf("%.1f%%", float64(addOnClosed)/float64(n)*100), ""},
 	}))
 	fmt.Println("\n⚠ 口径：本模拟按 5m 收盘/高低价近似回放，未含手续费滑点、未按 5m 爆拉分桶放大仓位；用于复盘当日策略环境，非实盘对账。")
+
+	// 三桶分析（按开仓时 5m 爆拉分桶）
+	fmt.Println("\n三桶分析（按开仓时 15m 周期内最大 5m 实体涨幅分桶，仓位按策略倍数：爆拉×1.5/中间×1.0/温和×0.7）:")
+	var bucketRows [][]string
+	var bucketList []map[string]interface{}
+	for _, name := range []string{"爆拉桶", "中间桶", "温和桶"} {
+		b := buckets[name]
+		wr := 0.0
+		if b.closed > 0 {
+			wr = float64(b.wins) / float64(b.closed) * 100
+		}
+		bucketRows = append(bucketRows, []string{
+			name,
+			fmt.Sprintf("%d", b.opens),
+			fmt.Sprintf("%d", b.closed),
+			fmt.Sprintf("%.1f%%", wr),
+			fmt.Sprintf("%+.2f U", b.pnl),
+			fmt.Sprintf("%+.2f U", safeDiv(b.pnl, float64(b.closed))),
+		})
+		bucketList = append(bucketList, map[string]interface{}{
+			"bucket": name, "opens": b.opens, "closed": b.closed,
+			"winRate": round2(wr), "pnl": round2(b.pnl), "avg": round2(safeDiv(b.pnl, float64(b.closed))),
+		})
+	}
+	fmt.Println(fmtTable([]string{"桶", "开仓", "平仓", "胜率", "盈亏", "平均每笔"}, bucketRows))
+
+	// 写入 daily_summaries（type=strategy），供前端"每日策略总结"页展示
+	if clientDB != "" {
+		sim := map[string]interface{}{
+			"signals": totalSignals, "opens": totalOpens, "addons": totalAddons,
+			"closed": len(allClosed), "winRate": round2(safeDiv(float64(wins), float64(n))*100),
+			"pnl": round2(dayPnl), "avg": round2(safeDiv(dayPnl, float64(n))),
+			"stop": reasonCnt["STOP_LOSS"], "trail": reasonCnt["TRAILING"], "maxhold": reasonCnt["MAX_HOLD"],
+			"addonClosed": addOnClosed,
+		}
+		if err := writeStrategySummary(clientDB, sim, bucketList); err != nil {
+			log.Printf("⚠ 写入策略总结失败: %v", err)
+		} else {
+			log.Printf("✅ 已写入每日策略总结（%s）", clientDB)
+		}
+	}
 	return nil
+}
+
+func round2(v float64) float64 { return math.Round(v*100) / 100 }
+
+func safeDiv(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return a / b
+}
+
+// writeStrategySummary 将策略口径模拟与三桶分析写入客户端库 daily_summaries（type=strategy）
+func writeStrategySummary(clientDB string, sim map[string]interface{}, buckets []map[string]interface{}) error {
+	db, err := sql.Open("sqlite3", "file:"+clientDB+"?_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	meta, _ := json.Marshal(map[string]interface{}{"sim": sim, "buckets": buckets})
+	now := time.Now().In(beijing)
+	date := now.Format("2006-01-02")
+	var id int64
+	err = db.QueryRow(`SELECT id FROM daily_summaries WHERE mode='SIMULATION' AND summary_date=? AND summary_type='strategy' AND deleted_at=0`, date).Scan(&id)
+	if err == nil {
+		_, err = db.Exec(`UPDATE daily_summaries SET feature_json=?, updated_at=? WHERE id=?`, string(meta), now.UnixMilli(), id)
+	} else {
+		_, err = db.Exec(`INSERT INTO daily_summaries
+			(mode, summary_date, summary_type, market_notes, today_pnl, win_rate, trade_count, rating, feature_json, created_at, updated_at)
+			VALUES ('SIMULATION',?, 'strategy', '策略口径当日模拟（自动生成）',0,0,0,0,?,?,?)`,
+			date, string(meta), now.UnixMilli(), now.UnixMilli())
+	}
+	return err
 }
