@@ -439,6 +439,7 @@ type metricRow struct {
 	PoolWidth         int     `json:"poolWidth"`
 	OpportunityCount  int     `json:"opportunityCount"`
 	OpportunityTotal  int     `json:"opportunityTotal"`
+	BurstCoinCount    int     `json:"burstCoinCount"`
 	BurstTotal        int     `json:"burstTotal"`
 	FakeBreakoutRate  float64 `json:"fakeBreakoutRate"`
 	BTCATRPct         float64 `json:"btcATRPct"`
@@ -470,7 +471,7 @@ func loadMetrics(from, to string) ([]metricRow, error) {
 	}
 	defer db.Close()
 	rows, err := db.Query(`SELECT date, pool_width, opportunity_count, opportunity_total,
-		burst_total, fake_breakout_rate, btc_atr_pct, max_15m_up, max_15m_down,
+		burst_coin_count, burst_total, fake_breakout_rate, btc_atr_pct, max_15m_up, max_15m_down,
 		fng, btc_chg_24h, eth_chg_24h, btc_funding_rate
 		FROM market_daily_metrics WHERE date BETWEEN ? AND ? ORDER BY date`, from, to)
 	if err != nil {
@@ -481,7 +482,7 @@ func loadMetrics(from, to string) ([]metricRow, error) {
 	for rows.Next() {
 		var r metricRow
 		if err := rows.Scan(&r.Date, &r.PoolWidth, &r.OpportunityCount, &r.OpportunityTotal,
-			&r.BurstTotal, &r.FakeBreakoutRate, &r.BTCATRPct, &r.Max15mUp, &r.Max15mDown,
+			&r.BurstCoinCount, &r.BurstTotal, &r.FakeBreakoutRate, &r.BTCATRPct, &r.Max15mUp, &r.Max15mDown,
 			&r.FNG, &r.BTCChg24h, &r.ETHChg24h, &r.BTCFundingRate); err != nil {
 			return nil, err
 		}
