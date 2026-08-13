@@ -120,11 +120,45 @@ func fetchKlines(client *http.Client, symbol, interval string, limit int) ([]kli
 	return out, nil
 }
 
+// fetchKlinesRange 按时间范围拉取 K 线（公开端点，无签名；limit 默认 1500，一次覆盖 5m×5 天）。
+// 用于 --date 历史日期重放：拉取 [startMs, endMs) 区间数据，保证全天覆盖 + 前序预热。
+func fetchKlinesRange(client *http.Client, symbol, interval string, startMs, endMs int64) ([]kline, error) {
+	path := fmt.Sprintf("/fapi/v1/klines?symbol=%s&interval=%s&startTime=%d&endTime=%d&limit=1500",
+		url.QueryEscape(symbol), interval, startMs, endMs)
+	var raw [][]json.RawMessage
+	if err := getJSON(client, path, &raw); err != nil {
+		return nil, err
+	}
+	out := make([]kline, 0, len(raw))
+	for _, row := range raw {
+		if len(row) < 5 {
+			continue
+		}
+		var k kline
+		if err := json.Unmarshal(row[0], &k.openTime); err != nil {
+			continue
+		}
+		var s string
+		for i, dst := range []*float64{&k.open, &k.high, &k.low, &k.close} {
+			if err := json.Unmarshal(row[i+1], &s); err != nil {
+				continue
+			}
+			if v, err := strconv.ParseFloat(s, 64); err == nil {
+				*dst = v
+			}
+		}
+		out = append(out, k)
+	}
+	return out, nil
+}
+
 type ticker24 struct {
 	Symbol      string  `json:"symbol"`
 	LastPrice   float64 `json:"lastPrice"`
 	PriceChange float64 `json:"priceChangePercent"`
 	QuoteVolume float64 `json:"quoteVolume"`
+	HighPrice   float64 `json:"highPrice"`
+	LowPrice    float64 `json:"lowPrice"`
 }
 
 // UnmarshalJSON 兼容币安 ticker 接口的字符串数字字段。
@@ -134,6 +168,8 @@ func (t *ticker24) UnmarshalJSON(data []byte) error {
 		LastPrice   json.RawMessage `json:"lastPrice"`
 		PriceChange json.RawMessage `json:"priceChangePercent"`
 		QuoteVolume json.RawMessage `json:"quoteVolume"`
+		HighPrice   json.RawMessage `json:"highPrice"`
+		LowPrice    json.RawMessage `json:"lowPrice"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return err
@@ -142,6 +178,8 @@ func (t *ticker24) UnmarshalJSON(data []byte) error {
 	t.LastPrice = numField(raw.LastPrice)
 	t.PriceChange = numField(raw.PriceChange)
 	t.QuoteVolume = numField(raw.QuoteVolume)
+	t.HighPrice = numField(raw.HighPrice)
+	t.LowPrice = numField(raw.LowPrice)
 	return nil
 }
 
@@ -1171,29 +1209,63 @@ func onlineAt(beats []int64, t int64) (bool, bool) {
 	return best <= 3*60*1000, true
 }
 
-// 反事实回放出口规则常量（与 A/D 口径模拟一致：sl3 / act2 / cb3 / 超时 36 根）
-const (
-	nominal = 100.0 // 每仓名义 100U（10U 保证金 × 10x）
-	slPct   = 0.03  // 止损 -3%
-	actPct  = 0.02  // 跟踪止盈激活 +2%
-	cbPct   = 0.03  // 激活后回撤 3% 平仓
-	maxBars = 36    // 最长持仓 36 根 5m = 180 分钟
-)
+// 每仓名义 100U（10U 保证金 × 10x）
+const nominal = 100.0
 
-// replayForcedOpen 反事实回放（D 默认：爆拉×1.5 / 中间×1.0 / 温和×0.7）
+// simRules 策略变体参数集（A/D 模拟口径，2026-08-14 起含手续费/滑点与客户端过滤器）
+type simRules struct {
+	label       string
+	gainReq     float64 // 15m 周期涨幅门槛 %
+	min24h      float64 // 24h 涨幅门槛 %（客户端持久化 0.1）
+	minVol      float64 // 24h 成交额门槛
+	maxPullback float64 // 山顶过滤器：距 24h 最高价回撤上限 %
+	slPct       float64 // 固定止损
+	actPct      float64 // 跟踪止盈激活
+	cbPct       float64 // 激活后回撤平仓
+	maxBars     int     // 最长持仓（5m 根数 = 180 分钟）
+	maxPos      int     // 全局同时持仓上限（客户端 maxOpenPositions）
+	feeRate     float64 // 单边手续费率（taker 0.0005 = 0.05%）
+	slip        float64 // 单边滑点（0.001 = 0.1%）
+	flat        bool    // 全桶 ×1.0（A 骨架，无爆拉仓位）
+}
+
+// rulesD 智慧版 D（客户端持久化口径：gain3 / 24h0.1 / 2000万 / 止损3% / 20仓 / 爆拉1.5/温和0.7）
+var rulesD = simRules{
+	label: "D（智慧版）", gainReq: 3, min24h: 0.1, minVol: 20_000_000, maxPullback: 9,
+	slPct: 0.03, actPct: 0.02, cbPct: 0.03, maxBars: 36, maxPos: 20,
+	feeRate: 0.0005, slip: 0.001, flat: false,
+}
+
+// rulesA 进攻 A（客户端持久化口径：与 D 同骨架，唯一差异 = 无爆拉仓位 / 15 仓）
+var rulesA = simRules{
+	label: "A（进攻）", gainReq: 3, min24h: 0.1, minVol: 20_000_000, maxPullback: 9,
+	slPct: 0.03, actPct: 0.02, cbPct: 0.03, maxBars: 36, maxPos: 15,
+	feeRate: 0.0005, slip: 0.001, flat: true,
+}
+
+// pnlWithCost 计算含手续费与滑点的单仓盈亏（LONG）：
+// 入场价 ×(1+滑点)、出场价 ×(1−滑点)；手续费 = 名义 × 单边费率 × 2（双边）。
+func pnlWithCost(entry, exit, notional, feeRate, slip float64) float64 {
+	entryFill := entry * (1 + slip)
+	exitFill := exit * (1 - slip)
+	pnl := (exitFill - entryFill) / entryFill * notional
+	return pnl - notional*2*feeRate
+}
+
+// replayForcedOpen 反事实回放（D 默认：爆拉×1.5 / 中间×1.0 / 温和×0.7，含手续费/滑点）
 func replayForcedOpen(k5 []kline, j int, bucket string) (float64, string, bool, bool) {
-	return replayForcedOpenR(k5, j, false, bucket)
+	return replayForcedOpenR(k5, j, rulesD, bucket)
 }
 
 // replayForcedOpenR 反事实回放：一笔被拦截的机会「假如开仓」会怎样。
-// flat=true（A 骨架）所有桶 ×1.0；flat=false（D 智慧版）按桶放大。
+// r.flat=true（A 骨架）所有桶 ×1.0；否则（D 智慧版）按桶放大。
 // 在 5m K 线索引 j 处以该根收盘价入仓（与策略口径模拟一致），按出口规则走完：
 // 止损 → 激活(+2%)后跟踪回撤 3% → 超时 180 分钟。
-// 返回（虚拟盈亏：100U 名义 × 桶倍数，离场原因，是否已平仓，盘中是否曾达 +2% 盈利高点）。
+// 返回（虚拟盈亏：100U 名义 × 桶倍数，含手续费/滑点；离场原因；是否已平仓；盘中是否曾达 +2% 盈利高点）。
 // 数据到底仍持有 → 返回 ("HOLDING", false)，不计入挡对/误杀。
-func replayForcedOpenR(k5 []kline, j int, flat bool, bucket string) (float64, string, bool, bool) {
+func replayForcedOpenR(k5 []kline, j int, r simRules, bucket string) (float64, string, bool, bool) {
 	mult := 1.0
-	if !flat {
+	if !r.flat {
 		switch bucket {
 		case "爆拉桶":
 			mult = 1.5
@@ -1213,14 +1285,14 @@ func replayForcedOpenR(k5 []kline, j int, flat bool, bucket string) (float64, st
 		k := k5[i]
 		held++
 		// 口径 B：盘中是否曾达 +2% 浮盈（盈利高点），与最终盈亏无关
-		if k.high >= entry*(1+actPct) {
+		if k.high >= entry*(1+r.actPct) {
 			hitProfit = true
 		}
 		// 止损优先（与回测保守顺序一致）
-		if k.low <= entry*(1-slPct) {
-			return (k.low - entry) / entry * nominal * mult, "STOP_LOSS", true, hitProfit
+		if k.low <= entry*(1-r.slPct) {
+			return pnlWithCost(entry, k.low, nominal*mult, r.feeRate, r.slip), "STOP_LOSS", true, hitProfit
 		}
-		if !active && k.high >= entry*(1+actPct) {
+		if !active && k.high >= entry*(1+r.actPct) {
 			active = true
 			extreme = k.high
 		}
@@ -1228,12 +1300,12 @@ func replayForcedOpenR(k5 []kline, j int, flat bool, bucket string) (float64, st
 			if k.high > extreme {
 				extreme = k.high
 			}
-			if k.low <= extreme*(1-cbPct) {
-				return (extreme*(1-cbPct) - entry) / entry * nominal * mult, "TRAILING", true, hitProfit
+			if k.low <= extreme*(1-r.cbPct) {
+				return pnlWithCost(entry, extreme*(1-r.cbPct), nominal*mult, r.feeRate, r.slip), "TRAILING", true, hitProfit
 			}
 		}
-		if held >= maxBars {
-			return (k.close - entry) / entry * nominal * mult, "MAX_HOLD", true, hitProfit
+		if held >= r.maxBars {
+			return pnlWithCost(entry, k.close, nominal*mult, r.feeRate, r.slip), "MAX_HOLD", true, hitProfit
 		}
 	}
 	return 0, "HOLDING", false, hitProfit
@@ -1254,7 +1326,7 @@ const (
 
 // ruleReasonCN 客户端规则拒绝原因中文名（拦截 = 策略规则内未开，该挡）
 var ruleReasonCN = map[string]string{
-	"maxpos":            "全局10仓上限",
+	"maxpos":            "全局持仓上限",
 	"cooldown":          "冷却期内",
 	"no_active":         "持仓未激活无法追单",
 	"addon_limit":       "同币追单达上限",
@@ -1388,7 +1460,7 @@ type rejectRec struct {
 	ts      int64 // 信号对应 5m K 线开盘时间（反事实回放定位用）
 	timeStr string
 	bucket  string
-	reason  string // maxpos=全局10仓上限 / cooldown=冷却中 / no_active=持仓未激活无法追单 / addon_limit=追单达上限
+	reason  string // maxpos=全局持仓上限 / cooldown=冷却中 / no_active=持仓未激活无法追单 / addon_limit=追单达上限
 	seq     int    // 该币当日第几个信号
 }
 
@@ -1452,8 +1524,17 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 	}
 	dayStart := beijingDayStartUTC(now)
 	dayEnd := dayStart + 24*60*60*1000
+	histMode := dateStr != "" // --date 历史重放：按目标日期拉全量数据 + 24h 预热
+	const warmupMs = int64(24 * 60 * 60 * 1000)
 	use1m := bucket1m
-	flat := variant == "A"
+	var rules simRules
+	switch variant {
+	case "A":
+		rules = rulesA
+	default:
+		rules = rulesD
+	}
+	flat := rules.flat
 	simOnly := simOnlyFlag || flat
 	csvSuffix := ""
 	if flat {
@@ -1468,13 +1549,12 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 
 	pool := make([]ticker24, 0, len(tickers))
 	for _, t := range tickers {
-		if t.QuoteVolume >= minPoolVol {
+		if t.QuoteVolume >= rules.minVol {
 			pool = append(pool, t)
 		}
 	}
 
 	const (
-		gainReq  = 3.0
 		cdTrail  = int64(15 * 60 * 1000)
 		cdStop   = int64(30 * 60 * 1000)
 		maxAddOn = 2
@@ -1536,7 +1616,13 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 		if i >= 160 {
 			break
 		}
-		k5, err5 := fetchKlines(client, t.Symbol, "5m", 288)
+		var k5 []kline
+		var err5 error
+		if histMode {
+			k5, err5 = fetchKlinesRange(client, t.Symbol, "5m", dayStart-warmupMs, dayEnd)
+		} else {
+			k5, err5 = fetchKlines(client, t.Symbol, "5m", 288)
+		}
 		if err5 != nil || len(k5) < 40 {
 			continue
 		}
@@ -1549,7 +1635,13 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 			}
 			k1Cache[t.Symbol] = k1
 		}
-		k15, err15 := fetchKlines(client, t.Symbol, "15m", 96)
+		var k15 []kline
+		var err15 error
+		if histMode {
+			k15, err15 = fetchKlinesRange(client, t.Symbol, "15m", dayStart-15*60*1000, dayEnd)
+		} else {
+			k15, err15 = fetchKlines(client, t.Symbol, "15m", 96)
+		}
 		if err15 != nil {
 			continue
 		}
@@ -1572,7 +1664,34 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 			if co > 0 {
 				cycleGain = (k.close - co) / co * 100
 			}
-			signal := co > 0 && cycleGain >= gainReq
+			signal := co > 0 && cycleGain >= rules.gainReq
+			// 客户端同款过滤器：24h 涨幅 + 山顶（距 24h 最高价回撤）。
+			// 历史重放用 K 线滚动计算（288 根前收盘 / 过去 24h 最高价），
+			// 当日实时分析用行情快照（ticker 24h 统计）。
+			if signal && rules.min24h > 0 {
+				if histMode && j >= 288 {
+					if prevC := k5[j-288].close; prevC > 0 && (k.close-prevC)/prevC*100 < rules.min24h {
+						signal = false
+					}
+				} else if !histMode && t.PriceChange < rules.min24h {
+					signal = false
+				}
+			}
+			if signal && rules.maxPullback > 0 {
+				hi := 0.0
+				if histMode {
+					for z := j; z >= 0 && z > j-288; z-- {
+						if k5[z].high > hi {
+							hi = k5[z].high
+						}
+					}
+				} else if t.HighPrice > 0 {
+					hi = t.HighPrice
+				}
+				if hi > 0 && (hi-k.close)/hi*100 > rules.maxPullback {
+					signal = false
+				}
+			}
 			seq := 0
 			if signal {
 				seq = st.signals + 1
@@ -1596,25 +1715,25 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 			for _, p := range st.positions {
 				p.heldBars++
 				closed := false
-				if k.low <= p.entry*(1-slPct) {
-					p.pnl = (k.low - p.entry) / p.entry * nominal * p.mult
+				if k.low <= p.entry*(1-rules.slPct) {
+					p.pnl = pnlWithCost(p.entry, k.low, nominal*p.mult, rules.feeRate, rules.slip)
 					p.reason = "STOP_LOSS"
 					closed = true
-				} else if !p.active && k.high >= p.entry*(1+actPct) {
+				} else if !p.active && k.high >= p.entry*(1+rules.actPct) {
 					p.active = true
 					p.extreme = k.high
 				} else if p.active {
 					if k.high > p.extreme {
 						p.extreme = k.high
 					}
-					if k.low <= p.extreme*(1-cbPct) {
-						p.pnl = (p.extreme*(1-cbPct) - p.entry) / p.entry * nominal * p.mult
+					if k.low <= p.extreme*(1-rules.cbPct) {
+						p.pnl = pnlWithCost(p.entry, p.extreme*(1-rules.cbPct), nominal*p.mult, rules.feeRate, rules.slip)
 						p.reason = "TRAILING"
 						closed = true
 					}
 				}
-				if !closed && p.heldBars >= maxBars {
-					p.pnl = (k.close - p.entry) / p.entry * nominal * p.mult
+				if !closed && p.heldBars >= rules.maxBars {
+					p.pnl = pnlWithCost(p.entry, k.close, nominal*p.mult, rules.feeRate, rules.slip)
 					p.reason = "MAX_HOLD"
 					closed = true
 				}
@@ -1647,8 +1766,8 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 			if signal && k.openTime >= st.cdUntil {
 				bkt := bucketOf(m5)
 				mult := bucketMult[bkt]
-				// 全局同时持仓上限（模拟建模：实际 Top10，信号密集时是主要执行约束）
-				if globalOpen >= 10 {
+				// 全局同时持仓上限（对齐客户端 maxOpenPositions：D=20 / A=15）
+				if globalOpen >= rules.maxPos {
 					rejects = append(rejects, rejectRec{symbol: t.Symbol, ts: k.openTime, timeStr: time.UnixMilli(k.openTime).In(beijing).Format("15:04"), bucket: bkt, reason: "maxpos", seq: seq})
 					continue
 				}
@@ -1726,7 +1845,11 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 				continue
 			}
 			var err error
-			k5, err = fetchKlines(client, a.Symbol, "5m", 288)
+			if histMode {
+				k5, err = fetchKlinesRange(client, a.Symbol, "5m", dayStart-warmupMs, dayEnd)
+			} else {
+				k5, err = fetchKlines(client, a.Symbol, "5m", 288)
+			}
 			if err != nil {
 				continue
 			}
@@ -1802,7 +1925,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 	if k1Skipped > 0 {
 		fmt.Printf("（%d 个币 1m K 线拉取失败跳过）\n", k1Skipped)
 	}
-	fmt.Printf("\n===== %s 策略口径当日模拟（%s，10U×10x=100U/仓，未计手续费/滑点）=====\n", simTitle, now.Format("2006-01-02"))
+	fmt.Printf("\n===== %s 策略口径当日模拟（%s，10U×10x=100U/仓，含手续费0.05%%/边+滑点0.1%%）=====\n", simTitle, now.Format("2006-01-02"))
 	fmt.Println(fmtTable([]string{"指标", "数值", "说明"}, [][]string{
 		{"15m 信号次数", fmt.Sprintf("%d", totalSignals), "收盘 vs 15m 周期开盘 ≥3%"},
 		{"开仓次数", fmt.Sprintf("%d（追单 %d）", totalOpens, totalAddons), "含冷却过滤；同币最多 1+2 仓"},
@@ -1825,7 +1948,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 	if flat {
 		sizeNote = "全桶仓位 ×1.0（无爆拉放大）"
 	}
-	fmt.Printf("\n⚠ 口径：本模拟按 5m 收盘/高低价近似回放，未含手续费滑点，%s；用于复盘当日策略环境，非实盘对账。\n", sizeNote)
+	fmt.Printf("\n⚠ 口径：本模拟按 5m 收盘/高低价近似回放，含手续费 0.05%%/边 + 滑点 0.1%%，%s；用于复盘当日策略环境，非实盘对账。\n", sizeNote)
 
 	// ==================== 转化率归因：模拟机会 → 成交 / 拦截(该挡) / 执行损耗 ====================
 	// 1) 实际成交匹配：同币 + 时间窗 ±45min 贪婪匹配（替代旧版按序号硬匹配，
@@ -1922,7 +2045,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 		count(totalAgg, d)
 	}
 	// 4) 每日可开仓漏斗（转化率口径：成交/机会；拦截=该挡，损耗=执行层真因）
-	fmt.Println("\n每日可开仓漏斗（策略规则可做，含10仓上限；拦截=策略规则内未开=该挡；损耗=执行层真实原因）:")
+	fmt.Printf("\n每日可开仓漏斗（策略规则可做，含同时持仓上限 D=%d/A=%d；拦截=策略规则内未开=该挡；损耗=执行层真实原因）:\n", rulesD.maxPos, rulesA.maxPos)
 	fh := []string{"桶", "首仓机会", "首仓成交", "首仓拦截", "首仓损耗", "追单机会", "追单成交", "追单拦截", "追单损耗", "机会合计", "成交合计", "转化率"}
 	var funnelRows [][]string
 	appendFunnel := func(name string, a *aggRow) {
@@ -1980,7 +2103,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 	// ==================== 逐单拦截明细（策略规则内未开 = 该挡） ====================
 	rejectCnt := map[string]int{"maxpos": 0, "cooldown": 0, "no_active": 0, "addon_limit": 0}
 	rejectNames := map[string]string{
-		"maxpos":      "全局10仓上限",
+		"maxpos":      "全局持仓上限",
 		"cooldown":    "冷却期内",
 		"no_active":   "持仓未激活(无法追单)",
 		"addon_limit": "同币追单达上限",
@@ -2052,7 +2175,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 			ihSkipped++
 			continue
 		}
-		pnl, exit, closed, _ := replayForcedOpenR(k5, idx, flat, it.bucket)
+		pnl, exit, closed, _ := replayForcedOpenR(k5, idx, rules, it.bucket)
 		ihDetails = append(ihDetails, interceptDetail{reason: it.reason, symbol: it.symbol, bucket: it.bucket, ts: it.ts, pnl: pnl, exit: exit, closed: closed})
 		st, ok2 := ih[it.reason]
 		if !ok2 {
@@ -2147,7 +2270,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 			ovSkipped++
 			continue
 		}
-		pnl, _, closed, hit := replayForcedOpenR(k5, idx, flat, so.bucket)
+		pnl, _, closed, hit := replayForcedOpenR(k5, idx, rules, so.bucket)
 		a := ov[so.bucket]
 		a.opp++
 		totalOv.opp++
@@ -2234,7 +2357,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 		if idx < 0 {
 			continue
 		}
-		pnl, _, closed, _ := replayForcedOpenR(k5, idx, flat, so.bucket)
+		pnl, _, closed, _ := replayForcedOpenR(k5, idx, rules, so.bucket)
 		a.cnt++
 		if !closed {
 			continue
@@ -2260,7 +2383,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 	if len(lr) > 0 {
 		fmt.Println(fmtTable([]string{"类别", "机会数", "已平仓", "虚拟盈亏", "漏掉盈利", "躲过亏损"}, lr))
 	}
-	if err := writeOpportunityValueCSV(now.Format("2006-01-02"), csvSuffix, flat, simOnly, simOpens, details, simActIdx, actuals, k5Cache, ov, totalOv, lossByCls); err != nil {
+	if err := writeOpportunityValueCSV(now.Format("2006-01-02"), csvSuffix, rules, simOnly, simOpens, details, simActIdx, actuals, k5Cache, ov, totalOv, lossByCls); err != nil {
 		log.Printf("⚠ 写机会价值 CSV 失败: %v", err)
 	}
 
@@ -2475,7 +2598,7 @@ func writeInterceptCSV(date, suffix string, details []interceptDetail, order []s
 }
 
 // writeOpportunityValueCSV 输出机会价值漏斗逐单明细 + 汇总（每小时自动覆盖更新）
-func writeOpportunityValueCSV(date, suffix string, flat, simOnly bool, simOpens []simOpenRec, details []simDetail, simActIdx []int,
+func writeOpportunityValueCSV(date, suffix string, r simRules, simOnly bool, simOpens []simOpenRec, details []simDetail, simActIdx []int,
 	actuals []actualTrade, k5Cache map[string][]kline, ov map[string]*ovAgg, totalOv *ovAgg, lossByCls map[string]*lossAgg) error {
 	path := fmt.Sprintf(`D:\0001_ba-A - 03\market_data\opportunity_value_%s%s.csv`, date, suffix)
 	f, err := os.Create(path)
@@ -2501,7 +2624,7 @@ func writeOpportunityValueCSV(date, suffix string, flat, simOnly bool, simOpens 
 		if idx < 0 {
 			continue
 		}
-		pnl, exit, closed, hit := replayForcedOpenR(k5, idx, flat, so.bucket)
+		pnl, exit, closed, hit := replayForcedOpenR(k5, idx, r, so.bucket)
 		tag := "首仓"
 		if so.addOn {
 			tag = "追单"

@@ -107,8 +107,8 @@ func TestReplayForcedOpen_StopLoss(t *testing.T) {
 	if !closed || exit != "STOP_LOSS" {
 		t.Fatalf("期望止损离场, 实际 exit=%s closed=%v", exit, closed)
 	}
-	// (96-100)/100*100*0.7 = -2.8
-	if pnl > -2.79 || pnl < -2.81 {
+	// 含手续费/滑点：入场100×1.001=100.1，出场96×0.999=95.904，名义70，双边费0.07 → ≈-3.00
+	if pnl > -2.99 || pnl < -3.02 {
 		t.Fatalf("温和桶止损虚拟盈亏错误: %f", pnl)
 	}
 	if hit {
@@ -126,7 +126,7 @@ func TestReplayForcedOpen_Trailing(t *testing.T) {
 	if !closed || exit != "TRAILING" {
 		t.Fatalf("期望跟踪离场, 实际 exit=%s closed=%v", exit, closed)
 	}
-	want := (103*0.97 - 100) / 100 * 100 * 1.5
+	want := pnlWithCost(100, 103*0.97, 100*1.5, 0.0005, 0.001)
 	if pnl > want+0.01 || pnl < want-0.01 {
 		t.Fatalf("跟踪虚拟盈亏错误: got %f want %f", pnl, want)
 	}
@@ -139,7 +139,7 @@ func TestReplayForcedOpen_MaxHoldAndHolding(t *testing.T) {
 	// 36 根横盘 → 超时平仓
 	k5 := []kline{mkKline(0, 100, 100, 100, 100)}
 	for i := int64(1); i <= 36; i++ {
-		k5 = append(k5, mkKline(i, 100, 100.5, 99.8, 100.1))
+		k5 = append(k5, mkKline(i, 100, 100.5, 99.8, 100.5))
 	}
 	pnl, exit, closed, _ := replayForcedOpen(k5, 0, "中间桶")
 	if !closed || exit != "MAX_HOLD" {
