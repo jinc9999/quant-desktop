@@ -542,7 +542,8 @@ func (e *Engine) runOnce(ctx context.Context) {
 		e.cfg.SignalMode, klineOpen, e.cfg.MaxPullbackPct, rankOK)
 	screenDur := time.Since(screenStart)
 
-	// 4.45 开仓尝试落库：实时候选逐条记录 + 智慧版 5m 收盘对齐候选
+	// 4.45 开仓尝试落库：实时候选逐条记录（闹钟）+ 智慧版 5m 收盘对齐候选
+	openCandidates := candidates
 	if e.cfg.SignalMode == "kline" {
 		for _, c := range candidates {
 			kopen := 0.0
@@ -562,7 +563,13 @@ func (e *Engine) runOnce(ctx context.Context) {
 			})
 		}
 		if e.cfg.SmartSizeMode > 0 {
-			e.appendKlineCloseCandidates(ctx, tickers, &candidates, priceMap, blockedNew, rankOK, now)
+			// D 版（2026-08-14 对齐回测口径）：盘中实时仅作闹钟（上方已落库 ReasonLiveSignal），
+			// 开仓只走 5m 收盘对齐通道（已收盘 5m 收盘价 vs 15m 周期开盘 ≥3%）。
+			// 根因：回测/漏斗按「5m 收盘价」判定机会，实时通道在 K 线中间追尖进场且用
+			// 未收盘实时价算爆拉桶，产生回测里不存在的交易（漏斗「客户端多开」57 笔/日）。
+			openCandidates = nil
+			e.appendKlineCloseCandidates(ctx, tickers, &openCandidates, priceMap, blockedNew, rankOK, now)
+			candidates = openCandidates
 		}
 	}
 
@@ -865,11 +872,13 @@ func (e *Engine) buildKlineOpenMap(ctx context.Context, tickers []binance.Ticker
 // 背景：回测与漏斗按「5m K 线收盘价 vs 15m 周期开盘价 ≥3%」判定机会，
 // 而客户端此前只用实时价每 15s 采样判定，信号可能在两次 tick 之间出现又消失
 // （SKYAIUSDT 19:40 漏斗机会 / 19:45 客户端才成交 案例）——这是「信号未触发」损耗的主因。
-// 本通道在每根 5m K 线收盘后，用已收盘 K 线收盘价重新判定一次，与回测口径一致，
-// 补上实时通道采不到的收盘信号。实时通道已覆盖的币不重复进候选。
+// 本通道在每根 5m K 线收盘后，用已收盘 K 线收盘价判定一次，与回测口径一致。
+// D 版（2026-08-14 起）这是唯一开仓通道：盘中实时只作闹钟，不再直接开仓。
 //
-// 请求控制：只对「实时涨幅已接近阈值（≥MinGainPct-1）」的币按需拉取 5m 状态，
-// 每个币每根 5m K 线最多拉一次（close5mFetched 去重），避免每 tick 全池拉取。
+// 请求控制：对通过粗筛（成交额 + 15m 开盘价已缓存）的币全量拉取 5m 状态，
+// 每个币每根 5m K 线最多拉一次（close5mFetched 去重），避免每 tick 重复拉取。
+// 不做「实时涨幅接近阈值」预筛：收盘价可能在实时价未接近阈值时达标（收盘瞬间跳价），
+// 预筛会漏掉与回测口径一致的机会。
 func (e *Engine) appendKlineCloseCandidates(ctx context.Context, tickers []binance.Ticker, candidates *[]Candidate,
 	priceMap map[string]float64, blockedNew map[string]bool, rankOK map[string]bool, now int64) {
 	if e.cfg.SignalMode != "kline" {
@@ -889,24 +898,18 @@ func (e *Engine) appendKlineCloseCandidates(ctx context.Context, tickers []binan
 		if !ok || entry.open <= 0 {
 			continue // 15m 开盘价缺失（kline_missing 已由 buildKlineOpenMap 记录）
 		}
-		// 按需拉取最新已收盘 5m 状态（仅实时涨幅接近阈值的币）
+		// 拉取最新已收盘 5m 状态（全量判定，不依赖实时涨幅预筛）
 		if e.close5mFetched[t.Symbol] < barStart {
-			liveGain := -100.0
-			if p, ok := priceMap[t.Symbol]; ok && p > 0 {
-				liveGain = (p - entry.open) / entry.open * 100
+			st, err := e.client.GetKline5mState(ctx, t.Symbol, now)
+			if err != nil {
+				continue // 拉取失败本 tick 跳过，下个 tick 重试（不落库防刷屏）
 			}
-			if liveGain >= e.cfg.MinGainPct-1 {
-				st, err := e.client.GetKline5mState(ctx, t.Symbol, now)
-				if err != nil {
-					continue // 拉取失败本 tick 跳过，下个 tick 重试（不落库防刷屏）
-				}
-				e.close5mFetched[t.Symbol] = st.Close5mOpenTime
-				if st.Close5mOpenTime > entry.close5mOpenTime {
-					entry.close5m = st.Close5m
-					entry.high5m = st.High5m
-					entry.close5mOpenTime = st.Close5mOpenTime
-					e.klineOpenCache[t.Symbol] = entry
-				}
+			e.close5mFetched[t.Symbol] = st.Close5mOpenTime
+			if st.Close5mOpenTime > entry.close5mOpenTime {
+				entry.close5m = st.Close5m
+				entry.high5m = st.High5m
+				entry.close5mOpenTime = st.Close5mOpenTime
+				e.klineOpenCache[t.Symbol] = entry
 			}
 		}
 		if entry.close5m <= 0 || entry.close5mOpenTime <= e.closed5mSeen[t.Symbol] {

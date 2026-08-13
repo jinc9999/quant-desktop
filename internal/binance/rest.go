@@ -758,14 +758,26 @@ type Kline5mState struct {
 // maxGain5mFromKlines 计算 nowMs 所在 15m 周期内最大 5m 收盘涨幅%（智慧版仓位因子）。
 // klines 按时间升序（limit=4 覆盖当前周期 3 根 + 周期前一根做首根基准），
 // 首根 5m 的涨幅用其 vs 周期前一根收盘价（与回测 max5mGain 口径一致）。
+// 未收盘的 5m（实时价）不参与判定：爆拉桶只用已收盘 K 线（2026-08-14 与回测口径对齐）。
 func maxGain5mFromKlines(klines []klineLite, nowMs int64) float64 {
+	// 周期基准取「最新已收盘 5m」所在的 15m 周期，而非 nowMs：
+	// 避免 15m 边界刚过的 0~15s 窗口把刚收盘的上一周期 K 线错配到新周期。
 	periodStart := nowMs - nowMs%900000
+	for i := len(klines) - 1; i >= 0; i-- {
+		if klines[i].openTime+300000 <= nowMs {
+			periodStart = klines[i].openTime - klines[i].openTime%900000
+			break
+		}
+	}
 	var prevClose float64
 	var closes []float64
 	for _, k := range klines {
 		if k.openTime < periodStart {
 			prevClose = k.closePx
 			continue
+		}
+		if k.openTime+300000 > nowMs {
+			continue // 该 5m 尚未收盘，close 是实时价，不计入爆拉桶
 		}
 		closes = append(closes, k.closePx)
 	}

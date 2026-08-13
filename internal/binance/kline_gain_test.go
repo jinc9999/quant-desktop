@@ -8,15 +8,13 @@ import (
 // TestMaxGain5mFromKlines 验证 5m 爆拉计算（智慧版仓位因子）：
 // 周期内每根 5m 收盘 vs 前一根收盘的涨幅，取最大；首根用周期前一根做基准。
 func TestMaxGain5mFromKlines(t *testing.T) {
-	// nowMs 落在 09:30（周期 09:15~09:30 内第 3 根 5m: 09:25~09:30）
+	// nowMs = 09:30:00：最新已收盘 5m 为 09:25~09:30，其所在 15m 周期为 09:15~09:30
 	nowMs := int64(9*3600+30*60) * 1000
-	periodStart := nowMs - nowMs%900000 // 09:15:00
-	// 前一根（09:10~09:15）收盘 100 → 周期内三根收盘 101 / 102 / 105.5
 	klines := []klineLite{
-		{openTime: periodStart - 300000, closePx: 100},
-		{openTime: periodStart, closePx: 101},       // +1.0%
-		{openTime: periodStart + 300000, closePx: 102}, // +0.99%
-		{openTime: periodStart + 600000, closePx: 105.5}, // +3.43%
+		{openTime: int64(9*3600+10*60) * 1000, closePx: 100},   // 09:10 前一根基准
+		{openTime: int64(9*3600+15*60) * 1000, closePx: 101},   // 09:15 +1.0%
+		{openTime: int64(9*3600+20*60) * 1000, closePx: 102},   // 09:20 +0.99%
+		{openTime: int64(9*3600+25*60) * 1000, closePx: 105.5}, // 09:25 +3.43%
 	}
 	got := maxGain5mFromKlines(klines, nowMs)
 	want := 3.431372549019608 // (105.5-102)/102*100
@@ -50,5 +48,26 @@ func TestMaxGain5mFromKlines_NoData(t *testing.T) {
 	klines := []klineLite{{openTime: periodStart - 300000, closePx: 100}}
 	if got := maxGain5mFromKlines(klines, nowMs); got != 0 {
 		t.Fatalf("无周期内 K 线=%v, want 0", got)
+	}
+}
+
+// TestMaxGain5mFromKlines_FormingBarExcluded 未收盘的 5m（实时价）不参与爆拉桶判定
+// （2026-08-14 与回测 max5mGain 已收盘口径对齐）。
+func TestMaxGain5mFromKlines_FormingBarExcluded(t *testing.T) {
+	nowMs := int64(9*3600+28*60) * 1000 // 09:28，当前 5m（09:25~09:30）尚未收盘
+	periodStart := nowMs - nowMs%900000 // 09:15
+	klines := []klineLite{
+		{openTime: periodStart - 300000, closePx: 100},
+		{openTime: periodStart, closePx: 101},          // +1.0%（已收盘）
+		{openTime: periodStart + 300000, closePx: 102}, // +0.99%（已收盘）
+		{openTime: periodStart + 600000, closePx: 106}, // 未收盘实时价 106，不应计入
+	}
+	got := maxGain5mFromKlines(klines, nowMs)
+	want := 1.0 // 周期内已收盘最大 = 09:15 根 (101-100)/100 = +1.0%（09:25 未收盘 106 不计入）
+	if math.Abs(got-want) > 1e-9 {
+		t.Fatalf("含未收盘5m maxGain=%v, want %v（未收盘实时价不应计入爆拉桶）", got, want)
+	}
+	if got >= 3.9 {
+		t.Fatalf("未收盘 5m 实时价 106 被计入爆拉桶: maxGain=%v", got)
 	}
 }
