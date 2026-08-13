@@ -1060,6 +1060,7 @@ func analyzeStrategy(proxy, clientDB string) error {
 	var allClosed []*simPos
 	var totalSignals, totalOpens, totalAddons int
 	var dayPnl float64
+	globalOpen := 0
 	type bucketStat struct {
 		opens, closed, wins int
 		pnl                 float64
@@ -1071,6 +1072,8 @@ func analyzeStrategy(proxy, clientDB string) error {
 	}
 	bucketMult := map[string]float64{"爆拉桶": 1.5, "中间桶": 1.0, "温和桶": 0.7}
 	signalsByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
+	dedupSignalsByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
+	dedupSeen := map[string]bool{}
 
 	// 实际交易（客户端库当天开仓）
 	var actuals []actualTrade
@@ -1119,6 +1122,12 @@ func analyzeStrategy(proxy, clientDB string) error {
 			if signal {
 				m5 = max5mEntity(k5, j)
 				signalsByBucket[bucketOf(m5)]++
+				// 去重机会：同一币同一 15m 周期只算一次（连续达标重复计会夸大机会数）
+				periodKey := t.Symbol + "|" + strconv.FormatInt(k.openTime/900000, 10)
+				if !dedupSeen[periodKey] {
+					dedupSeen[periodKey] = true
+					dedupSignalsByBucket[bucketOf(m5)]++
+				}
 			}
 
 			// 1) 现有持仓监控（先处理平仓再开仓，同根按保守顺序：止损→激活→跟踪→超时）
@@ -1149,6 +1158,7 @@ func analyzeStrategy(proxy, clientDB string) error {
 					closed = true
 				}
 				if closed {
+					globalOpen--
 					dayPnl += p.pnl
 					allClosed = append(allClosed, p)
 					st.closed = append(st.closed, p)
@@ -1180,8 +1190,13 @@ func analyzeStrategy(proxy, clientDB string) error {
 			if signal && k.openTime >= st.cdUntil {
 				bkt := bucketOf(m5)
 				mult := bucketMult[bkt]
+				// 全局同时持仓上限（模拟建模：实际 Top10，信号密集时是主要执行约束）
+				if globalOpen >= 10 {
+					continue
+				}
 				if len(st.positions) == 0 {
 					st.positions = append(st.positions, &simPos{entry: k.close, extreme: k.close, heldBars: 1, bucket: bkt, mult: mult})
+					globalOpen++
 					st.opens++
 					totalOpens++
 					buckets[bkt].opens++
@@ -1196,6 +1211,7 @@ func analyzeStrategy(proxy, clientDB string) error {
 					}
 					if anyActive && len(st.positions) < 1+maxAddOn {
 						st.positions = append(st.positions, &simPos{entry: k.close, extreme: k.close, heldBars: 1, addOn: true, bucket: bkt, mult: mult})
+						globalOpen++
 						st.addons++
 						totalAddons++
 						buckets[bkt].opens++
@@ -1283,36 +1299,35 @@ func analyzeStrategy(proxy, clientDB string) error {
 	fmt.Println("\n⚠ 口径：本模拟按 5m 收盘/高低价近似回放，未含手续费滑点、未按 5m 爆拉分桶放大仓位；用于复盘当日策略环境，非实盘对账。")
 
 	// 三桶分析（按开仓时 5m 爆拉分桶）
-	fmt.Println("\n三桶分析 · 机会 vs 实际（市场机会=15m≥3%信号按桶；模拟开仓=策略规则可做；实际=客户端库当天开仓）:")
+	fmt.Println("\n三桶分析 · 可开仓机会 vs 实际（可开仓机会=策略规则下能开的动作数（含追单、含全局10仓上限）；实际=客户端库当天开仓；少做=可开-实际）:")
 	var bucketRows [][]string
 	var bucketList []map[string]interface{}
 	for _, name := range []string{"爆拉桶", "中间桶", "温和桶"} {
 		b := buckets[name]
-		signals := signalsByBucket[name]
+		opportunity := b.opens // 可开仓机会 = 策略规则模拟能开的动作数（含追单）
 		actual := actualByBucket[name]
-		missed := signals - actual
+		missed := opportunity - actual
 		if missed < 0 {
 			missed = 0
 		}
 		conv := 0.0
-		if signals > 0 {
-			conv = float64(actual) / float64(signals) * 100
+		if opportunity > 0 {
+			conv = float64(actual) / float64(opportunity) * 100
 		}
 		bucketRows = append(bucketRows, []string{
 			name,
-			fmt.Sprintf("%d", signals),
-			fmt.Sprintf("%d", b.opens),
+			fmt.Sprintf("%d", opportunity),
 			fmt.Sprintf("%d", actual),
 			fmt.Sprintf("%+.2f U", actualPnlByBucket[name]),
 			fmt.Sprintf("%d", missed),
 			fmt.Sprintf("%.1f%%", conv),
 		})
 		bucketList = append(bucketList, map[string]interface{}{
-			"bucket": name, "signals": signals, "simOpens": b.opens, "actual": actual,
+			"bucket": name, "opportunity": opportunity, "actual": actual,
 			"actualPnl": round2(actualPnlByBucket[name]), "missed": missed, "conversion": round2(conv),
 		})
 	}
-	fmt.Println(fmtTable([]string{"桶", "市场机会", "模拟开仓", "实际开仓", "实际盈亏", "少做", "转化率"}, bucketRows))
+	fmt.Println(fmtTable([]string{"桶", "可开仓机会", "实际开仓", "实际盈亏", "少做", "转化率"}, bucketRows))
 
 	// 写入 daily_summaries（type=strategy），供前端"每日策略总结"页展示
 	if clientDB != "" {

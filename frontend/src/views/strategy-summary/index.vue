@@ -105,13 +105,12 @@ onUnmounted(() => {
       <div class="summary-section">
         <div class="section-title">三桶分析（按开仓时 5m 爆拉分档）</div>
         <div class="rule-note">
-          市场机会 = 15m≥3% 信号按桶；实际开仓 = 客户端库当天真实开仓；少做 = 机会 − 实际。
+          可开仓机会 = 策略规则下能开的动作数（含追单、含全局 10 仓上限）；实际开仓 = 客户端库当天真实开仓；少做 = 可开 − 实际。
           仓位倍数：爆拉桶（5m 单根 ≥2.5%）×1.5 / 中间桶 ×1.0 / 温和桶 ×0.7
         </div>
         <el-table v-if="buckets.length" :data="buckets" size="small" stripe>
           <el-table-column prop="bucket" label="桶" min-width="90" />
-          <el-table-column prop="signals" label="市场机会" min-width="90" align="right" />
-          <el-table-column prop="simOpens" label="模拟开仓" min-width="90" align="right" />
+          <el-table-column prop="opportunity" label="可开仓机会" min-width="100" align="right" />
           <el-table-column prop="actual" label="实际开仓" min-width="90" align="right" />
           <el-table-column label="实际盈亏(U)" min-width="100" align="right">
             <template #default="{ row }">
