@@ -1359,6 +1359,27 @@ func analyzeStrategy(proxy, clientDB string) error {
 			"actualPnl": round2(actualPnlByBucket[name]), "missed": missed, "conversion": round2(conv),
 		})
 	}
+	// 合计行
+	tOpp, tAct, tPnl, tMiss := 0, 0, 0.0, 0
+	tConv := 0.0
+	for _, bkt := range []string{"爆拉桶", "中间桶", "温和桶"} {
+		b := buckets[bkt]
+		tOpp += b.opens
+		tAct += actualByBucket[bkt]
+		tPnl += actualPnlByBucket[bkt]
+		tMiss += b.opens - actualByBucket[bkt]
+	}
+	if tOpp > 0 {
+		tConv = float64(tAct) / float64(tOpp) * 100
+	}
+	bucketRows = append(bucketRows, []string{
+		"合计", fmt.Sprintf("%d", tOpp), fmt.Sprintf("%d", tAct),
+		fmt.Sprintf("%+.2f U", tPnl), fmt.Sprintf("%d", tMiss), fmt.Sprintf("%.1f%%", tConv),
+	})
+	bucketList = append(bucketList, map[string]interface{}{
+		"bucket": "合计", "opportunity": tOpp, "actual": tAct,
+		"actualPnl": round2(tPnl), "missed": tMiss, "conversion": round2(tConv),
+	})
 	fmt.Println(fmtTable([]string{"桶", "可开仓机会", "实际开仓", "实际盈亏", "少做", "转化率"}, bucketRows))
 
 	// ==================== 逐单根因明细 ====================
