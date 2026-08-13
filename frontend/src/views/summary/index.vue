@@ -30,7 +30,7 @@ const modeSummary = computed(() => {
 });
 
 const typeLabel = (t: string) =>
-  t === "weekly" ? "周结" : t === "auto" ? "自动" : t === "morning" ? "晨间" : "每日";
+  t === "weekly" ? "周结" : t === "monthly" ? "月结" : t === "yearly" ? "年结" : t === "auto" ? "自动" : t === "morning" ? "晨间" : "每日";
 let listTimer: ReturnType<typeof setInterval> | null = null;
 let chart: echarts.ECharts | null = null;
 
