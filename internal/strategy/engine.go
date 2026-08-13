@@ -1921,11 +1921,23 @@ func (e *Engine) hasActiveStopOrders(positionID int64) bool {
 		return false // 查询失败视为无活跃条件单，保留本地兜底保护
 	}
 	for _, o := range orders {
-		if o.Status == "NEW" || o.Status == "PARTIALLY_FILLED" {
+		// 仅平仓类条件单算"活跃保护委托"；开仓市价单（MARKET）状态可能短暂为 NEW，
+		// 误判会导致本地监控跳过止损/跟踪（同 order 包 isProtectionOrder 口径）。
+		if (o.Status == "NEW" || o.Status == "PARTIALLY_FILLED") && isProtectionOrderType(o.OrderType) {
 			return true
 		}
 	}
 	return false
+}
+
+// isProtectionOrderType 平仓保护类条件单判断（与 order 包口径一致，避免 import 循环）
+func isProtectionOrderType(orderType string) bool {
+	switch orderType {
+	case "STOP_MARKET", "TRAILING_STOP_MARKET", "TAKE_PROFIT_MARKET", "LIMIT":
+		return true
+	default:
+		return false
+	}
 }
 
 // closePosition 执行平仓（市价卖出）并更新数据库

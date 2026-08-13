@@ -12,6 +12,25 @@ import (
 	"quant-desktop/internal/storage"
 )
 
+// TestIsProtectionOrder 回归：开仓市价单（MARKET）不属于保护委托，
+// 只有止损/跟踪/固定止盈/降级限价平仓才算——防止开仓单状态短暂为 NEW 时
+// 幂等检查误判"已有活跃委托"而跳过挂止损条件单（2026-08-13 D 版全仓无条件单根因）。
+func TestIsProtectionOrder(t *testing.T) {
+	cases := map[string]bool{
+		"MARKET":                 false, // 开仓单，绝不能算保护委托
+		"STOP_MARKET":            true,
+		"TRAILING_STOP_MARKET":   true,
+		"TAKE_PROFIT_MARKET":     true,
+		"LIMIT":                  true, // 降级平仓挂单
+		"UNKNOWN":                false,
+	}
+	for typ, want := range cases {
+		if got := isProtectionOrder(typ); got != want {
+			t.Errorf("isProtectionOrder(%q)=%v, want %v", typ, got, want)
+		}
+	}
+}
+
 // setupTestEnv 创建测试环境（临时 DB + DRY_RUN Client + Manager）
 // 参数:
 //   - t: 测试实例，用于创建临时目录和注册清理函数

@@ -33,6 +33,21 @@ type Manager struct {
 	OnClose func(symbol, reason string)
 }
 
+// isProtectionOrder 判断委托是否为平仓保护类条件单（止损/跟踪止损/固定止盈/降级限价平仓）。
+// 开仓市价单（MARKET）不属于保护委托——修复：开仓单入表时状态可能仍是 NEW，
+// 若被幂等检查误判为"已有活跃保护委托"，会跳过挂止损条件单，导致持仓无交易所侧保护。
+func isProtectionOrder(orderType string) bool {
+	switch orderType {
+	case binance.OrderTypeStopMarket,
+		binance.OrderTypeTrailingStop,
+		binance.OrderTypeTakeProfit,
+		binance.OrderTypeLimit:
+		return true
+	default:
+		return false
+	}
+}
+
 // NewManager 创建委托管理器
 // 参数:
 //   - client: 币安客户端，用于下单、撤单、查询委托状态
@@ -137,7 +152,8 @@ func (m *Manager) PlaceStopOrders(ctx context.Context, pos *storage.Position, cf
 		return fmt.Errorf("查询持仓委托失败 positionID=%d: %w", pos.ID, err)
 	}
 	for _, o := range existingOrders {
-		if o.Status == binance.OrderStatusNew || o.Status == binance.OrderStatusPartiallyFilled {
+		if (o.Status == binance.OrderStatusNew || o.Status == binance.OrderStatusPartiallyFilled) &&
+			isProtectionOrder(o.OrderType) {
 			log.Printf("[ORDER] 持仓 %d (%s) 已有活跃委托，跳过挂单", pos.ID, pos.Symbol)
 			return nil
 		}
@@ -354,7 +370,8 @@ func (m *Manager) EnsureOrdersForOpenPositions(ctx context.Context, cfg binance.
 		}
 		hasActive := false
 		for _, o := range orders {
-			if o.Status == binance.OrderStatusNew || o.Status == binance.OrderStatusPartiallyFilled {
+			if (o.Status == binance.OrderStatusNew || o.Status == binance.OrderStatusPartiallyFilled) &&
+				isProtectionOrder(o.OrderType) {
 				hasActive = true
 				break
 			}
