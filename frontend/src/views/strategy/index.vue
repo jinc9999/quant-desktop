@@ -702,6 +702,25 @@ onUnmounted(() => {
             </el-tooltip>
           </el-form-item>
         </el-form>
+        <div v-if="strategyParams.smartSizeMode === 1" class="smart-rule">
+          <div class="smart-rule-title">分档规则（开仓时看 15m 周期内最大单根 5m 涨幅）</div>
+          <div class="smart-rule-row">
+            <span class="smart-bucket">爆拉桶</span>
+            <span class="smart-cond">最大 5m 涨幅 ≥ {{ strategyParams.smartSizeBoundary }}%</span>
+            <span class="smart-mult">仓位 ×{{ strategyParams.smartSizeHigh }}</span>
+          </div>
+          <div class="smart-rule-row">
+            <span class="smart-bucket">中间桶</span>
+            <span class="smart-cond">2% ~ {{ strategyParams.smartSizeBoundary }}%</span>
+            <span class="smart-mult">仓位 ×1.0</span>
+          </div>
+          <div class="smart-rule-row">
+            <span class="smart-bucket">温和桶</span>
+            <span class="smart-cond">＜ 2%</span>
+            <span class="smart-mult">仓位 ×{{ strategyParams.smartSizeLow }}</span>
+          </div>
+          <div class="smart-rule-note">示例：10U 单仓 → 爆拉 {{ 10 * strategyParams.smartSizeHigh }}U / 中间 10U / 温和 {{ 10 * strategyParams.smartSizeLow }}U</div>
+        </div>
       </div>
 
       <!-- 控制卡片 -->
@@ -766,6 +785,44 @@ onUnmounted(() => {
 .status-badge.running {
   background: rgba(34, 197, 94, 0.15);
   color: #22c55e;
+}
+.smart-rule {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.smart-rule-title {
+  font-size: 12px;
+  color: var(--quant-text-secondary, #9ca3af);
+  margin-bottom: 6px;
+}
+.smart-rule-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 0;
+  font-size: 13px;
+}
+.smart-bucket {
+  width: 56px;
+  font-weight: 600;
+}
+.smart-cond {
+  flex: 1;
+  color: var(--quant-text-secondary, #9ca3af);
+}
+.smart-mult {
+  font-weight: 600;
+  color: #f59e0b;
+}
+.smart-rule-note {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.1);
+  font-size: 12px;
+  color: var(--quant-text-secondary, #9ca3af);
 }
 .status-badge.stopped {
   background: rgba(239, 68, 68, 0.15);
