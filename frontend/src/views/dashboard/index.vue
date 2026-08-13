@@ -10,6 +10,9 @@ import { callService } from "../../utils/service";
 
 defineOptions({ name: "Dashboard" });
 
+/** C 版（超能战士）：隐藏策略参数相关指标卡 */
+const isC = import.meta.env.VITE_PRODUCT_VARIANT === "C";
+
 /** 仪表盘数据（与 Go 后端 GetDashboardData 返回字段一致） */
 interface DashboardData {
   running: boolean;
@@ -327,8 +330,8 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- 扫描配置 -->
-      <div class="quant-card">
+      <!-- 扫描配置（C 版隐藏：策略参数不对外展示） -->
+      <div v-if="!isC" class="quant-card">
         <div class="card-header">
           <span class="card-title">扫描配置</span>
         </div>

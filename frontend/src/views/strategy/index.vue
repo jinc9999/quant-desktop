@@ -52,7 +52,13 @@ const strategyParams = ref({
   signalMode: "kline",         // 信号模式：kline=15m K线实体实时检测 / sliding=滑动窗口（旧版）
   maxPullbackPct: 9.0,         // 山顶过滤器（%）：距 24h 最高/最低回撤超此值不追，0=关闭
   enableNewListingFilter: true, // 新币过滤：排除上市 60 天内的新合约（无历史数据、波动剧烈）
-  newListingMinDays: 60        // 新币过滤天数阈值（天）：上市天数 <= 该值的合约被过滤
+  newListingMinDays: 60,       // 新币过滤天数阈值（天）：上市天数 <= 该值的合约被过滤
+  // 智慧版 D（5m 爆拉力度仓位，2026-08-13 回测三关验证）：
+  // 当前 15m 周期内最大 5m 收盘涨幅 >= 边界 → 仓位 ×high；2%~边界 → 均仓；<2% → ×low
+  smartSizeMode: 0,            // 0=关闭（A/B 默认）1=开启（D 智慧版默认）
+  smartSizeHigh: 1.5,          // 爆拉桶仓位倍数
+  smartSizeLow: 0.7,           // 温和桶仓位倍数
+  smartSizeBoundary: 2.5       // 爆拉桶边界（%）
 });
 
 // 运行状态
@@ -121,7 +127,11 @@ function toBackendConfig() {
     signalMode: p.signalMode,
     maxPullbackPct: p.maxPullbackPct,
     enableNewListingFilter: p.enableNewListingFilter,
-    newListingMinDays: p.newListingMinDays
+    newListingMinDays: p.newListingMinDays,
+    smartSizeMode: p.smartSizeMode ?? 0,
+    smartSizeHigh: p.smartSizeHigh ?? 1.5,
+    smartSizeLow: p.smartSizeLow ?? 0.7,
+    smartSizeBoundary: p.smartSizeBoundary ?? 2.5
   };
 }
 
@@ -166,7 +176,11 @@ async function loadConfig() {
       signalMode: cfg.signalMode ?? "kline",
       maxPullbackPct: cfg.maxPullbackPct ?? 9.0,
       enableNewListingFilter: cfg.enableNewListingFilter ?? true,
-      newListingMinDays: cfg.newListingMinDays ?? 60
+      newListingMinDays: cfg.newListingMinDays ?? 60,
+      smartSizeMode: cfg.smartSizeMode ?? 0,
+      smartSizeHigh: cfg.smartSizeHigh ?? 1.5,
+      smartSizeLow: cfg.smartSizeLow ?? 0.7,
+      smartSizeBoundary: cfg.smartSizeBoundary ?? 2.5
     };
   }
 }
@@ -674,6 +688,33 @@ onUnmounted(() => {
           <el-form-item label="最大回撤(%)">
             <el-tooltip content="账户从启动时权益回撤达到此比例后全面熔断，停止开新仓（已生效）" placement="top">
               <el-input-number v-model="strategyParams.maxDrawdownPct" :min="1" :max="50" :step="1" />
+            </el-tooltip>
+          </el-form-item>
+        </el-form>
+      </div>
+
+      <!-- 智慧版卡片（5m 爆拉力度仓位，D 策略专属） -->
+      <div class="quant-card">
+        <h3>智慧版 · 5m 爆拉仓位</h3>
+        <el-form label-width="150px" size="default">
+          <el-form-item label="启用">
+            <el-tooltip content="开启后：当前 15m 周期内出现 ≥边界% 的 5m 爆拉 → 仓位 ×高倍；2%~边界 → 均仓；<2% → ×低倍。A/B 默认关闭，D 智慧版默认开启。回测三关验证（A 骨架+1.5/0.7/2.5）：全周期 +36%、2025-26 样本外 +39%、扰动稳定" placement="top">
+              <el-switch v-model="strategyParams.smartSizeMode" :active-value="1" :inactive-value="0" />
+            </el-tooltip>
+          </el-form-item>
+          <el-form-item v-if="strategyParams.smartSizeMode === 1" label="爆拉仓位倍数">
+            <el-tooltip content="5m 爆拉 ≥ 边界% 时的单仓倍数（回测最优 1.5）" placement="top">
+              <el-input-number v-model="strategyParams.smartSizeHigh" :min="1" :max="3" :step="0.1" />
+            </el-tooltip>
+          </el-form-item>
+          <el-form-item v-if="strategyParams.smartSizeMode === 1" label="温和仓位倍数">
+            <el-tooltip content="5m 子涨幅 <2% 时的单仓倍数（回测最优 0.7）" placement="top">
+              <el-input-number v-model="strategyParams.smartSizeLow" :min="0.3" :max="1" :step="0.1" />
+            </el-tooltip>
+          </el-form-item>
+          <el-form-item v-if="strategyParams.smartSizeMode === 1" label="爆拉边界(%)">
+            <el-tooltip content="15m 周期内最大 5m 收盘涨幅达到该值即算爆拉桶（回测最优 2.5%）" placement="top">
+              <el-input-number v-model="strategyParams.smartSizeBoundary" :min="1.5" :max="5" :step="0.1" />
             </el-tooltip>
           </el-form-item>
         </el-form>

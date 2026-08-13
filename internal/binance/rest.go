@@ -56,6 +56,14 @@ type Client struct {
 
 	// DRY_RUN 模式模拟 OrderID 生成器（时间戳×1000+计数器，避免同毫秒重复）
 	dryRunOrderID atomic.Int64
+
+	// 行情数据源解耦（模拟盘专用）：
+	// SIMULATION 模式下信号判定使用实盘行情（fapi），订单/账户仍走 demo（futuresClient）。
+	// 原因：demo 平台的 24h 成交额比实盘虚高 20~40 倍、现价/涨幅存在 0.1%~0.5% 级差异，
+	// 导致同一策略在两端筛出不同候选池（实盘被 2000 万成交额过滤的币，模拟盘照开）。
+	// LIVE/DRY_RUN 模式为 nil，行为与改造前完全一致。
+	marketHTTP *http.Client
+	marketBase string // 实盘行情域名，如 https://fapi.binance.com
 }
 
 // ProxyURL 返回客户端实际使用的代理 URL（nil 表示直连）。
@@ -259,6 +267,16 @@ func NewClient(apiKey, apiSecret, mode string, proxyAddr string, proxyPort int) 
 	httpClient := newProxiedHTTPClient(proxyURL)
 	fut.HTTPClient = httpClient
 
+	// 模拟盘行情数据源解耦：信号判定走实盘行情（fapi），交易/账户仍走 demo。
+	// 实盘(LIVE)/DRY_RUN 不启用（marketHTTP=nil），行为与改造前一致。
+	var marketHTTP *http.Client
+	marketBase := ""
+	if mode == "SIMULATION" {
+		marketHTTP = newProxiedHTTPClient(proxyURL)
+		marketBase = "https://fapi.binance.com"
+		log.Printf("[Binance] 模拟盘行情数据源已切换到实盘 fapi（信号与实盘对齐，订单仍发 demo）")
+	}
+
 	// WS 连接使用独立的 gorilla 拨号器，需通过 SetWsProxyUrl 单独设置代理，
 	// 否则 WS 会直连币安（在需代理的网络下超时），导致行情流不可用。
 	if proxyURL != nil {
@@ -275,6 +293,8 @@ func NewClient(apiKey, apiSecret, mode string, proxyAddr string, proxyPort int) 
 		onboardDateMap: make(map[string]int64),
 		leverageSet:    make(map[string]bool),
 		marginModeSet:  make(map[string]bool),
+		marketHTTP:     marketHTTP,
+		marketBase:     marketBase,
 	}
 }
 
@@ -497,6 +517,113 @@ func isTransientErr(err error) bool {
 	return false
 }
 
+// marketTickerRaw 实盘 24hr 行情原始 JSON（数据源解耦用）
+type marketTickerRaw struct {
+	Symbol             string `json:"symbol"`
+	LastPrice          string `json:"lastPrice"`
+	PriceChangePercent string `json:"priceChangePercent"`
+	QuoteVolume        string `json:"quoteVolume"`
+	HighPrice          string `json:"highPrice"`
+	LowPrice           string `json:"lowPrice"`
+}
+
+// fetchLiveTickers 从实盘域名拉取全市场 24h 行情（模拟盘信号数据源）。
+// 使用独立 HTTP 客户端直连 fapi，不走 demo（demo 成交额虚高 20~40 倍）。
+func (c *Client) fetchLiveTickers(ctx context.Context) ([]Ticker, error) {
+	if c.marketHTTP == nil || c.marketBase == "" {
+		return nil, errors.New("实盘行情数据源未启用")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.marketBase+"/fapi/v1/ticker/24hr", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.marketHTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("实盘行情接口返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var raw []marketTickerRaw
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return nil, err
+	}
+	var result []Ticker
+	for _, t := range raw {
+		if len(t.Symbol) > 4 && t.Symbol[len(t.Symbol)-4:] == "USDT" {
+			result = append(result, Ticker{
+				Symbol:      t.Symbol,
+				LastPrice:   mustParseFloat(t.LastPrice),
+				PriceChange: mustParseFloat(t.PriceChangePercent),
+				QuoteVolume: mustParseFloat(t.QuoteVolume),
+				HighPrice:   mustParseFloat(t.HighPrice),
+				LowPrice:    mustParseFloat(t.LowPrice),
+			})
+		}
+	}
+	return result, nil
+}
+
+// KlineInfo 当前未收盘 K 线的关键字段（信号判定用）
+type KlineInfo struct {
+	Open           float64 // 本周期开盘价
+	TakerBuyQuote  float64 // 本周期主动买入成交额（USDT）
+	QuoteVolume    float64 // 本周期总成交额（USDT）
+}
+
+// getLiveKlineInfo 从实盘域名拉取指定交易对当前未收盘 K 线的开盘价与主动买量（模拟盘信号数据源）。
+func (c *Client) getLiveKlineInfo(ctx context.Context, symbol, interval string) (KlineInfo, error) {
+	var ki KlineInfo
+	if c.marketHTTP == nil || c.marketBase == "" {
+		return ki, errors.New("实盘行情数据源未启用")
+	}
+	u := fmt.Sprintf("%s/fapi/v1/klines?symbol=%s&interval=%s&limit=1",
+		c.marketBase, url.QueryEscape(symbol), url.QueryEscape(interval))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return ki, err
+	}
+	resp, err := c.marketHTTP.Do(req)
+	if err != nil {
+		return ki, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return ki, fmt.Errorf("实盘K线接口返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var raw [][]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return ki, err
+	}
+	if len(raw) == 0 || len(raw[0]) < 2 {
+		return ki, fmt.Errorf("实盘 %s K线无数据", symbol)
+	}
+	var s string
+	if err := json.Unmarshal(raw[0][1], &s); err != nil {
+		return ki, err
+	}
+	ki.Open = mustParseFloat(s)
+	// 列序号：0=openTime 1=open ... 7=quoteVolume 10=takerBuyQuote
+	if len(raw[0]) > 7 {
+		_ = json.Unmarshal(raw[0][7], &s)
+		ki.QuoteVolume = mustParseFloat(s)
+	}
+	if len(raw[0]) > 10 {
+		_ = json.Unmarshal(raw[0][10], &s)
+		ki.TakerBuyQuote = mustParseFloat(s)
+	}
+	return ki, nil
+}
+
+// getLiveKlineOpen 从实盘域名拉取指定交易对当前未收盘 K 线的开盘价（兼容旧接口）。
+func (c *Client) getLiveKlineOpen(ctx context.Context, symbol, interval string) (float64, error) {
+	ki, err := c.getLiveKlineInfo(ctx, symbol, interval)
+	return ki.Open, err
+}
+
 // FetchTickers 获取全市场 24h 行情（含重试）。
 // 网络瞬时错误（如代理/交易所 EOF）最多重试 3 次，避免单次抖动导致行情缺失。
 // 参数:
@@ -507,6 +634,20 @@ func isTransientErr(err error) bool {
 //   - error: 重试耗尽仍失败时返回错误
 func (c *Client) FetchTickers(ctx context.Context) ([]Ticker, error) {
 	const attempts = 3
+	// 模拟盘：信号数据源用实盘行情（订单仍发 demo）
+	if c.marketHTTP != nil {
+		for i := 0; i < attempts; i++ {
+			r, err := c.fetchLiveTickers(ctx)
+			if err == nil {
+				return r, nil
+			}
+			if !isTransientErr(err) || i == attempts-1 {
+				return nil, fmt.Errorf("获取实盘行情失败: %w", err)
+			}
+			log.Printf("[Binance] FetchTickers(实盘源) 瞬时错误，重试 %d/%d: %v", i+1, attempts, err)
+			time.Sleep(time.Duration(i+1) * time.Second)
+		}
+	}
 	var raw []*futures.PriceChangeStats
 	var err error
 	for i := 0; i < attempts; i++ {
@@ -552,6 +693,10 @@ func (c *Client) GetKlineOpen(ctx context.Context, symbol, interval string) (flo
 	if c.isDryRun() {
 		return 100.0, nil // DRY_RUN 返回固定模拟值，保证单测结果可预测
 	}
+	if c.marketHTTP != nil {
+		// 模拟盘：K 线开盘价用实盘数据源（信号与实盘对齐）
+		return c.getLiveKlineOpen(ctx, symbol, interval)
+	}
 	klines, err := c.futuresClient.NewKlinesService().Symbol(symbol).Interval(interval).Limit(1).Do(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("获取 %s K线失败: %w", symbol, err)
@@ -560,6 +705,132 @@ func (c *Client) GetKlineOpen(ctx context.Context, symbol, interval string) (flo
 		return 0, fmt.Errorf("获取 %s K线失败: 无数据", symbol)
 	}
 	return mustParseFloat(klines[0].Open), nil
+}
+
+// GetKlineInfo 获取指定交易对「当前未收盘」K 线的开盘价与主动买量（方向观测/信号审计用）。
+// 返回:
+//   - KlineInfo: 开盘价、主动买入成交额、总成交额
+//   - error: 拉取失败时返回错误
+func (c *Client) GetKlineInfo(ctx context.Context, symbol, interval string) (KlineInfo, error) {
+	var ki KlineInfo
+	if c.isDryRun() {
+		ki.Open = 100.0
+		return ki, nil
+	}
+	if c.marketHTTP != nil {
+		return c.getLiveKlineInfo(ctx, symbol, interval)
+	}
+	klines, err := c.futuresClient.NewKlinesService().Symbol(symbol).Interval(interval).Limit(1).Do(ctx)
+	if err != nil {
+		return ki, fmt.Errorf("获取 %s K线失败: %w", symbol, err)
+	}
+	if len(klines) == 0 {
+		return ki, fmt.Errorf("获取 %s K线失败: 无数据", symbol)
+	}
+	k := klines[0]
+	ki.Open = mustParseFloat(k.Open)
+	ki.TakerBuyQuote = mustParseFloat(k.TakerBuyQuoteAssetVolume)
+	ki.QuoteVolume = mustParseFloat(k.QuoteAssetVolume)
+	return ki, nil
+}
+
+// klineLite K 线最小字段（5m 爆拉计算用）
+type klineLite struct {
+	openTime int64
+	closePx  float64
+}
+
+// maxGain5mFromKlines 计算 nowMs 所在 15m 周期内最大 5m 收盘涨幅%（智慧版仓位因子）。
+// klines 按时间升序（limit=4 覆盖当前周期 3 根 + 周期前一根做首根基准），
+// 首根 5m 的涨幅用其 vs 周期前一根收盘价（与回测 max5mGain 口径一致）。
+func maxGain5mFromKlines(klines []klineLite, nowMs int64) float64 {
+	periodStart := nowMs - nowMs%900000
+	var prevClose float64
+	var closes []float64
+	for _, k := range klines {
+		if k.openTime < periodStart {
+			prevClose = k.closePx
+			continue
+		}
+		closes = append(closes, k.closePx)
+	}
+	mx := 0.0
+	for i, c := range closes {
+		base := prevClose
+		if i > 0 {
+			base = closes[i-1]
+		}
+		if base > 0 {
+			g := (c - base) / base * 100
+			if g > mx {
+				mx = g
+			}
+		}
+	}
+	return mx
+}
+
+// getLiveKline5mMaxGain 从实盘域名拉取最近 4 根 5m K 线并计算当前 15m 周期最大 5m 涨幅
+// （模拟盘信号数据源，与 getLiveKlineInfo 一致走 fapi）。
+func (c *Client) getLiveKline5mMaxGain(ctx context.Context, symbol string, nowMs int64) (float64, error) {
+	if c.marketHTTP == nil || c.marketBase == "" {
+		return 0, errors.New("实盘行情数据源未启用")
+	}
+	u := fmt.Sprintf("%s/fapi/v1/klines?symbol=%s&interval=5m&limit=4",
+		c.marketBase, url.QueryEscape(symbol))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return 0, err
+	}
+	resp, err := c.marketHTTP.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return 0, fmt.Errorf("实盘5m K线接口返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var raw [][]json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		return 0, err
+	}
+	klines := make([]klineLite, 0, len(raw))
+	for _, row := range raw {
+		if len(row) < 5 {
+			continue
+		}
+		var t int64
+		var s string
+		if err := json.Unmarshal(row[0], &t); err != nil {
+			continue
+		}
+		if err := json.Unmarshal(row[4], &s); err != nil {
+			continue
+		}
+		klines = append(klines, klineLite{openTime: t, closePx: mustParseFloat(s)})
+	}
+	return maxGain5mFromKlines(klines, nowMs), nil
+}
+
+// GetKline5mMaxGain 获取当前 15m 周期内最大 5m 收盘涨幅%（智慧版 5m 爆拉力度因子）。
+// 模拟盘同样走实盘行情源（与信号判定一致，订单仍发 demo）；DRY_RUN 返回 0（无影响）。
+func (c *Client) GetKline5mMaxGain(ctx context.Context, symbol string, nowMs int64) (float64, error) {
+	if c.isDryRun() {
+		return 0, nil
+	}
+	if c.marketHTTP != nil {
+		return c.getLiveKline5mMaxGain(ctx, symbol, nowMs)
+	}
+	klines, err := c.futuresClient.NewKlinesService().Symbol(symbol).Interval("5m").Limit(4).Do(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("获取 %s 5m K线失败: %w", symbol, err)
+	}
+	lites := make([]klineLite, 0, len(klines))
+	for _, k := range klines {
+		lites = append(lites, klineLite{openTime: k.OpenTime, closePx: mustParseFloat(k.Close)})
+	}
+	return maxGain5mFromKlines(lites, nowMs), nil
 }
 
 // OpenLong 市价多头开仓
@@ -583,10 +854,12 @@ func (c *Client) OpenLong(ctx context.Context, symbol string, amount float64) (*
 	}
 
 	return &OrderResult{
-		OrderID: order.OrderID,
-		Symbol:  symbol,
-		Side:    "BUY",
-		Status:  string(order.Status),
+		OrderID:      order.OrderID,
+		Symbol:       symbol,
+		Side:         "BUY",
+		Status:       string(order.Status),
+		FilledPrice:  mustParseFloat(order.AvgPrice),
+		FilledAmount: mustParseFloat(order.ExecutedQuantity),
 	}, nil
 }
 

@@ -111,6 +111,7 @@ type StrategyConfig struct {
 	SlippageBig              float64 // 滑点: 大币（默认 0.05%）
 	SlippageMid              float64 // 滑点: 中币（默认 1%）
 	SlippageSmall            float64 // 滑点: 小币（默认 2%）
+	FlatSlippage             float64 // S01/momentum 单边滑点（0=关闭，默认 0；-slip 指定）
 	ATRDecayPct              float64 // L5 波动率衰减: ATR ≤ 开仓后峰值×该值（默认 0.5）
 	ATRDecayMinHoldBars      int     // L5 波动率衰减最小持仓（默认 6 根 = 30 分钟）
 	FundReversalMult         float64 // L5 费率反转: 费率 > 入场时×该值（默认 1.5）
@@ -119,6 +120,18 @@ type StrategyConfig struct {
 	EnableAddOn              bool    // 实验: 启用追加仓位（同币移动止盈激活后再命中信号可加仓）
 	MaxAddOnsPerSymbol       int     // 实验: 单币最大追加次数（默认 1，即同币最多 1+1 两仓）
 	AddOnActPct              float64 // 实验: 追单激活门槛（0=与移动止盈激活一致；>0 要求同币持仓极值达到首仓入场价±该比例才允许追，过滤小冲高追顶）
+
+	// ===== 仓位/退出增强实验 =====
+	MarginEquityPct float64 // 复利仓位: 每仓保证金=当前权益×该比例%（0=关闭，用固定每仓保证金）
+	PartialTPPct    float64 // 部分止盈: 浮盈达该比例%时先平掉 PartialTPFrac 仓位，剩余继续跟移动止盈（0=关闭）
+	PartialTPFrac   float64 // 部分止盈: 平仓比例（默认 0.5=平一半）
+	Gain5mPct       float64 // 实验: 5m 子涨幅共振——当前 15m 周期内最大 5m 收盘涨幅门槛%（0=关闭）
+	Signal5mPct     float64 // 实验: 5m 单根爆拉入场——当前 5m 收盘涨幅达门槛即开仓（替代 15m 累计门槛；0=关闭）
+	DynGainMult     float64 // 实验: 动态涨幅阈值——阈值=过去 20 个已收盘 15m 周期平均实体涨幅×该倍数（0=关闭）
+	DynGainFloor    float64 // 实验: 动态涨幅阈值下限%（默认 0.5）
+	Size6High       float64 // 实验(size6): 5m 爆发>=边界 仓位倍数（默认 1.5）
+	Size6Low        float64 // 实验(size6): 5m 子涨幅<2% 仓位倍数（默认 0.7）
+	Size6Boundary   float64 // 实验(size6): 暴力桶边界%（默认 3）
 
 	// ===== S01 单因子实验开关（默认全关，不改变 S01 现有行为）=====
 	FundingVetoEnabled bool    // 实验: 费率过热否决（正费率 ≥ 分级阈值不追）
@@ -238,6 +251,9 @@ type symbolState struct {
 	hasPeriod       bool                // 15m 周期是否已初始化
 	periodVol       float64             // 当前 15m 周期累计成交量（主动买占比用）
 	periodTBB       float64             // 当前 15m 周期累计主动买量（主动买占比用）
+	periodGains     [20]float64         // 最近 20 个已收盘 15m 周期实体涨幅%（动态阈值用）
+	periodGainIdx   int                 // 周期涨幅环形写入索引
+	periodGainCnt   int                 // 已收盘周期数（<20 时用固定阈值兜底）
 	lastClose       int64               // 该币最近平仓时间（冷却用）
 	lastCloseReason string              // 该币最近平仓原因（分原因冷却用）
 	vols            [WindowBars]float64 // 环形: 24h 成交量（VWAP 计算用）
@@ -309,6 +325,10 @@ type Position struct {
 	Score            float64 // L3 加权总分（置信度因子用）
 	Tier             string  // 币种分级 big/mid/small
 	ChaseType        string  // 追涨/回踩分类: first/chase/pullback/flat（回测验证用）
+	VolRatio5        float64 // 入场时 当前量/前5根均量（缩量涨观测）
+	ShrinkUp         bool    // 入场是否为缩量涨形态（观测，不改决策）
+	Gain5mMax        float64 // 入场 15m 周期内最大 5m 收盘涨幅%（观测/共振过滤）
+	PartialDone      bool    // 部分止盈是否已触发（剩余仓位继续持有）
 }
 
 // btcState BTC 市场状态（自适应融合模式用）: EMA 判断牛熊 + ATR 判断波动
@@ -348,6 +368,9 @@ type Trade struct {
 	Reason    string  // STOP_LOSS / TRAILING_STOP
 	HeldBars  int     // 持仓 K 线数
 	ChaseType string  // 追涨/回踩分类
+	VolRatio5 float64 // 入场时 当前量/前5根均量（缩量涨观测）
+	ShrinkUp  bool    // 入场是否为缩量涨形态（观测）
+	Gain5mMax float64 // 入场 15m 周期内最大 5m 收盘涨幅%（观测）
 }
 
 // EquityPoint 权益曲线采样点
@@ -499,6 +522,18 @@ func (e *Engine) updateState(symbol string, b *bar) (*symbolState, bool) {
 	// 15m 周期开盘价（当前 K 线所在周期）
 	periodTS := b.ts - b.ts%900000
 	if !st.hasPeriod || st.periodTS != periodTS {
+		// 上一 15m 周期刚收盘: 记录其实体涨幅（动态阈值用；当前根已写入 idx，上一根在 idx-1）
+		if st.hasPeriod && st.periodOpen > 0 {
+			prevClose := st.closes[(st.idx-1+WindowBars)%WindowBars]
+			if prevClose > 0 {
+				g := (prevClose - st.periodOpen) / st.periodOpen * 100
+				st.periodGains[st.periodGainIdx] = g
+				st.periodGainIdx = (st.periodGainIdx + 1) % 20
+				if st.periodGainCnt < 20 {
+					st.periodGainCnt++
+				}
+			}
+		}
 		st.periodTS = periodTS
 		st.periodOpen = b.open
 		st.periodVol = 0
@@ -613,6 +648,59 @@ func volumeSurge(st *symbolState, b *bar, n int) float64 {
 		return 0
 	}
 	return b.quoteVol / avg
+}
+
+// shrinkUpCondition 判断“缩量涨”（用户定义，观测用）：
+//  1. 当前收盘价 > 前一根 K 线的最高价（确认涨）
+//  2. 当前成交量 < 前 5 根 K 线平均成交量 × 0.8（确认缩量，比平时少 20% 以上）
+//
+// 量使用成交额（quoteVol），与现有放量倍数 volumeSurge 口径一致。
+// 返回: (是否缩量涨, 当前量/前5根均量)
+func shrinkUpCondition(st *symbolState, b *bar) (bool, float64) {
+	if st.filled < 6 {
+		return false, 0
+	}
+	// 环形语义：updateState 写入当前根后 idx 已自增，当前根位于 idx-1
+	curSlot := (st.idx - 1 + WindowBars) % WindowBars
+	prevHigh := st.highs[(curSlot-1+WindowBars)%WindowBars]
+	var sum float64
+	for i := 1; i <= 5; i++ {
+		sum += st.quoteVols[(curSlot-i+WindowBars)%WindowBars]
+	}
+	avg5 := sum / 5
+	ratio := 0.0
+	if avg5 > 0 {
+		ratio = b.quoteVol / avg5
+	}
+	return b.close > prevHigh && avg5 > 0 && ratio < 0.8, ratio
+}
+
+// max5mGain 当前 15m 周期内最大 5m 收盘涨幅%（含跨周期首根，5m 子涨幅共振观测/过滤用）。
+// 调用前提: computeSignal 在 updateState 之后，当前根位于环形 idx-1。
+func max5mGain(st *symbolState) float64 {
+	cur := (st.idx - 1 + WindowBars) % WindowBars // 当前根
+	mx := 0.0
+	for k := 0; k < 3; k++ {
+		j := (cur - k + WindowBars) % WindowBars
+		jp := (j - 1 + WindowBars) % WindowBars
+		if st.closes[jp] > 0 {
+			g := (st.closes[j] - st.closes[jp]) / st.closes[jp] * 100
+			if g > mx {
+				mx = g
+			}
+		}
+	}
+	return mx
+}
+
+// current5mGain 当前 5m 收盘涨幅%（当前根 close vs 前一根 close，-signal5m 入场信号用）
+func current5mGain(st *symbolState) float64 {
+	cur := (st.idx - 1 + WindowBars) % WindowBars
+	prev := (cur - 1 + WindowBars) % WindowBars
+	if st.closes[prev] > 0 {
+		return (st.closes[cur] - st.closes[prev]) / st.closes[prev] * 100
+	}
+	return 0
 }
 
 // updateBTC 用一根 BTC K 线推进市场状态（EMA + ATR14）
@@ -898,19 +986,89 @@ func (e *Engine) computeSignal(st *symbolState, b *bar, ready24 bool) (string, s
 		}
 
 	default: // momentum 追涨（原逻辑）
+		// 5m 单根爆拉入场（实验 -signal5m）: 每根 5m 收盘评估当前根相对前一根收盘的涨幅，
+		// 达标即开仓（不等 15m 累计、不受周期末限制）。-gain 传 0 为纯 5m 信号；
+		// -gain 传低值（如 2）为双条件：5m 爆拉 且 15m 累计涨幅达标（允许更早入场）。
+		if cfg.Signal5mPct > 0 {
+			g5m := current5mGain(st)
+			gain24 := (b.close - oldClose) / oldClose * 100
+			side := ""
+			if g5m >= cfg.Signal5mPct {
+				side = "LONG"
+			} else if cfg.EnableShort && g5m <= -cfg.Signal5mPct {
+				side = "SHORT"
+			}
+			if side == "" || (cfg.OnlyShort && side == "LONG") {
+				return "", ""
+			}
+			// 双条件变体：-gain>0 时仍要求 15m 累计涨幅达标（放低门槛允许提前入场）
+			if cfg.MinGainPct > 0 {
+				gain15 := (b.close - st.periodOpen) / st.periodOpen * 100
+				if side == "LONG" && gain15 < cfg.MinGainPct {
+					return "", ""
+				}
+				if side == "SHORT" && gain15 > -cfg.MinGainPct {
+					return "", ""
+				}
+			}
+			if cfg.Min24hGainPct > 0 {
+				if side == "LONG" && gain24 < cfg.Min24hGainPct {
+					return "", ""
+				}
+				if side == "SHORT" && gain24 > -cfg.Min24hGainPct {
+					return "", ""
+				}
+			}
+			// 放量/山顶/最低币价过滤沿用原逻辑
+			if volumeSurge(st, b, cfg.SurgeLookback) < cfg.VolumeSurgeThreshold {
+				return "", ""
+			}
+			if side == "LONG" {
+				h := max24h(st)
+				if h > 0 && (h-b.close)/h*100 > cfg.MaxPullbackPct {
+					return "", ""
+				}
+			} else {
+				l := min24h(st)
+				if l > 0 && (b.close-l)/b.close*100 > cfg.MaxPullbackPct {
+					return "", ""
+				}
+			}
+			if cfg.MinPrice > 0 && b.close < cfg.MinPrice {
+				return "", ""
+			}
+			return side, ""
+		}
 		// 已收盘确认模式: 仅评估每个 15m 周期的最后一根 5m K 线
 		if cfg.ClosedBarConfirm && (b.ts+300000)%900000 != 0 {
 			return "", ""
 		}
 		gain15 := (b.close - st.periodOpen) / st.periodOpen * 100
 		gain24 := (b.close - oldClose) / oldClose * 100
+		// 动态涨幅阈值（实验）: 阈值=过去 20 个已收盘 15m 周期平均实体涨幅×倍数，
+		// 未满 20 个周期时回退固定 MinGainPct；下限 DynGainFloor 防阈值归零滥开
+		gainReq := cfg.MinGainPct
+		if cfg.DynGainMult > 0 && st.periodGainCnt >= 20 {
+			var sum float64
+			for _, g := range st.periodGains {
+				sum += g
+			}
+			gainReq = sum / 20 * cfg.DynGainMult
+			if gainReq < cfg.DynGainFloor {
+				gainReq = cfg.DynGainFloor
+			}
+		}
 		side := ""
-		if gain15 >= cfg.MinGainPct && gain24 >= cfg.Min24hGainPct {
+		if gain15 >= gainReq && gain24 >= cfg.Min24hGainPct {
 			side = "LONG"
-		} else if cfg.EnableShort && gain15 <= -cfg.MinGainPct && gain24 <= -cfg.Min24hGainPct {
+		} else if cfg.EnableShort && gain15 <= -gainReq && gain24 <= -cfg.Min24hGainPct {
 			side = "SHORT"
 		}
 		if side == "" || (cfg.OnlyShort && side == "LONG") {
+			return "", ""
+		}
+		// 5m 子涨幅共振（实验）: 追涨要求当前 15m 周期内至少一根 5m 收盘涨幅达标
+		if side == "LONG" && cfg.Gain5mPct > 0 && max5mGain(st) < cfg.Gain5mPct {
 			return "", ""
 		}
 		// 放量确认
@@ -1044,6 +1202,14 @@ func (e *Engine) fillPending(bars map[string]*bar, ts int64) {
 	e.pending = still
 }
 
+// baseMargin 计算单仓基准保证金：复利模式=当前权益×比例，否则固定每仓保证金
+func (e *Engine) baseMargin() float64 {
+	if e.cfg.MarginEquityPct > 0 {
+		return e.equity * e.cfg.MarginEquityPct / 100
+	}
+	return e.cfg.PositionMarginUSDT
+}
+
 // openPositions 对全部候选按成交额降序取 TopN，未持仓且未待成交的依次开仓直到仓位满
 // 参数:
 //   - candidates: 候选列表（symbol + 当日成交额用于排序）
@@ -1087,6 +1253,30 @@ func (e *Engine) openPositions(candidates []candidate, now int64) {
 				m = 0.75
 			}
 			mult[i] = math.Max(e.cfg.SizeMin, math.Min(e.cfg.SizeMax, m))
+		}
+	} else if e.cfg.SizeMode == 6 {
+		// 按 5m 爆发力度分桶倾斜（手册"三周期评分重仓"近似）: 子涨幅>=Size6Boundary% 高倍 / 2~边界 均仓 / <2% 低倍
+		hi := e.cfg.Size6High
+		if hi <= 0 {
+			hi = 1.5
+		}
+		lo := e.cfg.Size6Low
+		if lo <= 0 {
+			lo = 0.7
+		}
+		bd := e.cfg.Size6Boundary
+		if bd <= 0 {
+			bd = 3.0
+		}
+		for i, c := range candidates {
+			m := lo
+			switch {
+			case c.gain5mMax >= bd:
+				m = hi
+			case c.gain5mMax >= 2:
+				m = 1.0
+			}
+			mult[i] = m
 		}
 	} else if e.cfg.SizeMode > 0 {
 		vals := make([]float64, len(candidates))
@@ -1155,7 +1345,7 @@ func (e *Engine) openPositions(candidates []candidate, now int64) {
 		isAddOn := held[c.symbol]
 		// 破产保护: 可用权益（权益-占用保证金）不足以开一仓则停止开仓
 		// （v6 动态仓位由 v6Sizing 自行校验，不在此用固定保证金截断）
-		if e.cfg.Mode != "v6" && e.equity-e.marginInUse < e.cfg.PositionMarginUSDT {
+		if e.cfg.Mode != "v6" && e.equity-e.marginInUse < e.baseMargin() {
 			break
 		}
 		p := &Position{
@@ -1164,6 +1354,9 @@ func (e *Engine) openPositions(candidates []candidate, now int64) {
 			EntryTS: now,
 			Pending: true,
 		}
+		p.VolRatio5 = c.volRatio5
+		p.ShrinkUp = c.shrinkUp
+		p.Gain5mMax = c.gain5mMax
 		// 按信号模式固化退出参数（adaptive: chase/pullback/short 各有独立风控；非 adaptive 用配置默认）
 		switch c.mode {
 		case "v6":
@@ -1197,8 +1390,9 @@ func (e *Engine) openPositions(candidates []candidate, now int64) {
 			p.SLPct, p.TPPct, p.ActPct, p.CbPct, p.HoldBars = e.cfg.SSL, e.cfg.STP, e.cfg.SAct, e.cfg.SCb, e.cfg.SHold
 		default: // chase 或非 adaptive
 			p.SLPct, p.TPPct, p.ActPct, p.CbPct, p.HoldBars = e.cfg.StopLossPct, e.cfg.TakeProfitPct, e.cfg.TrailingActivation, e.cfg.TrailingCallback, e.cfg.MaxHoldBars
-			p.Margin = e.cfg.PositionMarginUSDT * mult[i]
+			p.Margin = e.baseMargin() * mult[i]
 			p.Notional = p.Margin * e.cfg.Leverage
+			p.Slippage = e.cfg.FlatSlippage
 			// 追单专用风控（0=与首仓一致）：追单入场高、更脆弱，可单独收紧止损/提前激活/收紧回调
 			if isAddOn {
 				if e.cfg.AddOnSLPct > 0 {
@@ -1379,6 +1573,9 @@ type candidate struct {
 	gain15 float64 // 15m 实体涨幅%（仓位倾斜用）
 	surge  float64 // 放量倍数（仓位倾斜用）
 	taker  float64 // 15m 主动买占比%（仓位倾斜用）
+	volRatio5 float64 // 当前量 / 前5根均量（缩量涨观测用）
+	shrinkUp  bool    // 缩量涨：收盘>前一根最高价 且 当前量<前5根均量×0.8
+	gain5mMax float64 // 当前 15m 周期内最大 5m 收盘涨幅%（共振观测/过滤用）
 }
 
 // closePosition 平仓结算一笔持仓（含资金费收入并入 PnL）
@@ -1432,11 +1629,54 @@ func (e *Engine) closePosition(p *Position, b *bar, exitPx float64, reason strin
 		Reason:    reason,
 		HeldBars:  int((b.ts - p.EntryTS) / 300000),
 		ChaseType: p.ChaseType,
+		VolRatio5: p.VolRatio5,
+		ShrinkUp:  p.ShrinkUp,
+		Gain5mMax: p.Gain5mMax,
 	})
 	if st, ok := e.states[p.Symbol]; ok {
 		st.lastClose = b.ts
 		st.lastCloseReason = reason
 	}
+}
+
+// closePartial 部分止盈: 按比例平掉一部分仓位，剩余仓位继续持有（仍可触发止损/移动止盈/超时）。
+// 已实现部分单独记一笔 PARTIAL_TP 交易，保持 trades.csv 与权益曲线口径一致（不含资金费，momentum 无持仓资金费）。
+func (e *Engine) closePartial(p *Position, b *bar, exitPx float64, frac float64) {
+	if frac <= 0 || frac >= 1 || p.Amount <= 0 {
+		return
+	}
+	closedAmount := p.Amount * frac
+	var pnl float64
+	if p.Side == "LONG" {
+		pnl = (exitPx - p.EntryPrice) * closedAmount
+	} else {
+		pnl = (p.EntryPrice - exitPx) * closedAmount
+	}
+	e.equity += pnl
+	e.equity -= exitPx * closedAmount * e.cfg.FeeRate
+	e.marginInUse -= p.Margin * frac
+	e.notionalInUse -= p.Notional * frac
+	e.trades = append(e.trades, &Trade{
+		Symbol:    p.Symbol,
+		Side:      p.Side,
+		EntryTS:   p.EntryTS,
+		EntryPx:   p.EntryPrice,
+		ExitTS:    b.ts,
+		ExitPx:    exitPx,
+		Amount:    closedAmount,
+		PnL:       pnl,
+		PnLPct:    pnl / (p.EntryPrice * closedAmount) * 100,
+		Reason:    "PARTIAL_TP",
+		HeldBars:  int((b.ts - p.EntryTS) / 300000),
+		ChaseType: p.ChaseType,
+		VolRatio5: p.VolRatio5,
+		ShrinkUp:  p.ShrinkUp,
+		Gain5mMax: p.Gain5mMax,
+	})
+	p.Amount -= closedAmount
+	p.Margin *= (1 - frac)
+	p.Notional *= (1 - frac)
+	p.PartialDone = true
 }
 
 // processFunding 处理当前片的资金费率事件（仅 funding 范式生效）
@@ -1749,6 +1989,23 @@ func (e *Engine) monitorPositions(bars map[string]*bar) {
 			if p.Side == "LONG" {
 				stop := p.EntryPrice * (1 - p.SLPct)
 				tp := p.EntryPrice * (1 + p.TPPct)
+				// 部分止盈: 浮盈达阈值先平一部分，剩余继续跟移动止盈（固定止盈开启时不叠加）
+				if !p.PartialDone && e.cfg.PartialTPPct > 0 && p.TPPct <= 0 {
+					ptp := p.EntryPrice * (1 + e.cfg.PartialTPPct/100)
+					hit := b.high >= ptp
+					if e.cfg.ExitClose {
+						hit = b.close >= ptp
+					}
+					if hit {
+						px := ptp
+						if e.cfg.ExitClose {
+							px = max2(b.open, ptp)
+						} else if b.open >= ptp {
+							px = b.open
+						}
+						e.closePartial(p, b, px, e.cfg.PartialTPFrac)
+					}
+				}
 				if e.cfg.ExitClose {
 					// 收盘价模式（近似 aooo 的 tick 采样）: 仅当片收盘价触发，不捕捉片内插针
 					if b.close <= stop {
@@ -1819,6 +2076,23 @@ func (e *Engine) monitorPositions(bars map[string]*bar) {
 			} else { // SHORT
 				stop := p.EntryPrice * (1 + p.SLPct)
 				tp := p.EntryPrice * (1 - p.TPPct)
+				// 部分止盈（空头）: 浮盈达阈值先平一部分
+				if !p.PartialDone && e.cfg.PartialTPPct > 0 && p.TPPct <= 0 {
+					ptp := p.EntryPrice * (1 - e.cfg.PartialTPPct/100)
+					hit := b.low <= ptp
+					if e.cfg.ExitClose {
+						hit = b.close <= ptp
+					}
+					if hit {
+						px := ptp
+						if e.cfg.ExitClose {
+							px = min2(b.open, ptp)
+						} else if b.open <= ptp {
+							px = b.open
+						}
+						e.closePartial(p, b, px, e.cfg.PartialTPFrac)
+					}
+				}
 				if e.cfg.ExitClose {
 					// 收盘价模式（近似 aooo 的 tick 采样）
 					if b.close >= stop {
@@ -2027,11 +2301,15 @@ func (e *Engine) OnBar(bars map[string]*bar, fundings map[string]fundingPoint, t
 				if st.periodVol > 0 {
 					tk = st.periodTBB / st.periodVol * 100
 				}
+				shrink, volRatio5 := shrinkUpCondition(st, b)
 				cands = append(cands, candidate{
 					symbol: sym, side: side, volume: b.quoteVol, mode: mode, ref: b.close,
 					gain15: (b.close - st.periodOpen) / st.periodOpen * 100,
 					surge:  volumeSurge(st, b, e.cfg.SurgeLookback),
 					taker:  tk,
+					volRatio5: volRatio5,
+					shrinkUp:  shrink,
+					gain5mMax: max5mGain(st),
 				})
 			}
 		}

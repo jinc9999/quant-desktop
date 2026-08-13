@@ -312,7 +312,7 @@ func writeTradesCSV(path string, trades []*Trade) error {
 	defer f.Close()
 	w := csv.NewWriter(f)
 	defer w.Flush()
-	w.Write([]string{"symbol", "side", "entry_time", "entry_price", "exit_time", "exit_price", "amount", "pnl", "pnl_pct", "reason", "held_bars"})
+	w.Write([]string{"symbol", "side", "entry_time", "entry_price", "exit_time", "exit_price", "amount", "pnl", "pnl_pct", "reason", "held_bars", "vol_ratio5", "shrink_up", "gain5m_max"})
 	for _, t := range trades {
 		w.Write([]string{
 			t.Symbol, t.Side,
@@ -325,9 +325,108 @@ func writeTradesCSV(path string, trades []*Trade) error {
 			strconv.FormatFloat(t.PnLPct, 'f', 2, 64),
 			t.Reason,
 			strconv.Itoa(t.HeldBars),
+			strconv.FormatFloat(t.VolRatio5, 'f', 3, 64),
+			strconv.FormatBool(t.ShrinkUp),
+			strconv.FormatFloat(t.Gain5mMax, 'f', 2, 64),
 		})
 	}
 	return w.Error()
+}
+
+// fiveMinGainReport 5m 子涨幅共振观测报告（只统计不改决策）：
+// 按入场 15m 周期内最大 5m 收盘涨幅分桶，验证“爆发斜率决定持续性”是否成立。
+func fiveMinGainReport(trades []*Trade) {
+	if len(trades) == 0 {
+		return
+	}
+	show := func(label string, lo, hi float64) {
+		n, win := 0, 0
+		pnl := 0.0
+		for _, t := range trades {
+			if t.Gain5mMax >= lo && t.Gain5mMax < hi {
+				n++
+				if t.PnL > 0 {
+					win++
+				}
+				pnl += t.PnL
+			}
+		}
+		if n == 0 {
+			fmt.Printf("  %-18s 0 笔\n", label)
+			return
+		}
+		fmt.Printf("  %-18s %5d 笔 | 胜率 %.2f%% | 盈亏 %+.2fU | 单笔 %+.3fU\n",
+			label, n, float64(win)/float64(n)*100, pnl, pnl/float64(n))
+	}
+	fmt.Println("\n--- 5m 子涨幅共振观测（入场 15m 周期内最大 5m 收盘涨幅，不改决策） ---")
+	show("<1.0% 无5m爆发", 0, 1.0)
+	show("1.0~2.0% 温和", 1.0, 2.0)
+	show("2.0~3.0% 较强", 2.0, 3.0)
+	show(">=3.0% 暴力", 3.0, 1e18)
+}
+
+// shrinkUpReport 缩量涨观测报告（只统计不改决策）：
+// 对比“缩量涨入场”（收盘>前高 且 量<前5根均量×0.8）与非缩量涨入场的表现，
+// 并按 当前量/前5根均量 分桶输出，供判断该形态是否值得关注。
+func shrinkUpReport(trades []*Trade) {
+	if len(trades) == 0 {
+		return
+	}
+	stat := func(list []*Trade) (n int, win int, pnl float64) {
+		for _, t := range list {
+			n++
+			if t.PnL > 0 {
+				win++
+			}
+			pnl += t.PnL
+		}
+		return
+	}
+	show := func(label string, list []*Trade) {
+		n, w, p := stat(list)
+		if n == 0 {
+			fmt.Printf("  %-24s 0 笔\n", label)
+			return
+		}
+		fmt.Printf("  %-24s %d 笔 | 胜率 %.2f%% | 盈亏 %+.2fU | 单笔 %+.3fU\n",
+			label, n, float64(w)/float64(n)*100, p, p/float64(n))
+	}
+
+	var shrink, nonShrink []*Trade
+	for _, t := range trades {
+		if t.ShrinkUp {
+			shrink = append(shrink, t)
+		} else {
+			nonShrink = append(nonShrink, t)
+		}
+	}
+	fmt.Println("\n--- 缩量涨观测（当前量/前5根均量，不改决策） ---")
+	show("缩量涨（<0.8倍）", shrink)
+	show("非缩量涨", nonShrink)
+
+	// 按量比桶细分
+	type bucket struct {
+		label string
+		lo, hi float64
+	}
+	buckets := []bucket{
+		{"<0.5x 极度缩量", 0, 0.5},
+		{"0.5~0.8x 缩量", 0.5, 0.8},
+		{"0.8~1.2x 平量", 0.8, 1.2},
+		{"1.2~1.5x 温和放量", 1.2, 1.5},
+		{"1.5~2.0x 放量", 1.5, 2.0},
+		{">2.0x 暴量", 2.0, 1e18},
+	}
+	fmt.Println("按量比分桶:")
+	for _, bk := range buckets {
+		var list []*Trade
+		for _, t := range trades {
+			if t.VolRatio5 >= bk.lo && t.VolRatio5 < bk.hi {
+				list = append(list, t)
+			}
+		}
+		show(bk.label, list)
+	}
 }
 
 // writeEquityCSV 导出权益曲线到 CSV（按天采样，跨多日时每日一个点）
@@ -383,6 +482,7 @@ type Metrics struct {
 	TakeProfitCount   int     // 固定止盈平仓数
 	MaxHoldCount      int     // 超时平仓数
 	TakerExitCount    int     // 主动买占比跑路平仓数
+	PartialTPCount    int     // 部分止盈平仓数
 	ATRDecayCount     int     // 波动率衰减平仓数（v6）
 	FundReversalCount int     // 费率反转平仓数（v6）
 	FundingIncome     float64 // funding 模式: 累计资金费收入(USDT)
@@ -438,6 +538,8 @@ func computeMetrics(e *Engine) Metrics {
 			m.MaxHoldCount++
 		case "TAKER_EXIT":
 			m.TakerExitCount++
+		case "PARTIAL_TP":
+			m.PartialTPCount++
 		case "ATR_DECAY":
 			m.ATRDecayCount++
 		case "FUND_REVERSAL":
@@ -537,7 +639,7 @@ func sharpe(dailyPnl []float64, initial float64) float64 {
 // 参数:
 //   - m: 指标结果
 //   - cfg: 策略配置（用于打印参数）
-func printReport(m Metrics, cfg *StrategyConfig) {
+func printReport(m Metrics, cfg *StrategyConfig, trades []*Trade) {
 	fmt.Printf("\n===== 回测绩效报告 =====\n")
 	fmt.Printf("回测区间: %s ~ %s（%d 个 5m 时间片）\n", m.StartTime, m.EndTime, m.TotalBars)
 	fmt.Printf("范式: %s | ", cfg.Mode)
@@ -592,6 +694,9 @@ func printReport(m Metrics, cfg *StrategyConfig) {
 	if m.TakerExitCount > 0 {
 		fmt.Printf(" / 主动买跑路 %d 笔", m.TakerExitCount)
 	}
+	if m.PartialTPCount > 0 {
+		fmt.Printf(" / 部分止盈 %d 笔", m.PartialTPCount)
+	}
 	fmt.Printf("\n")
 	if m.FirstCount+m.ChaseCount+m.PullbackCount > 0 {
 		fmt.Printf("追涨/回踩: 首笔 %d 笔 %+.2fU (%.3f/笔) | 追涨 %d 笔 %+.2fU (%.3f/笔) | 回踩 %d 笔 %+.2fU (%.3f/笔)\n",
@@ -599,6 +704,8 @@ func printReport(m Metrics, cfg *StrategyConfig) {
 			m.ChaseCount, m.ChasePnl, safeDiv(m.ChasePnl, float64(m.ChaseCount)),
 			m.PullbackCount, m.PullbackPnl, safeDiv(m.PullbackPnl, float64(m.PullbackCount)))
 	}
+	shrinkUpReport(trades)
+	fiveMinGainReport(trades)
 	fmt.Printf("\n--- 收益与风险 ---\n")
 	fmt.Printf("累计盈亏: %.2fU\n", m.TotalPnL)
 	if cfg.Mode == "funding" {
@@ -642,6 +749,8 @@ func main() {
 	actFlag := flag.Float64("act", 3.0, "跟踪止盈激活涨幅 %%（默认 3）")
 	cbFlag := flag.Float64("cb", 2.0, "跟踪止盈回调 %%（默认 2）")
 	surgeFlag := flag.Float64("surge", 1.8, "放量倍数阈值（默认 1.8）")
+	surgeLookbackFlag := flag.Int("surge-lookback", 24, "放量基准窗口（5m K 线根数，默认 24=2小时）")
+	slipFlag := flag.Float64("slip", 0, "S01/momentum 单边滑点 %%（0=关闭，默认 0）")
 	gainFlag := flag.Float64("gain", 5.0, "15m 实体涨幅门槛 %%（默认 5）")
 	minVolFlag := flag.Float64("minvol", 50000, "24h 成交额下限 USDT（默认 50000）")
 	feeFlag := flag.Float64("fee", 0.04, "单边手续费率 %%taker（默认 0.04）")
@@ -651,6 +760,16 @@ func main() {
 	pullbackFlag := flag.Float64("pullback", 9.0, "山顶过滤: 距24h高点最大回撤 %%（设大如 1000 关闭，默认 9）")
 	cooldownFlag := flag.Int("cooldown", 20, "平仓后冷却分钟数（默认 20）")
 	marginFlag := flag.Float64("margin", 20.0, "每仓保证金 USDT（默认 20）")
+	marginPctFlag := flag.Float64("margin-pct", 0, "复利仓位: 每仓保证金=当前权益×该比例%%（0=关闭，用固定每仓保证金）")
+	ptpFlag := flag.Float64("ptp", 0, "部分止盈: 浮盈达该比例%%先平一部分（0=关闭）")
+	ptpFracFlag := flag.Float64("ptp-frac", 0.5, "部分止盈: 平仓比例（默认 0.5=平一半）")
+	gain5mFlag := flag.Float64("gain5m", 0, "5m 子涨幅共振: 当前15m周期内最大5m收盘涨幅门槛%%（0=关闭）")
+	signal5mFlag := flag.Float64("signal5m", 0, "实验: 5m 单根爆拉入场——当前5m收盘涨幅达门槛即开仓（替代15m累计门槛；-gain 0 纯5m / -gain Y 双条件）")
+	dynGainMultFlag := flag.Float64("dyn-gain-mult", 0, "动态涨幅阈值: 阈值=过去20个15m周期平均实体涨幅×该倍数（0=关闭）")
+	dynGainFloorFlag := flag.Float64("dyn-gain-floor", 0.5, "动态涨幅阈值下限%%（默认 0.5）")
+	size6HighFlag := flag.Float64("size6-high", 1.5, "S01 实验(size6): 5m爆发>=边界 仓位倍数（默认 1.5）")
+	size6LowFlag := flag.Float64("size6-low", 0.7, "S01 实验(size6): 5m子涨幅<2% 仓位倍数（默认 0.7）")
+	size6BoundaryFlag := flag.Float64("size6-boundary", 3.0, "S01 实验(size6): 暴力桶边界%%（默认 3）")
 	modeFlag := flag.String("mode", "momentum", "信号范式: momentum/mr/trend/funding/adaptive")
 	adaptatrFlag := flag.Float64("adaptatr", 2.0, "ADAPT BTC ATR%% 阈值（回踩/追涨判定，默认 2）")
 	btcemaFlag := flag.Int("btcema", 50, "ADAPT BTC EMA 周期（牛熊判定，默认 50）")
@@ -710,7 +829,7 @@ func main() {
 	takerbuyFlag := flag.Float64("takerbuy", 0, "S01 实验: 15m窗口主动买占比门槛 %%（0 关闭）")
 	retraceFlag := flag.Float64("retrace", 0, "S01 实验: 信号后回踩深度 %%（0 关闭）")
 	retraceBarsFlag := flag.Int("retrace-bars", 6, "S01 实验: 回踩最长等待 K 线数（超时放弃）")
-	sizeModeFlag := flag.Int("size", 0, "S01 实验: 仓位倾斜 0=均仓 1=按15m涨幅 2=按放量 3=按主动买 4=组合")
+	sizeModeFlag := flag.Int("size", 0, "S01 实验: 仓位倾斜 0=均仓 1=按15m涨幅 2=按放量 3=按主动买 4=组合 6=按5m爆发力度分桶")
 	sizeTiltFlag := flag.Float64("size-tilt", 0.3, "S01 实验: 每 1σ 信号强度仓位调整倍数")
 	sizeMinFlag := flag.Float64("size-min", 0.5, "S01 实验: 仓位倍数下限")
 	sizeMaxFlag := flag.Float64("size-max", 1.5, "S01 实验: 仓位倍数上限")
@@ -759,6 +878,8 @@ func main() {
 	cfg.TrailingActivation = *actFlag / 100
 	cfg.TrailingCallback = *cbFlag / 100
 	cfg.VolumeSurgeThreshold = *surgeFlag
+	cfg.SurgeLookback = *surgeLookbackFlag
+	cfg.FlatSlippage = *slipFlag / 100
 	cfg.ClosedBarConfirm = *closedFlag
 	cfg.ExitClose = *exitModeFlag == "close"
 	cfg.Min24hGainPct = *min24GainFlag
@@ -779,6 +900,16 @@ func main() {
 	cfg.TrendMode = *trendFlag
 	cfg.CooldownMs = int64(*cooldownFlag) * 60 * 1000
 	cfg.PositionMarginUSDT = *marginFlag
+	cfg.MarginEquityPct = *marginPctFlag
+	cfg.PartialTPPct = *ptpFlag
+	cfg.PartialTPFrac = *ptpFracFlag
+	cfg.Gain5mPct = *gain5mFlag
+	cfg.Signal5mPct = *signal5mFlag
+	cfg.DynGainMult = *dynGainMultFlag
+	cfg.DynGainFloor = *dynGainFloorFlag
+	cfg.Size6High = *size6HighFlag
+	cfg.Size6Low = *size6LowFlag
+	cfg.Size6Boundary = *size6BoundaryFlag
 	cfg.FeeRate = *feeFlag / 100
 	cfg.Mode = *modeFlag
 	cfg.MRDropPct = *mrdropFlag / 100
@@ -957,7 +1088,7 @@ func main() {
 
 	// 指标 + 图表
 	m := computeMetrics(eng)
-	printReport(m, cfg)
+	printReport(m, cfg, eng.trades)
 	if err := writeReportSVG(filepath.Join(*outDir, "report.svg"), eng.equityCurve, cfg.InitialEquity); err != nil {
 		fmt.Printf("[错误] 写图表失败: %v\n", err)
 	} else {

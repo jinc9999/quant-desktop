@@ -1,6 +1,9 @@
 <template>
   <el-config-provider :locale="currentLocale">
-    <router-view />
+    <div v-if="cLoading" class="app-loading">加载中…</div>
+    <login-view v-else-if="showLogin" />
+    <expired-view v-else-if="showExpired" />
+    <router-view v-else />
     <ReDialog />
   </el-config-provider>
 </template>
@@ -13,21 +16,47 @@ import zhCn from "element-plus/es/locale/lang/zh-cn";
 import { Events } from "@wailsio/runtime";
 import { showError } from "@/utils/error-handler";
 import { QuantService } from "../bindings/quant-desktop/internal/bindings";
+import { useLicenseStoreHook } from "@/store/modules/license";
+import LoginView from "@/views/login/index.vue";
+import ExpiredView from "@/views/expired/index.vue";
 
 export default defineComponent({
   name: "app",
   components: {
     [ElConfigProvider.name]: ElConfigProvider,
-    ReDialog
+    ReDialog,
+    LoginView,
+    ExpiredView
   },
   computed: {
     currentLocale() {
       return zhCn;
+    },
+    /** C 版初始化完成前显示加载态，避免登录页闪烁 */
+    cLoading() {
+      return this.license.isC && !this.license.ready;
+    },
+    showLogin() {
+      return this.license.isC && this.license.ready && !this.license.loggedIn;
+    },
+    showExpired() {
+      return this.license.isC && this.license.ready && this.license.expired;
     }
   },
+  data() {
+    return {
+      license: useLicenseStoreHook()
+    };
+  },
   mounted() {
-    // 按策略名应用主题主色（A=琥珀金进攻 / B=科技蓝稳健），与策略版本标识联动
-    this.applyStrategyTheme();
+    // 前端诊断上报：确认根组件已挂载
+    try {
+      QuantService.LogClientEvent("App.vue mounted").catch(() => {});
+    } catch {
+      // 忽略
+    }
+    // 初始化产品信息与授权状态（C 版）
+    this.initApp();
     // 监听后端推送的错误事件，弹出前端通知
     // 注意：回调参数是 WailsEvent 对象，实际数据在 event.data 中（CustomEvent.Data）
     Events.On("backend-error", (event: { data?: { context?: string; message?: string } }) => {
@@ -36,13 +65,40 @@ export default defineComponent({
       const msg = d.message || "未知错误";
       showError(msg, ctx);
     });
+    // 监听授权事件：到期锁定 / 续费恢复 / 服务器离线
+    Events.On("license:expired", () => {
+      this.license.locked = true;
+      this.license.refresh();
+    });
+    Events.On("license:renewed", () => {
+      this.license.locked = false;
+      this.license.refresh();
+    });
+    Events.On("license:offline", () => {
+      this.license.refresh();
+    });
+    Events.On("license:unauthorized", () => {
+      this.license.sessionExpired();
+    });
   },
   methods: {
-    async applyStrategyTheme() {
+    async initApp() {
       try {
-        const cfg = await QuantService.GetConfig();
-        const name = cfg?.strategyName || "";
-        const primary = name.includes("稳健B") ? "#3B82F6" : "#F0A93B";
+        await this.license.init();
+        this.applyTheme();
+      } catch {
+        // 初始化失败也保持默认主题
+        this.license.ready = true;
+      }
+    },
+    applyTheme() {
+        const variant = this.license.variant;
+        const primary =
+          variant === "C"
+            ? "#E11D48"
+            : variant === "B"
+              ? "#3B82F6"
+              : "#F0A93B";
         const root = document.documentElement;
         root.style.setProperty("--quant-primary", primary);
         root.style.setProperty("--el-color-primary", primary);
@@ -53,10 +109,19 @@ export default defineComponent({
         root.style.setProperty("--el-color-primary-light-8", primary + "3d");
         root.style.setProperty("--el-color-primary-light-9", primary + "2e");
         root.style.setProperty("--el-color-primary-dark-2", primary);
-      } catch {
-        // 读取失败时保持默认琥珀金主题
-      }
     }
   }
 });
 </script>
+
+<style scoped>
+.app-loading {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #14161b;
+  color: #8b8fa3;
+  font-size: 14px;
+}
+</style>

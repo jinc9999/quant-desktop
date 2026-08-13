@@ -1,0 +1,43 @@
+# 一键启动：MySQL 8 + 授权服务端（生产环境）
+# 用法：先设置环境变量（见 README），然后 docker compose up -d
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me-root}
+      MYSQL_DATABASE: quant_server
+      MYSQL_USER: quant
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me-quant}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD:-change-me-root}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build: .
+    restart: unless-stopped
+    environment:
+      ENV: prod
+      PORT: "8080"
+      DB_DRIVER: mysql
+      DB_DSN: "quant:${MYSQL_PASSWORD:-change-me-quant}@tcp(mysql:3306)/quant_server?parseTime=true&charset=utf8mb4"
+      JWT_SECRET: ${JWT_SECRET:?请在 .env 中设置 JWT_SECRET}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?请在 .env 中设置初始管理员密码}
+      SMS_MODE: ${SMS_MODE:-mock}
+      ALIYUN_ACCESS_KEY_ID: ${ALIYUN_ACCESS_KEY_ID:-}
+      ALIYUN_ACCESS_KEY_SECRET: ${ALIYUN_ACCESS_KEY_SECRET:-}
+      ALIYUN_SIGN_NAME: ${ALIYUN_SIGN_NAME:-}
+      ALIYUN_TEMPLATE_CODE: ${ALIYUN_TEMPLATE_CODE:-}
+    ports:
+      - "8081:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql-data:

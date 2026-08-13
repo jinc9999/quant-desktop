@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -93,10 +95,15 @@ type Engine struct {
 	engineCancel       context.CancelFunc            // engineCtx 的取消函数
 	stopRequested      bool                          // Stop 早于 Start 时记录停止请求，Start 启动前直接退出
 	lastBalanceErrLog  atomic.Int64                  // 最近一次余额查询失败日志时间（Unix 毫秒），防刷屏
+	signalDebug        bool                          // 信号判定审计日志开关（QUANT_SIGNAL_DEBUG=1，用于模拟盘/实盘信号分叉排查）
 
 	// klineOpenCache: symbol -> 当前 K 线周期开盘价缓存。
 	// K 线开盘价在周期内不变，只需每周期拉取一次，降低 REST 调用量（K 线信号模式用）。
 	klineOpenCache map[string]klineOpenEntry
+
+	// smart5m: symbol -> 当前 15m 周期内最大 5m 收盘涨幅%（智慧版仓位因子）。
+	// 每次 runOnce 从 klineOpenCache 构建；SmartSizeMode=0 时为 nil（A/B 行为不变）。
+	smart5m map[string]float64
 
 	// newListLogged: 已记录过新币过滤日志的合约（每次进程运行去重，防每 Tick 刷屏）
 	newListLogged map[string]bool
@@ -106,6 +113,8 @@ type Engine struct {
 type klineOpenEntry struct {
 	open        float64 // 本周期 K 线开盘价
 	periodStart int64   // 本周期起点（Unix 毫秒，按 Timeframe 对齐）
+	takerBuyPct float64 // 本周期主动买入占比（%）；-1 表示无数据（仅观测，不改决策）
+	gain5mMax   float64 // 智慧版: 本周期内最大 5m 收盘涨幅%（0=未拉取/关闭）
 }
 
 // NewEngine 创建策略引擎
@@ -136,6 +145,15 @@ func NewEngine(cfg binance.StrategyConfig, client *binance.Client, ws *binance.W
 		openConfirmPending: make(map[int64]int),
 		klineOpenCache:     make(map[string]klineOpenEntry),
 		newListLogged:      make(map[string]bool),
+		signalDebug:        os.Getenv("QUANT_SIGNAL_DEBUG") == "1",
+	}
+	if e.signalDebug && db != nil {
+		_ = db.InsertLog(&storage.TradeLog{
+			Timestamp: time.Now().UnixMilli(),
+			Level:     "info",
+			Module:    "strategy",
+			Message:   "信号判定审计日志已开启（QUANT_SIGNAL_DEBUG=1）：每个 tick 输出近门槛币种的逐项过滤结果",
+		})
 	}
 	// 冷却期闭环修复（2026-08-08）：交易所条件单/回滚平仓完成后，
 	// 通知引擎写入冷却期——此前主平仓路径从不写冷却期，导致同币无限快速重复开仓。
@@ -479,6 +497,16 @@ func (e *Engine) runOnce(ctx context.Context) {
 		// confirmWindowMs 在 kline 模式保留：供放量确认使用（最近 N 分钟成交量 vs 之前窗口）。
 		// 价格二次确认（ConfirmThreshold）对 kline 模式保持关闭，由 screener 内 !klineMode 守卫保证。
 	}
+	// 智慧版：从 K 线缓存构建 5m 爆拉因子表（SmartSizeMode=0 时为 nil，开仓逻辑不受影响）
+	if e.cfg.SmartSizeMode > 0 {
+		smart5m := make(map[string]float64, len(klineOpen))
+		for sym, entry := range e.klineOpenCache {
+			smart5m[sym] = entry.gain5mMax
+		}
+		e.smart5m = smart5m
+	} else {
+		e.smart5m = nil
+	}
 	candidates := ScreenSliding(e.window, filterTickers(tickers, blockedNew), priceMap, e.cfg.MinGainPct, e.cfg.Min24hGainPct, e.cfg.MinQuoteVolume, e.cfg.TopN, now,
 		e.cfg.EnableShort, confirmWindowMs, e.cfg.ConfirmThreshold, e.cfg.VolumeSurgeThreshold,
 		e.cfg.SignalMode, klineOpen, e.cfg.MaxPullbackPct, rankOK)
@@ -486,6 +514,10 @@ func (e *Engine) runOnce(ctx context.Context) {
 
 	// 4.5 候选明细日志
 	e.logCandidates(candidates, now)
+	// 4.51 信号判定审计日志（QUANT_SIGNAL_DEBUG=1 时启用）：近门槛币种逐项过滤结果
+	if e.signalDebug {
+		e.logSignalDebug(tickers, priceMap, klineOpen, blockedNew, rankOK, now)
+	}
 
 	// 4.6 同步交易所委托状态（检测止损单是否已触发成交）
 	if e.orderMgr != nil {
@@ -678,12 +710,28 @@ func (e *Engine) buildKlineOpenMap(ctx context.Context, tickers []binance.Ticker
 			result[sym] = entry.open
 			continue
 		}
-		open, err := e.client.GetKlineOpen(ctx, sym, e.cfg.Timeframe)
+		ki, err := e.client.GetKlineInfo(ctx, sym, e.cfg.Timeframe)
 		if err != nil {
 			continue // 拉取失败保守跳过（ScreenSliding 忽略缺失项，不产生假信号）
 		}
-		e.klineOpenCache[sym] = klineOpenEntry{open: open, periodStart: periodStart}
-		result[sym] = open
+		takerPct := -1.0
+		if ki.QuoteVolume > 0 {
+			takerPct = ki.TakerBuyQuote / ki.QuoteVolume * 100
+		}
+		g5m := 0.0
+		if e.cfg.SmartSizeMode > 0 {
+			// 智慧版：同一周期内额外拉一次 5m K 线（限 4 根），计算最大 5m 收盘涨幅；
+			// 拉取失败置 -1 → SmartSizeMultiplier 按均仓 1.0 处理（避免误入 0.7 倍温和档，
+			// 审查 D1：网络抖动时段若按 0 会系统性压低 D 仓位，与回测口径不一致）
+			if v, err := e.client.GetKline5mMaxGain(ctx, sym, now); err == nil {
+				g5m = v
+			} else {
+				g5m = -1
+				log.Printf("[Strategy][Smart] %s 5m 爆拉因子拉取失败，按均仓处理: %v", sym, err)
+			}
+		}
+		e.klineOpenCache[sym] = klineOpenEntry{open: ki.Open, periodStart: periodStart, takerBuyPct: takerPct, gain5mMax: g5m}
+		result[sym] = ki.Open
 	}
 	return result
 }
@@ -806,6 +854,127 @@ func (e *Engine) logCandidates(candidates []Candidate, now int64) {
 		log.Printf("[Strategy]   候选 %d: %s %s 涨幅=%.2f%% 成交额=%.0fUSDT 窗口=%.0fs",
 			i+1, c.Symbol, c.Side, c.GainPct, c.QuoteVolume, float64(wLen)/1000)
 	}
+}
+
+// logSignalDebug 信号判定审计日志（仅 QUANT_SIGNAL_DEBUG=1 时启用）：
+// 对「接近达标」的做多币种逐项输出各过滤环节的判定结果（15m 涨幅 / 24h 涨幅 / 排名 / 山顶 / 新币），
+// 用于定位同一信号在模拟盘触发、实盘未触发（或反之）的分叉点。
+// 只做可观测性输出，不改变任何筛选/开仓逻辑。
+func (e *Engine) logSignalDebug(tickers []binance.Ticker, priceMap map[string]float64,
+	klineOpen map[string]float64, blockedNew map[string]bool, rankOK map[string]bool, now int64) {
+
+	threshold := e.cfg.MinGainPct
+	volTh := e.cfg.MinQuoteVolume
+	type nearMiss struct {
+		sym       string
+		gain      float64
+		priceChg  float64
+		quoteVol  float64
+		current   float64
+		klineOpen float64
+	}
+	var list []nearMiss
+	for _, t := range tickers {
+		if t.QuoteVolume < volTh*0.5 {
+			continue // 远离成交额阈值，常态不输出
+		}
+		current, ok := priceMap[t.Symbol]
+		if !ok || current <= 0 {
+			current = t.LastPrice
+		}
+		if current <= 0 {
+			continue
+		}
+		var gain float64
+		open := 0.0
+		if e.cfg.SignalMode == "kline" {
+			o, ok := klineOpen[t.Symbol]
+			if !ok || o <= 0 {
+				continue
+			}
+			open = o
+			gain = (current - o) / o * 100
+		} else {
+			g, ready := e.window.MaxGainPct(t.Symbol, current, now)
+			if !ready {
+				continue
+			}
+			gain = g
+		}
+		if gain < threshold*0.5 {
+			continue // 距离阈值太远，不逐条输出
+		}
+		list = append(list, nearMiss{
+			sym: t.Symbol, gain: gain, priceChg: t.PriceChange,
+			quoteVol: t.QuoteVolume, current: current, klineOpen: open,
+		})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].gain > list[j].gain })
+	if len(list) > 30 {
+		list = list[:30]
+	}
+	if len(list) == 0 {
+		return
+	}
+	for _, m := range list {
+		fail := ""
+		if m.gain < threshold {
+			fail = "15m涨幅不足"
+		}
+		if fail == "" && e.cfg.Min24hGainPct > 0 && m.priceChg < e.cfg.Min24hGainPct {
+			fail = "24h涨幅不足"
+		}
+		if fail == "" && rankOK != nil && !rankOK[m.sym] {
+			fail = "排名过滤未通过"
+		}
+		if fail == "" && e.cfg.MaxPullbackPct > 0 && m.current > 0 {
+			if h, ok := tickerHigh(tickers, m.sym); ok && h > 0 {
+				if (h-m.current)/h*100 > e.cfg.MaxPullbackPct {
+					fail = "山顶回撤过大"
+				}
+			}
+		}
+		if fail == "" && blockedNew[m.sym] {
+			fail = "新币过滤"
+		}
+		// 主动买占比（仅观测，不改决策）：当前 15m K 线主动买入成交额占比
+		takerStr := "无数据"
+		if entry, ok := e.klineOpenCache[m.sym]; ok && entry.takerBuyPct >= 0 {
+			takerStr = fmt.Sprintf("%.1f%%", entry.takerBuyPct)
+		}
+		status := "达标→候选"
+		if fail != "" {
+			status = "被拒(" + fail + ")"
+		}
+		line := fmt.Sprintf("[SignalDebug] %-14s 15m=%.2f%% 24h=%.2f%% 成交额=%.0f 现价=%g K线开=%g 主动买=%s → %s",
+			m.sym, m.gain, m.priceChg, m.quoteVol, m.current, m.klineOpen, takerStr, status)
+		log.Printf("%s", line)
+		// 同时写入数据库（windowsgui 无控制台，日志必须以 DB 落盘才能采集对比）
+		_ = e.db.InsertLog(&storage.TradeLog{
+			Timestamp: time.Now().UnixMilli(),
+			Level:     "info",
+			Module:    "signal-debug",
+			Message:   line,
+			Symbol:    m.sym,
+			Price:     m.current,
+		})
+	}
+	log.Printf("[SignalDebug] Tick %d 近门槛币种审计: %d 条（QUANT_SIGNAL_DEBUG=1）", e.tickCount.Load(), len(list))
+}
+
+// tickerHigh 从行情列表取指定币种 24h 最高价（信号审计辅助）
+func tickerHigh(tickers []binance.Ticker, symbol string) (float64, bool) {
+	for _, t := range tickers {
+		if t.Symbol == symbol {
+			return t.HighPrice, t.HighPrice > 0
+		}
+	}
+	return 0, false
+}
+
+// f64p 返回 float64 指针（可空字段用）
+func f64p(v float64) *float64 {
+	return &v
 }
 
 // logQuoteVolumeFilter 输出最小成交额（24h 累计成交额）校验的判断过程日志。
@@ -985,10 +1154,15 @@ func (e *Engine) openPositions(ctx context.Context, candidates []Candidate, pric
 		return nil
 	}
 	// 条件单占用系数 3：主仓 1 份 + 止损条件单 1 份 + 移动止盈条件单 1 份
-	need := float64(slots) * e.cfg.PositionMarginUSDT * 3
+	// 智慧版：爆拉桶仓位最大 ×SmartSizeHigh，按上限预留余额，避免 -2019
+	marginPer := e.cfg.PositionMarginUSDT
+	if e.cfg.SmartSizeMode > 0 && e.cfg.SmartSizeHigh > 1 {
+		marginPer *= e.cfg.SmartSizeHigh
+	}
+	need := float64(slots) * marginPer * 3
 	if bal.AvailableBalance < need {
 		log.Printf("[Strategy] ⛔ 可用余额不足，跳过本 Tick 开仓：可用 %.2f U < 需 %.2f U（%d 仓 × 单仓 %.1f U × 条件单系数 3）",
-			bal.AvailableBalance, need, slots, e.cfg.PositionMarginUSDT)
+			bal.AvailableBalance, need, slots, marginPer)
 		return nil
 	}
 
@@ -1102,8 +1276,21 @@ func (e *Engine) openPositions(ctx context.Context, candidates []Candidate, pric
 				c.Symbol, pi.firstEntry, pi.count, c.Side)
 		}
 
+		// 智慧版 5m 爆拉仓位：当前 15m 周期内最大 5m 收盘涨幅分桶调整单仓保证金
+		// （A 骨架 + 1.5/0.7/2.5 三关验证：全周期 +36%、2025-26 样本外 +39%，见 docs/策略实验结论-2026-08-13.md）
+		margin := e.cfg.PositionMarginUSDT
+		if e.cfg.SmartSizeMode > 0 {
+			if g5m, ok := e.smart5m[c.Symbol]; ok {
+				mult := SmartSizeMultiplier(g5m, e.cfg.SmartSizeHigh, e.cfg.SmartSizeLow, e.cfg.SmartSizeBoundary)
+				margin *= mult
+				if mult != 1 {
+					log.Printf("[Strategy][Smart] %s 5m爆拉 %.2f%% → 仓位倍数 %.2fx（单仓 %.2fU → %.2fU）",
+						c.Symbol, g5m, mult, e.cfg.PositionMarginUSDT, margin)
+				}
+			}
+		}
 		// 计算开仓数量：保证金 * 杠杆 / 入场价，按交易所 stepSize 向下取整
-		rawAmount := (e.cfg.PositionMarginUSDT * float64(e.cfg.Leverage)) / entryPrice
+		rawAmount := (margin * float64(e.cfg.Leverage)) / entryPrice
 		amount := e.client.RoundQty(c.Symbol, rawAmount)
 		if amount <= 0 {
 			log.Printf("[Strategy] %s 取整后数量为0，跳过（原始=%.8f）", c.Symbol, rawAmount)
@@ -1187,12 +1374,18 @@ func (e *Engine) openOne(ctx context.Context, symbol string, entryPrice, amount 
 
 	// 下单开仓（根据方向选择开多或开空）
 	openAmount := amount
+	var openRes *binance.OrderResult
 	open := func(qty float64) error {
+		var res *binance.OrderResult
+		var err error
 		if side == "SHORT" {
-			_, err := e.client.OpenShort(ctx, symbol, qty)
-			return err
+			res, err = e.client.OpenShort(ctx, symbol, qty)
+		} else {
+			res, err = e.client.OpenLong(ctx, symbol, qty)
 		}
-		_, err := e.client.OpenLong(ctx, symbol, qty)
+		if err == nil {
+			openRes = res
+		}
 		return err
 	}
 	openErr := open(openAmount)
@@ -1271,6 +1464,52 @@ func (e *Engine) openOne(ctx context.Context, symbol string, entryPrice, amount 
 		return nil, err
 	}
 	pos.ID = id
+
+	// 开仓市价单入表（记录交易所真实成交价，供滑点对账；仅记录，不改记账逻辑）。
+	// 说明：若后续开仓确认失败回滚本地持仓，该市价单记录保留，恰好能还原“开了又回滚”的过程。
+	if openRes != nil && openRes.OrderID > 0 {
+		orderNow := time.Now().UnixMilli()
+		filledPrice := 0.0
+		filledAmount := 0.0
+		if openRes.FilledPrice > 0 {
+			filledPrice = openRes.FilledPrice
+		}
+		if openRes.FilledAmount > 0 {
+			filledAmount = openRes.FilledAmount
+		}
+		orderSide := "BUY"
+		if side == "SHORT" {
+			orderSide = "SELL"
+		}
+		if _, oerr := e.db.InsertOrder(&storage.Order{
+			PositionID:      pos.ID,
+			ExchangeOrderID: openRes.OrderID,
+			Symbol:          symbol,
+			OrderType:       "MARKET",
+			Side:            orderSide,
+			Status:          openRes.Status,
+			Amount:          openAmount,
+			FilledPrice:     f64p(filledPrice),
+			FilledAmount:    f64p(filledAmount),
+			CreatedAt:       orderNow,
+			UpdatedAt:       orderNow,
+		}); oerr != nil {
+			log.Printf("[Strategy] 开仓市价单入表失败 %s #%d: %v", symbol, pos.ID, oerr)
+		} else if filledPrice > 0 && entryPrice > 0 {
+			slip := (filledPrice - entryPrice) / entryPrice * 100
+			log.Printf("[Strategy] 开仓成交 %s #%d 信号价=%.6f 成交均价=%.6f 滑点=%+.3f%%",
+				symbol, pos.ID, entryPrice, filledPrice, slip)
+			_ = e.db.InsertLog(&storage.TradeLog{
+				Timestamp: time.Now().UnixMilli(),
+				Level:     "info",
+				Module:    "strategy",
+				Message:   fmt.Sprintf("开仓成交 %s 信号价=%.6f 成交均价=%.6f 滑点=%+.3f%%", symbol, entryPrice, filledPrice, slip),
+				Symbol:    symbol,
+				Price:     filledPrice,
+				Amount:    openAmount,
+			})
+		}
+	}
 
 	// 开仓结果确认（非干跑）：用交易所真实持仓核对数量，防幽灵仓/数量不符
 	//（凌晨 GUA/HOME 幽灵单即"本地记开仓、交易所无仓"一类；失败在此回滚，不挂条件单）

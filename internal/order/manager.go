@@ -360,10 +360,19 @@ func (m *Manager) EnsureOrdersForOpenPositions(ctx context.Context, cfg binance.
 			}
 		}
 		if !hasActive {
-			log.Printf("[ORDER] %s 持仓ID=%d 无活跃委托，补挂止损保护", pos.Symbol, pos.ID)
-			if err := m.PlaceStopOrders(ctx, pos, cfg, 0); err != nil {
-				log.Printf("[ORDER] %s 补挂止损失败: %v", pos.Symbol, err)
-			}
+			// 审查修复 S1（2026-08-13）：补挂需要当前价做 -2021 钳制，但 Manager 无现价来源；
+			// 传 0 会在浮盈仓（现价已穿越激活价）触发 -2021 → rollbackPosition 误平盈利仓。
+			// 改为跳过补挂：本地 monitorPositions 在无活跃条件单时本就走本地止损/跟踪保护，
+			// Bot 存活期风险可控；交易所侧崩溃保护需先有现价来源（留待增强）。
+			log.Printf("[ORDER] ⚠ %s 持仓ID=%d 无活跃委托且无实时价来源，跳过补挂（本地 monitor 保护生效）", pos.Symbol, pos.ID)
+			_ = m.db.InsertLog(&storage.TradeLog{
+				Timestamp: time.Now().UnixMilli(),
+				Level:     "warn",
+				Module:    "order",
+				Message:   fmt.Sprintf("重启补挂止损跳过 %s 持仓ID=%d：无实时价来源，防 -2021 误平（本地 monitor 保护）", pos.Symbol, pos.ID),
+				Symbol:    pos.Symbol,
+			})
+			continue
 		}
 	}
 }
@@ -575,9 +584,26 @@ func (m *Manager) syncExchangeOrders(ctx context.Context, ords []*storage.Order)
 			Timestamp:       time.Now().UnixMilli(),
 		})
 
-		if info.Status == binance.OrderStatusFilled {
+		if info.Status == binance.OrderStatusFilled && isCloseFilledOrder(localOrder.OrderType) {
 			m.handleFilledOrder(ctx, localOrder, info)
 		}
+	}
+}
+
+// isCloseFilledOrder 判断委托成交是否应触发平仓闭环。
+// 只有平仓类条件单（STOP_MARKET / TRAILING_STOP_MARKET / TAKE_PROFIT_MARKET / LIMIT）
+// 成交才算平仓；开仓市价单（MARKET）成交只是开仓记录，绝不能触发平仓
+// （回归：开仓买单 FILLED 曾被误判为 STOP_LOSS 平仓，导致本地仓位被提前标平、
+// 交易所仓位仍持有，再由持仓核对重新认领）。
+func isCloseFilledOrder(orderType string) bool {
+	switch orderType {
+	case binance.OrderTypeStopMarket,
+		binance.OrderTypeTrailingStop,
+		binance.OrderTypeTakeProfit,
+		binance.OrderTypeLimit:
+		return true
+	default:
+		return false
 	}
 }
 

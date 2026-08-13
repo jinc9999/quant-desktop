@@ -68,14 +68,13 @@ func TestWsMarketTickerUnmarshalNumeric(t *testing.T) {
 	}
 }
 
-// TestWsMarketEndpointSimulation 验证模拟盘使用 Binance demo 域名。
-// Windows 侧与 Mac 侧行情不一致时，先确认两边是否连到了同一行情源。
-func TestWsMarketEndpointSimulation(t *testing.T) {
-	if got := wsMarketEndpoint("SIMULATION"); got != "wss://demo-fstream.binance.com/market/ws" {
-		t.Errorf("SIMULATION 应使用 demo 域名，实际 %s", got)
-	}
-	if got := wsMarketEndpoint("LIVE"); got != "wss://fstream.binance.com/market/ws" {
-		t.Errorf("LIVE 应使用主网域名，实际 %s", got)
+// TestWsMarketEndpoint 验证行情流统一使用主网 fstream：
+// 模拟盘的信号判定与实盘对齐（行情数据源解耦），订单仍通过 REST 走 demo。
+func TestWsMarketEndpoint(t *testing.T) {
+	for _, mode := range []string{"SIMULATION", "LIVE", "DRY_RUN"} {
+		if got := wsMarketEndpoint(mode); got != "wss://fstream.binance.com/market/ws" {
+			t.Errorf("%s 应使用主网域名，实际 %s", mode, got)
+		}
 	}
 }
 

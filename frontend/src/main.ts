@@ -9,6 +9,7 @@ import { useElementPlus } from "@/plugins/elementPlus";
 import { injectResponsiveStorage } from "@/utils/responsive";
 import { initRouter } from "@/router/utils";
 import { showError } from "@/utils/error-handler";
+import { QuantService } from "../bindings/quant-desktop/internal/bindings";
 
 import Table from "@pureadmin/table";
 // import PureDescriptions from "@pureadmin/descriptions";
@@ -29,13 +30,31 @@ document.documentElement.classList.add("dark");
 
 const app = createApp(App);
 
+// 前端运行诊断：把模块加载与 JS 错误上报到客户端日志（client.log），便于定位界面问题
+function reportClientEvent(message: string) {
+  try {
+    QuantService.LogClientEvent(message).catch(() => {});
+  } catch {
+    // 绑定不可用时静默忽略
+  }
+}
+reportClientEvent("main.ts 模块加载完成");
+window.addEventListener("error", e => {
+  reportClientEvent("JS error: " + (e.message || "unknown"));
+});
+window.addEventListener("unhandledrejection", e => {
+  reportClientEvent("JS unhandledrejection: " + String(e.reason));
+});
+
 // 全局错误兜底：捕获未处理的组件错误和 Promise rejection
 app.config.errorHandler = (err, _instance, info) => {
   console.error(`[GlobalError] ${info}:`, err);
+  reportClientEvent(`Vue error [${info}]: ${String(err)}`);
   showError(err, "应用异常");
 };
 window.addEventListener("unhandledrejection", e => {
   console.error("[GlobalError] unhandledrejection:", e.reason);
+  reportClientEvent("GlobalError unhandledrejection: " + String(e.reason));
   showError(e.reason, "后台任务异常");
 });
 

@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"quant-desktop/internal/binance"
+	"quant-desktop/internal/license"
 	"quant-desktop/internal/order"
+	"quant-desktop/internal/product"
 	"quant-desktop/internal/risk"
 	"quant-desktop/internal/storage"
 	"quant-desktop/internal/strategy"
@@ -42,6 +44,15 @@ type QuantService struct {
 	proxyAddr string           // 用户指定的代理地址
 	proxyPort int              // 用户指定的代理端口
 	app       *application.App // Wails 应用引用（用于事件推送）
+	lic       *license.Manager // C 版授权管理器（A/B 版为 nil）
+	// activeProfile C 版当前策略模式：A=进攻 / B=稳健（参数锁定）
+	activeProfile string
+	// licenseLocked 服务到期锁定标记（到期后禁止启动策略）
+	licenseLocked bool
+	// pinnedMode 启动时固定的模式（QUANT_START_MODE，空=不固定可切换）。
+	// 用于同一台电脑同时跑同策略的模拟盘与实盘：固定后禁止运行中切换模式，
+	// 避免两个进程最终都切到同一模式并发写同一个数据库。
+	pinnedMode string
 }
 
 // strategyCfgKey strategy_config 表中持久化策略配置的键名
@@ -155,9 +166,21 @@ const (
 // NewQuantService 创建量化服务实例
 func NewQuantService() *QuantService {
 	return &QuantService{
-		cfg:  binance.DefaultStrategyConfig(),
-		mode: "SIMULATION",
+		cfg:           binance.DefaultStrategyConfig(),
+		mode:          "SIMULATION",
+		activeProfile: "A",
 	}
+}
+
+// NewQuantServiceWithMode 创建量化服务并固定启动模式（QUANT_START_MODE 支持同机多实例并行）。
+// startMode: "SIMULATION" / "LIVE"；空字符串表示不固定（行为与 NewQuantService 一致）。
+func NewQuantServiceWithMode(startMode string) *QuantService {
+	s := NewQuantService()
+	if startMode == "SIMULATION" || startMode == "LIVE" {
+		s.pinnedMode = startMode
+		s.mode = startMode
+	}
+	return s
 }
 
 // SetApp 注入 Wails 应用引用（在 main.go 中创建 app 后调用）
@@ -208,24 +231,32 @@ func (s *QuantService) Init() error {
 	s.db = db
 	log.Printf("[Binding] 使用数据库: %s", dbPath)
 
-	// 加载上次「应用到项目」保存的策略配置（如有），覆盖默认值；
-	// 各模式数据库独立，持久化配置天然按模式隔离
-	if v, err := db.GetKeyValue(strategyCfgKey); err == nil && v != "" {
-		migrated, migratedCfg, err := migratePersistedStrategyConfig(v)
-		if err != nil {
-			log.Printf("[Binding] 持久化策略配置解析失败（使用默认值）: %v", err)
-		} else {
-			s.cfg = migratedCfg
-			// 升级迁移发生（新币过滤缺键 / 旧最小成交额 10 万）时回写数据库保持存储一致
-			if migrated {
-				if data, err := json.Marshal(migratedCfg); err == nil {
-					if err := db.SetKeyValue(strategyCfgKey, string(data)); err != nil {
-						log.Printf("[Binding] 回写迁移后策略配置失败: %v", err)
+	if product.IsC() {
+		// C 版：策略参数完全锁定，不读取也不写入 strategy_config。
+		// 参数以常量编译进二进制，界面/接口零暴露。
+		if err := s.initLicenseManager(); err != nil {
+			log.Printf("[License] 初始化授权管理器失败（继续以未授权状态启动）: %v", err)
+		}
+	} else {
+		// 加载上次「应用到项目」保存的策略配置（如有），覆盖默认值；
+		// 各模式数据库独立，持久化配置天然按模式隔离
+		if v, err := db.GetKeyValue(strategyCfgKey); err == nil && v != "" {
+			migrated, migratedCfg, err := migratePersistedStrategyConfig(v)
+			if err != nil {
+				log.Printf("[Binding] 持久化策略配置解析失败（使用默认值）: %v", err)
+			} else {
+				s.cfg = migratedCfg
+				// 升级迁移发生（新币过滤缺键 / 旧最小成交额 10 万）时回写数据库保持存储一致
+				if migrated {
+					if data, err := json.Marshal(migratedCfg); err == nil {
+						if err := db.SetKeyValue(strategyCfgKey, string(data)); err != nil {
+							log.Printf("[Binding] 回写迁移后策略配置失败: %v", err)
+						}
 					}
+					log.Printf("[Binding] 已迁移持久化策略配置（最小成交额 → 1000 万 USDT 等）")
 				}
-				log.Printf("[Binding] 已迁移持久化策略配置（最小成交额 → 1000 万 USDT 等）")
+				log.Printf("[Binding] 已加载持久化策略配置（应用到项目）")
 			}
-			log.Printf("[Binding] 已加载持久化策略配置（应用到项目）")
 		}
 	}
 
@@ -272,6 +303,11 @@ func (s *QuantService) Init() error {
 	// 启动健康监控（每 30 分钟自动检查 + 修复）
 	s.startHealthMonitor()
 
+	// C 版：启动授权后台任务（周期同步 + 本地到期检查）
+	if product.IsC() && s.lic != nil {
+		s.lic.Start(s.ctx)
+	}
+
 	return nil
 }
 
@@ -285,6 +321,9 @@ func (s *QuantService) SetCredentials(mode, apiKey, apiSecret string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.pinnedMode != "" && mode != s.pinnedMode {
+		return "启动时已固定模式为 " + s.pinnedMode + "（QUANT_START_MODE），禁止在运行中切换"
+	}
 	if s.started {
 		return "策略运行中，请先停止再切换模式"
 	}
@@ -906,6 +945,18 @@ func (s *QuantService) StartStrategy() string {
 	if s.started {
 		return "策略已在运行中"
 	}
+	// C 版授权门禁：未登录或已到期不允许启动
+	if product.IsC() {
+		if s.lic == nil || !s.lic.IsLoggedIn() {
+			return "请先登录后再启动策略"
+		}
+		if s.licenseLocked || s.lic.IsExpired() {
+			return "服务已到期，无法启动策略，请联系管理员续费"
+		}
+		if s.lic.IsUnopened() {
+			return "账号尚未开通服务，请联系管理员开通后使用"
+		}
+	}
 	if s.db == nil || s.client == nil || s.ws == nil {
 		return "服务未初始化"
 	}
@@ -1022,11 +1073,20 @@ func (s *QuantService) GetDashboardData() map[string]interface{} {
 	data["tickErrorCount"] = tickErrorCount
 	data["startTime"] = startTimeMs
 	data["runtimeSeconds"] = runtimeSec
-	data["scanIntervalSec"] = s.cfg.ScanIntervalSec
-	data["timeframe"] = s.cfg.Timeframe
-	data["topN"] = s.cfg.TopN
-	data["cooldownMin"] = s.cfg.CooldownMin
-	data["marginMode"] = s.cfg.MarginMode
+	if product.IsC() {
+		// C 版：策略参数不对外返回（界面已隐藏，接口同时置空兜底）
+		data["scanIntervalSec"] = 0
+		data["timeframe"] = ""
+		data["topN"] = 0
+		data["cooldownMin"] = 0
+		data["marginMode"] = ""
+	} else {
+		data["scanIntervalSec"] = s.cfg.ScanIntervalSec
+		data["timeframe"] = s.cfg.Timeframe
+		data["topN"] = s.cfg.TopN
+		data["cooldownMin"] = s.cfg.CooldownMin
+		data["marginMode"] = s.cfg.MarginMode
+	}
 
 	// 今日盈亏
 	if s.db == nil {
@@ -1209,6 +1269,11 @@ func (s *QuantService) fetchInitialTransfer(ctx context.Context) (float64, error
 
 // GetConfig 获取当前策略配置
 func (s *QuantService) GetConfig() binance.StrategyConfig {
+	if product.IsC() {
+		// C 版：参数不对外暴露，返回空配置
+		log.Printf("[Binding] C 版拒绝读取策略参数")
+		return binance.StrategyConfig{}
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cfg
@@ -1218,6 +1283,9 @@ func (s *QuantService) GetConfig() binance.StrategyConfig {
 // cfg: 新的策略配置
 // 返回: 操作结果提示。策略运行中时禁止修改，需先停止。
 func (s *QuantService) SetConfig(cfg binance.StrategyConfig) string {
+	if product.IsC() {
+		return "参数配置功能未开放"
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1234,6 +1302,9 @@ func (s *QuantService) SetConfig(cfg binance.StrategyConfig) string {
 // 返回: 操作结果提示。持久化仅写入数据库，不影响正在运行的策略，将在下次启动策略时生效；
 // 应用重启后由 Init 自动加载该配置覆盖默认值。
 func (s *QuantService) PersistConfig(cfg binance.StrategyConfig) string {
+	if product.IsC() {
+		return "参数配置功能未开放"
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1398,6 +1469,9 @@ func (s *QuantService) Shutdown() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.lic != nil {
+		s.lic.Stop()
+	}
 	if s.cancel != nil {
 		s.cancel()
 	}

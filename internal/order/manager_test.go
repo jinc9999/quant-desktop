@@ -397,6 +397,29 @@ func TestFilledCloseLoop_DryRun(t *testing.T) {
 	}
 }
 
+// TestIsCloseFilledOrder 回归测试：开仓市价单（MARKET）成交不得进入平仓闭环。
+// 背景：开仓市价单入表后，SyncOrders 把买单 FILLED 误判为条件单触发平仓，
+// 导致刚开的仓被本地标成已平仓（交易所仓位仍在），随后被持仓核对重新认领。
+func TestIsCloseFilledOrder(t *testing.T) {
+	closeTypes := []string{
+		binance.OrderTypeStopMarket,
+		binance.OrderTypeTrailingStop,
+		binance.OrderTypeTakeProfit,
+		binance.OrderTypeLimit,
+	}
+	for _, ot := range closeTypes {
+		if !isCloseFilledOrder(ot) {
+			t.Errorf("%s 成交应进入平仓闭环", ot)
+		}
+	}
+	if isCloseFilledOrder(binance.OrderTypeMarket) {
+		t.Error("MARKET 开仓市价单成交不应进入平仓闭环")
+	}
+	if isCloseFilledOrder("") {
+		t.Error("未知委托类型不应默认进入平仓闭环")
+	}
+}
+
 // TestOnCloseFiredOnFilledClose 验证条件单触发平仓后，OnClose 回调被通知（冷却期闭环修复）。
 // 背景：交易所条件单平仓是主平仓路径，此前从不通知引擎写冷却期，
 // 导致同币无限快速重复开仓（实盘单币日开 40+ 次）。

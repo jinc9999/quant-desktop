@@ -1,0 +1,21 @@
+name: Go 回归测试
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: true
+      - name: 安装 gcc（CGO sqlite 依赖）
+        run: sudo apt-get update && sudo apt-get install -y gcc
+      - name: 全量内部单测
+        run: go test ./internal/...
+      - name: 回测引擎编译
+        run: go build ./backtest/cmd/backtest

@@ -58,6 +58,7 @@ type OrderInfo struct {
 
 // 委托类型常量
 const (
+	OrderTypeMarket       = "MARKET"              // 开仓市价单（仅开仓记录，成交不触发平仓闭环）
 	OrderTypeStopMarket   = "STOP_MARKET"
 	OrderTypeTrailingStop = "TRAILING_STOP_MARKET"
 	OrderTypeTakeProfit   = "TAKE_PROFIT_MARKET" // 固定止盈条件单（Algo Order API）
@@ -159,6 +160,15 @@ type StrategyConfig struct {
 	NewListingMinDays        int     `json:"newListingMinDays"`        // 新币过滤天数阈值（天）：上市天数小于等于该值的合约不参与任何开仓（默认 60，0=关闭）
 	CooldownAfterTrailingMin int     `json:"cooldownAfterTrailingMin"` // 移动止盈平仓后的冷却分钟数（<0=统一用 CooldownMin；0=立即再入；默认 15）
 	WarmupMin                int     `json:"warmupMin"`                // 启动预热分钟数（默认 15，0=关闭）：放量确认依赖本地成交量采样窗口，启动后需约 15 分钟才完整，预热期内禁止开仓
+	// ===== 智慧版 D（5m 爆拉力度仓位，2026-08-13 三关验证通过）=====
+	// 回测口径：A 骨架 + 当前 15m 周期内最大 5m 收盘涨幅分桶调仓
+	//   >=SmartSizeBoundary%（默认 2.5）爆拉 → 仓位 ×SmartSizeHigh（默认 1.5）
+	//   2%~边界 → 均仓；<2% 温和 → ×SmartSizeLow（默认 0.7）
+	// 全周期 +36%、2025-26 样本外 +39%、扰动 6 组稳定（详见 docs/策略实验结论-2026-08-13.md 第八节）
+	SmartSizeMode     int     `json:"smartSizeMode"`     // 智慧版开关：0=关闭（A/B 默认），1=开启（D 版构建默认 1）
+	SmartSizeHigh     float64 `json:"smartSizeHigh"`     // 爆拉桶仓位倍数（默认 1.5）
+	SmartSizeLow      float64 `json:"smartSizeLow"`      // 温和桶仓位倍数（默认 0.7）
+	SmartSizeBoundary float64 `json:"smartSizeBoundary"` // 爆拉桶边界%（默认 2.5）
 }
 
 // DefaultStrategyConfig 返回默认策略配置（S01 v2 纯追涨，2026-08-08 全参数矩阵定稿）
@@ -194,6 +204,16 @@ var (
 	//   A 版（默认）：币安-魔力进攻A策略；B 版构建加 -X ...defaultStrategyName=币安-魔力稳健B策略
 	defaultStrategyName    = "币安-魔力进攻A策略"
 	defaultStrategyVersion = "V1.0_202608102326" // 定版号：V{主}.{次}_{YYYYMMDDHHMM}
+	// 当前 A 实盘参数（8/10 矩阵定稿 gain3×2000万，8/11 细化 sl3）；D 版构建用 -X 覆盖到 A 骨架
+	defaultMinGainPct     = "4"
+	defaultMin24hGainPct  = "4"
+	defaultMinQuoteVolume = "10000000"
+	defaultStopLossPct    = "4"
+	// 智慧版 5m 爆拉仓位（D 版构建 -X ...defaultSmartSizeMode=1）
+	defaultSmartSizeMode     = "0"
+	defaultSmartSizeHigh     = "1.5"
+	defaultSmartSizeLow      = "0.7"
+	defaultSmartSizeBoundary = "2.5"
 )
 
 // parseIntDefault 解析字符串为 int，失败时返回默认值（供 -X 覆盖的默认参数使用）
@@ -218,18 +238,18 @@ func DefaultStrategyConfig() StrategyConfig {
 		StrategyVersion:         defaultStrategyVersion, // 定版标识 V{主}.{次}_{YYYYMMDDHHMM}
 		ScanIntervalSec:        15,
 		Timeframe:              "15m",
-		MinGainPct:             4.0,
-		Min24hGainPct:          4.0,      // 双条件筛选：24h 涨幅 >= 4% 且 15m K 线涨幅 >= 4%
+		MinGainPct:             parseFloatDefault(defaultMinGainPct, 4.0),
+		Min24hGainPct:          parseFloatDefault(defaultMin24hGainPct, 4.0), // 双条件筛选：24h 涨幅 + 15m K 线涨幅
 		RankMode:               parseIntDefault(defaultRankMode, 0),  // 排名过滤：0=关闭 1=前N% 2=前M名（B 版构建默认 1）
 		RankParam:              parseFloatDefault(defaultRankParam, 20), // 排名参数（B 版构建默认 10 = 前 10%）
-		MinQuoteVolume:         10000000, // 24h 成交额下限 1000 万 USDT（2026-08-07 用户要求 10 万→1000 万，过滤小市值低流动性币）
+		MinQuoteVolume:         parseFloatDefault(defaultMinQuoteVolume, 10000000), // 24h 成交额下限 USDT
 		TopN:                   10,
 		MaxOpenPositions:       10,   // 最大同时持仓 10（2026-08-04 用户要求 5→10）
 		Leverage:               10,   // 10x 杠杆
 		PositionMarginUSDT:     10.0, // 每仓保证金 10U
 		CooldownMin:            30,   // 止损/超时平仓后冷却 30 分钟（S01 v2，2026-08-08 矩阵定稿）
 		MarginMode:             MarginModeIsolated,
-		StopLossPct:            0.04,    // 4% 固定止损（S01 v2：紧止损取小亏，回撤 10.2%→6.4%）
+		StopLossPct:            parseFloatDefault(defaultStopLossPct, 4.0) / 100, // 固定止损（S01 v2 定稿 4%，当前 A 实盘 3%）
 		TrailingActivation:     0.02,    // 2% 涨幅激活移动止损（S01 v2：更早激活锁定利润）
 		TrailingCallback:       0.03,    // 激活后回撤 3% 平仓（S01 v2：松回调让利润奔跑）
 		DailyLossLimitPct:      5.0,     // 日亏 5% 熔断停手（已接入引擎）
@@ -255,5 +275,10 @@ func DefaultStrategyConfig() StrategyConfig {
 		// 启动预热 15 分钟：放量确认（最近 2 分钟 vs 前 13 分钟）依赖启动后本地成交量采样窗口，
 		// 窗口未满时放量检查 fail-open（算不出就放行），预热期内禁止开仓可避免少一道放量过滤。
 		WarmupMin: 15,
+		// 智慧版 5m 爆拉仓位（D 版构建默认 1；A/B 保持 0=关闭）
+		SmartSizeMode:     parseIntDefault(defaultSmartSizeMode, 0),
+		SmartSizeHigh:     parseFloatDefault(defaultSmartSizeHigh, 1.5),
+		SmartSizeLow:      parseFloatDefault(defaultSmartSizeLow, 0.7),
+		SmartSizeBoundary: parseFloatDefault(defaultSmartSizeBoundary, 2.5),
 	}
 }

@@ -47,12 +47,10 @@ func NewWsManagerWithProxy(mode string, proxyURL *url.URL) *WsManager {
 	}
 }
 
-// wsMarketEndpoint 返回指定模式的全市场行情流地址。
-// SIMULATION 使用 demo 域名，LIVE/DRY_RUN 使用主网域名（DRY_RUN 实际不发起连接）。
+// wsMarketEndpoint 返回全市场行情流地址。
+// 统一使用主网 fstream：模拟盘的信号判定也基于实盘行情（与 REST 行情数据源解耦一致），
+// 订单/账户仍通过 REST 走 demo；DRY_RUN 实际不发起连接。
 func wsMarketEndpoint(mode string) string {
-	if mode == "SIMULATION" {
-		return "wss://demo-fstream.binance.com/market/ws"
-	}
 	return "wss://fstream.binance.com/market/ws"
 }
 

@@ -5,6 +5,7 @@
 币安月度文件当月不可用，只有按天文件: data/futures/um/daily/klines/{SYM}/5m/{SYM}-5m-YYYY-MM-DD.zip
 """
 import concurrent.futures
+import datetime
 import io
 import os
 import sys
@@ -14,7 +15,8 @@ import zipfile
 
 DATA_DIR = r"D:\0001_ba-A - 03\quant-desktop\backtest\data"
 DATES = ["2026-08-01", "2026-08-02", "2026-08-03", "2026-08-04",
-         "2026-08-05", "2026-08-06", "2026-08-07"]
+         "2026-08-05", "2026-08-06", "2026-08-07", "2026-08-08",
+         "2026-08-09", "2026-08-10", "2026-08-11", "2026-08-12"]
 URL_TPL = ("https://data.binance.vision/data/futures/um/daily/klines/"
            "{sym}/5m/{sym}-5m-{day}.zip")
 WORKERS = 12
@@ -56,6 +58,10 @@ def process_symbol(sym):
     rows = []
     missing = []
     for day in DATES:
+        day_start = int(datetime.datetime.fromisoformat(day).replace(
+            tzinfo=datetime.timezone.utc).timestamp() * 1000)
+        if last_ts > 0 and day_start <= last_ts:
+            continue  # 该日数据已在 CSV 中，跳过下载（增量更新）
         _, blob, err = fetch_day(sym, day)
         if blob is None:
             missing.append(day + "[" + err + "]")
