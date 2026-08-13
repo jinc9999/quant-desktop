@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -1029,6 +1030,22 @@ type simState struct {
 	closed    []*simPos
 }
 
+// rejectRec 一笔"有信号但未开仓"的逐单记录（根因细化用）
+type rejectRec struct {
+	symbol  string
+	timeStr string
+	bucket  string
+	reason  string // maxpos=全局10仓上限 / cooldown=冷却中 / no_active=持仓未激活无法追单 / addon_limit=追单达上限
+	seq     int    // 该币当日第几个信号
+}
+
+type simOpenRec struct {
+	symbol  string
+	ts      int64
+	bucket  string
+	addOn   bool
+}
+
 func analyzeStrategy(proxy, clientDB string) error {
 	client := httpClient(proxy)
 	tickers, err := fetchTickers(client)
@@ -1061,6 +1078,8 @@ func analyzeStrategy(proxy, clientDB string) error {
 	var totalSignals, totalOpens, totalAddons int
 	var dayPnl float64
 	globalOpen := 0
+	var rejects []rejectRec
+	var simOpens []simOpenRec
 	type bucketStat struct {
 		opens, closed, wins int
 		pnl                 float64
@@ -1118,6 +1137,12 @@ func analyzeStrategy(proxy, clientDB string) error {
 				cycleGain = (k.close - co) / co * 100
 			}
 			signal := co > 0 && cycleGain >= gainReq
+			seq := 0
+			if signal {
+				seq = st.signals + 1
+				st.signals++
+				totalSignals++
+			}
 			m5 := 0.0
 			if signal {
 				m5 = max5mEntity(k5, j)
@@ -1182,20 +1207,18 @@ func analyzeStrategy(proxy, clientDB string) error {
 			}
 			st.positions = kept
 
-			// 2) 开仓/追单
-			if signal {
-				st.signals++
-				totalSignals++
-			}
+			// 2) 开仓/追单（未开时记录逐单原因）
 			if signal && k.openTime >= st.cdUntil {
 				bkt := bucketOf(m5)
 				mult := bucketMult[bkt]
 				// 全局同时持仓上限（模拟建模：实际 Top10，信号密集时是主要执行约束）
 				if globalOpen >= 10 {
+					rejects = append(rejects, rejectRec{symbol: t.Symbol, timeStr: time.UnixMilli(k.openTime).In(beijing).Format("15:04"), bucket: bkt, reason: "maxpos", seq: seq})
 					continue
 				}
 				if len(st.positions) == 0 {
 					st.positions = append(st.positions, &simPos{entry: k.close, extreme: k.close, heldBars: 1, bucket: bkt, mult: mult})
+					simOpens = append(simOpens, simOpenRec{symbol: t.Symbol, ts: k.openTime, bucket: bkt})
 					globalOpen++
 					st.opens++
 					totalOpens++
@@ -1211,12 +1234,21 @@ func analyzeStrategy(proxy, clientDB string) error {
 					}
 					if anyActive && len(st.positions) < 1+maxAddOn {
 						st.positions = append(st.positions, &simPos{entry: k.close, extreme: k.close, heldBars: 1, addOn: true, bucket: bkt, mult: mult})
+						simOpens = append(simOpens, simOpenRec{symbol: t.Symbol, ts: k.openTime, bucket: bkt, addOn: true})
 						globalOpen++
 						st.addons++
 						totalAddons++
 						buckets[bkt].opens++
+					} else {
+						if !anyActive {
+							rejects = append(rejects, rejectRec{symbol: t.Symbol, timeStr: time.UnixMilli(k.openTime).In(beijing).Format("15:04"), bucket: bkt, reason: "no_active", seq: seq})
+						} else {
+							rejects = append(rejects, rejectRec{symbol: t.Symbol, timeStr: time.UnixMilli(k.openTime).In(beijing).Format("15:04"), bucket: bkt, reason: "addon_limit", seq: seq})
+						}
 					}
 				}
+			} else if signal {
+				rejects = append(rejects, rejectRec{symbol: t.Symbol, timeStr: time.UnixMilli(k.openTime).In(beijing).Format("15:04"), bucket: bucketOf(m5), reason: "cooldown", seq: seq})
 			}
 		}
 	}
@@ -1329,6 +1361,88 @@ func analyzeStrategy(proxy, clientDB string) error {
 	}
 	fmt.Println(fmtTable([]string{"桶", "可开仓机会", "实际开仓", "实际盈亏", "少做", "转化率"}, bucketRows))
 
+	// ==================== 逐单根因明细 ====================
+	rejectCnt := map[string]int{"maxpos": 0, "cooldown": 0, "no_active": 0, "addon_limit": 0}
+	rejectNames := map[string]string{
+		"maxpos":      "全局10仓上限",
+		"cooldown":    "冷却期内",
+		"no_active":   "持仓未激活(无法追单)",
+		"addon_limit": "同币追单达上限",
+	}
+	for _, r := range rejects {
+		rejectCnt[r.reason]++
+	}
+	fmt.Println("\n逐单拦截明细（策略规则内未开仓的信号，按原因）:")
+	var rejectRows [][]string
+	for _, k := range []string{"maxpos", "cooldown", "no_active", "addon_limit"} {
+		rejectRows = append(rejectRows, []string{rejectNames[k], fmt.Sprintf("%d", rejectCnt[k])})
+	}
+	fmt.Println(fmtTable([]string{"拦截原因", "次数"}, rejectRows))
+
+	// 执行损耗差集：按币按序号精确匹配（同币第 n 个模拟开仓对应第 n 个实际开仓，
+	// 模拟多出的单即"可开但实际未成交"，demo/tick/零星失败等执行损耗）
+	simBySym := map[string][]simOpenRec{}
+	for _, so := range simOpens {
+		simBySym[so.symbol] = append(simBySym[so.symbol], so)
+	}
+	actBySym := map[string][]actualTrade{}
+	for _, a := range actuals {
+		actBySym[a.Symbol] = append(actBySym[a.Symbol], a)
+	}
+	var gap []simOpenRec
+	for sym, sims := range simBySym {
+		acts := actBySym[sym]
+		for i, so := range sims {
+			if i >= len(acts) {
+				gap = append(gap, so)
+			}
+		}
+	}
+	gapCnt := map[string]int{}
+	for _, g := range gap {
+		gapCnt[g.bucket]++
+	}
+	fmt.Println("\n执行损耗明细（模拟规则可开但实际未成交，demo/tick粒度/零星失败）:")
+	var gapRows [][]string
+	for _, bkt := range []string{"爆拉桶", "中间桶", "温和桶"} {
+		gapRows = append(gapRows, []string{bkt, fmt.Sprintf("%d", gapCnt[bkt])})
+	}
+	fmt.Println(fmtTable([]string{"桶", "执行损耗单数"}, gapRows))
+
+	// 明细样例（每原因前 8 条）
+	fmt.Println("\n明细样例（完整明细见 market_data/analysis_<date>.csv）:")
+	shown := map[string]int{}
+	for _, r := range rejects {
+		if shown[r.reason] >= 8 {
+			continue
+		}
+		shown[r.reason]++
+		fmt.Printf("  [%s] #%03d %-12s %s %s\n", rejectNames[r.reason], r.seq, r.symbol, r.timeStr, r.bucket)
+	}
+	gapBySym := map[string]int{}
+	for _, g := range gap {
+		gapBySym[g.symbol]++
+	}
+	gapShown := 0
+	for _, g := range gap {
+		if gapShown >= 15 {
+			break
+		}
+		gapShown++
+		seq := gapBySym[g.symbol] - countAfter(gap, g) + 1
+		tag := "首仓"
+		if g.addOn {
+			tag = "追单"
+		}
+		fmt.Printf("  [执行损耗] %-12s #%03d %s %s %s\n", g.symbol, seq, time.UnixMilli(g.ts).In(beijing).Format("15:04"), g.bucket, tag)
+	}
+
+	// 完整明细写 CSV
+	date := now.Format("2006-01-02")
+	if err := writeAnalysisCSV(date, rejects, gap); err != nil {
+		log.Printf("⚠ 写分析明细 CSV 失败: %v", err)
+	}
+
 	// 写入 daily_summaries（type=strategy），供前端"每日策略总结"页展示
 	if clientDB != "" {
 		sim := map[string]interface{}{
@@ -1337,6 +1451,11 @@ func analyzeStrategy(proxy, clientDB string) error {
 			"pnl": round2(dayPnl), "avg": round2(safeDiv(dayPnl, float64(n))),
 			"stop": reasonCnt["STOP_LOSS"], "trail": reasonCnt["TRAILING"], "maxhold": reasonCnt["MAX_HOLD"],
 			"addonClosed": addOnClosed,
+			"rejects": map[string]interface{}{
+				"maxpos": rejectCnt["maxpos"], "cooldown": rejectCnt["cooldown"],
+				"noActive": rejectCnt["no_active"], "addonLimit": rejectCnt["addon_limit"],
+			},
+			"gap": gapCnt,
 		}
 		if err := writeStrategySummary(clientDB, sim, bucketList); err != nil {
 			log.Printf("⚠ 写入策略总结失败: %v", err)
@@ -1345,6 +1464,40 @@ func analyzeStrategy(proxy, clientDB string) error {
 		}
 	}
 	return nil
+}
+
+// writeAnalysisCSV 输出逐单拦截与执行损耗明细（可打开查看每一单）
+func writeAnalysisCSV(date string, rejects []rejectRec, gap []simOpenRec) error {
+	path := fmt.Sprintf(`D:\0001_ba-A - 03\market_data\analysis_%s.csv`, date)
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := csv.NewWriter(f)
+	defer w.Flush()
+	w.Write([]string{"类型", "币种", "时间", "桶", "原因/说明"})
+	for _, r := range rejects {
+		w.Write([]string{"拦截", r.symbol, r.timeStr, r.bucket, r.reason})
+	}
+	for _, g := range gap {
+		why := "执行损耗(模拟可开实际未成交)"
+		if g.addOn {
+			why += "-追单"
+		}
+		w.Write([]string{"执行损耗", g.symbol, time.UnixMilli(g.ts).In(beijing).Format("15:04"), g.bucket, why})
+	}
+	return w.Error()
+}
+
+func countAfter(list []simOpenRec, target simOpenRec) int {
+	n := 0
+	for _, g := range list {
+		if g.symbol == target.symbol && g.ts > target.ts {
+			n++
+		}
+	}
+	return n
 }
 
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
