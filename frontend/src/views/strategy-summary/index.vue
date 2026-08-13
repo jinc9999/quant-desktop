@@ -128,7 +128,47 @@ onUnmounted(() => {
         <div v-else class="empty-state">策略模拟每小时自动生成，暂无数据不影响策略运行</div>
       </div>
 
-      <!-- 板块二：三桶分析 -->
+      <!-- 板块二：每日可开仓漏斗 -->
+      <div class="summary-section">
+        <div class="section-title">每日可开仓漏斗（首仓 + 追单，一一对应）</div>
+        <div class="rule-note">
+          首仓机会 = 15m≥3% 且可开；追单机会 = 同币已激活且未达 3 仓；少做 = 机会 − 实际。
+          合计可开 = 首仓机会 + 追单机会。
+        </div>
+        <el-table v-if="buckets.length" :data="buckets" size="small" stripe>
+          <el-table-column prop="bucket" label="桶" min-width="70" />
+          <el-table-column label="首仓机会" width="86" align="right">
+            <template #default="{ row }">{{ row.first }}</template>
+          </el-table-column>
+          <el-table-column label="实际首仓" width="86" align="right">
+            <template #default="{ row }">{{ row.actualFirst }}</template>
+          </el-table-column>
+          <el-table-column label="首仓少做" width="86" align="right">
+            <template #default="{ row }">{{ row.first - row.actualFirst }}</template>
+          </el-table-column>
+          <el-table-column label="追单机会" width="86" align="right">
+            <template #default="{ row }">{{ row.addon }}</template>
+          </el-table-column>
+          <el-table-column label="实际追单" width="86" align="right">
+            <template #default="{ row }">{{ row.actualAddon }}</template>
+          </el-table-column>
+          <el-table-column label="追单少做" width="86" align="right">
+            <template #default="{ row }">{{ row.addon - row.actualAddon }}</template>
+          </el-table-column>
+          <el-table-column label="合计可开" width="86" align="right">
+            <template #default="{ row }">{{ row.first + row.addon }}</template>
+          </el-table-column>
+          <el-table-column label="实际合计" width="86" align="right">
+            <template #default="{ row }">{{ row.actualFirst + row.actualAddon }}</template>
+          </el-table-column>
+          <el-table-column label="合计少做" width="86" align="right">
+            <template #default="{ row }">{{ row.first - row.actualFirst + row.addon - row.actualAddon }}</template>
+          </el-table-column>
+        </el-table>
+        <div v-else class="empty-state">漏斗统计每小时自动生成</div>
+      </div>
+
+      <!-- 板块三：三桶分析 -->
       <div class="summary-section">
         <div class="section-title">三桶分析（按开仓时 5m 爆拉分档）</div>
         <div class="rule-note">
@@ -154,7 +194,7 @@ onUnmounted(() => {
         <div v-else class="empty-state">三桶分析每小时自动生成，暂无数据不影响策略运行</div>
       </div>
 
-      <!-- 板块三：'有机会但没做成'的单 -->
+      <!-- 板块四：'有机会但没做成'的单 -->
       <div class="summary-section">
         <div class="section-title">"有机会但没做成"的单（{{ detailGroups.length }} 个币 · 点击展开）</div>
         <div class="rule-note">

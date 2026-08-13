@@ -1102,6 +1102,10 @@ func analyzeStrategy(proxy, clientDB string) error {
 	actualByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
 	actualPnlByBucket := map[string]float64{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
 	actualClosedByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
+	simFirstByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
+	simAddonByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
+	actFirstByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
+	actAddonByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
 	k5Cache := map[string][]kline{}
 
 	for i, t := range pool {
@@ -1253,7 +1257,23 @@ func analyzeStrategy(proxy, clientDB string) error {
 		}
 	}
 
-	// 实际交易回放桶（复用已拉 K 线，缺则补拉）
+	// 模拟开仓拆首仓/追单
+	for _, so := range simOpens {
+		if so.addOn {
+			simAddonByBucket[so.bucket]++
+		} else {
+			simFirstByBucket[so.bucket]++
+		}
+	}
+
+	// 实际交易回放桶（复用已拉 K 线，缺则补拉）；按币按时间序，第 1 单=首仓，其余=追单
+	sort.Slice(actuals, func(i, j int) bool {
+		if actuals[i].Symbol != actuals[j].Symbol {
+			return actuals[i].Symbol < actuals[j].Symbol
+		}
+		return actuals[i].Opened < actuals[j].Opened
+	})
+	actSeq := map[string]int{}
 	for _, a := range actuals {
 		k5, ok := k5Cache[a.Symbol]
 		if !ok {
@@ -1280,6 +1300,12 @@ func analyzeStrategy(proxy, clientDB string) error {
 		}
 		bkt := bucketOf(max5mEntity(k5, idx))
 		actualByBucket[bkt]++
+		actSeq[a.Symbol]++
+		if actSeq[a.Symbol] == 1 {
+			actFirstByBucket[bkt]++
+		} else {
+			actAddonByBucket[bkt]++
+		}
 		if a.Status == "CLOSED" {
 			actualClosedByBucket[bkt]++
 			actualPnlByBucket[bkt] += a.Pnl
@@ -1331,6 +1357,32 @@ func analyzeStrategy(proxy, clientDB string) error {
 	fmt.Println("\n⚠ 口径：本模拟按 5m 收盘/高低价近似回放，未含手续费滑点、未按 5m 爆拉分桶放大仓位；用于复盘当日策略环境，非实盘对账。")
 
 	// 三桶分析（按开仓时 5m 爆拉分桶）
+	// 每日可开仓漏斗（首仓/追单 机会-实际-少做）
+	var funnelRows [][]string
+	tFirst, tActFirst, tAddon, tActAddon := 0, 0, 0, 0
+	for _, name := range []string{"爆拉桶", "中间桶", "温和桶"} {
+		f := simFirstByBucket[name]
+		af := actFirstByBucket[name]
+		ad := simAddonByBucket[name]
+		aa := actAddonByBucket[name]
+		tFirst += f
+		tActFirst += af
+		tAddon += ad
+		tActAddon += aa
+		funnelRows = append(funnelRows, []string{
+			name, fmt.Sprintf("%d", f), fmt.Sprintf("%d", af), fmt.Sprintf("%d", f-af),
+			fmt.Sprintf("%d", ad), fmt.Sprintf("%d", aa), fmt.Sprintf("%d", ad-aa),
+			fmt.Sprintf("%d", f+ad), fmt.Sprintf("%d", af+aa), fmt.Sprintf("%d", (f-af)+(ad-aa)),
+		})
+	}
+	funnelRows = append(funnelRows, []string{
+		"合计", fmt.Sprintf("%d", tFirst), fmt.Sprintf("%d", tActFirst), fmt.Sprintf("%d", tFirst-tActFirst),
+		fmt.Sprintf("%d", tAddon), fmt.Sprintf("%d", tActAddon), fmt.Sprintf("%d", tAddon-tActAddon),
+		fmt.Sprintf("%d", tFirst+tAddon), fmt.Sprintf("%d", tActFirst+tActAddon), fmt.Sprintf("%d", (tFirst-tActFirst)+(tAddon-tActAddon)),
+	})
+	fmt.Println("\n每日可开仓漏斗（策略规则可做，含10仓上限；首仓=15m≥3%且可开，追单=同币已激活且未达3仓）:")
+	fmt.Println(fmtTable([]string{"桶", "首仓机会", "实际首仓", "首仓少做", "追单机会", "实际追单", "追单少做", "合计可开", "实际合计", "合计少做"}, funnelRows))
+
 	fmt.Println("\n三桶分析 · 可开仓机会 vs 实际（可开仓机会=策略规则下能开的动作数（含追单、含全局10仓上限）；实际=客户端库当天开仓；少做=可开-实际）:")
 	var bucketRows [][]string
 	var bucketList []map[string]interface{}
@@ -1357,6 +1409,8 @@ func analyzeStrategy(proxy, clientDB string) error {
 		bucketList = append(bucketList, map[string]interface{}{
 			"bucket": name, "opportunity": opportunity, "actual": actual,
 			"actualPnl": round2(actualPnlByBucket[name]), "missed": missed, "conversion": round2(conv),
+			"first": simFirstByBucket[name], "actualFirst": actFirstByBucket[name],
+			"addon": simAddonByBucket[name], "actualAddon": actAddonByBucket[name],
 		})
 	}
 	// 合计行
@@ -1379,6 +1433,7 @@ func analyzeStrategy(proxy, clientDB string) error {
 	bucketList = append(bucketList, map[string]interface{}{
 		"bucket": "合计", "opportunity": tOpp, "actual": tAct,
 		"actualPnl": round2(tPnl), "missed": tMiss, "conversion": round2(tConv),
+		"first": tFirst, "actualFirst": tActFirst, "addon": tAddon, "actualAddon": tActAddon,
 	})
 	fmt.Println(fmtTable([]string{"桶", "可开仓机会", "实际开仓", "实际盈亏", "少做", "转化率"}, bucketRows))
 
