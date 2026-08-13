@@ -19,10 +19,23 @@ const recon = ref<any>(null);
 /** 周期筛选：day=日结记录 / week=周结 / month=月结 / year=年结 */
 const period = ref("day");
 
-/** 最新一条带市场解读的记录（每日 00:10 完整版 / 08:00 晨间速览），用于顶部展示 */
-const latestReport = computed(
-  () => list.value.find((r: any) => r.marketNotes && r.marketNotes.trim()) ?? null
-);
+/** 最新一条带市场解读的记录：跟随周期 Tab（day→日结/晨间/自动；week/month/year→对应周期总结） */
+const latestReport = computed(() => {
+  const allow = periodTypes(period.value);
+  return (
+    list.value.find((r: any) => allow.includes(r.summaryType) && r.marketNotes && r.marketNotes.trim()) ??
+    null
+  );
+});
+function periodTypes(p: string): string[] {
+  const m: Record<string, string[]> = {
+    day: ["daily", "morning", "auto"],
+    week: ["weekly"],
+    month: ["monthly"],
+    year: ["yearly"]
+  };
+  return m[p] || m.day;
+}
 /** 结构化元数据（feature_json）：市场指标表格 + 大白话归因 */
 const reportMeta = computed(() => {
   try {
@@ -31,31 +44,50 @@ const reportMeta = computed(() => {
     return {};
   }
 });
-/** 策略环境指标（今天） */
+/** 策略环境指标：day=当日明细；week/month/year=区间聚合（跨天合计/均值） */
 const envMetrics = computed<any[]>(() => {
   const ms = (reportMeta.value.metrics as any[]) || [];
   if (!ms.length) return [];
+  const agg = ms.reduce(
+    (a, m) => {
+      a.pool += m.poolWidth;
+      a.oppCoins += m.opportunityCount;
+      a.oppTotal += m.opportunityTotal;
+      a.burst += m.burstTotal;
+      a.fake += m.fakeBreakoutRate;
+      a.atr += m.btcATRPct;
+      a.up = Math.max(a.up, m.max15mUp);
+      a.down = Math.min(a.down, m.max15mDown);
+      return a;
+    },
+    { pool: 0, oppCoins: 0, oppTotal: 0, burst: 0, fake: 0, atr: 0, up: -999, down: 999, n: ms.length }
+  );
+  const n = Math.max(agg.n, 1);
   const m = ms[ms.length - 1];
+  if (period.value === "day") {
+    return [
+      { k: "机会池宽度", v: `${m.poolWidth} 个币`, d: "24h成交额≥2000万 的合约数" },
+      { k: "异动机会", v: `${m.opportunityCount} 币 / ${m.opportunityTotal} 次`, d: "15m单根涨≥3%（策略的肉）" },
+      { k: "5m爆拉", v: `${m.burstTotal} 次`, d: "5m单根涨≥2.5%（智慧版1.5倍机会）" },
+      { k: "假突破率", v: `${Number(m.fakeBreakoutRate).toFixed(1)}%`, d: "冲3%未站稳占比（高=止损会多）" },
+      { k: "最大15m涨/跌", v: `+${Number(m.max15mUp).toFixed(1)}% / ${Number(m.max15mDown).toFixed(1)}%`, d: "当日最猛的单根异动" },
+      { k: "BTC波动", v: `ATR ${Number(m.btcATRPct).toFixed(1)}%`, d: "BTC 24h 波动率（高=肉多滑点狠）" }
+    ];
+  }
   return [
-    { k: "机会池宽度", v: `${m.poolWidth} 个币`, d: "24h成交额≥2000万 的合约数" },
-    { k: "异动机会", v: `${m.opportunityCount} 币 / ${m.opportunityTotal} 次`, d: "15m单根涨≥3%（策略的肉）" },
-    { k: "5m爆拉", v: `${m.burstTotal} 次`, d: "5m单根涨≥2.5%（智慧版1.5倍机会）" },
-    { k: "假突破率", v: `${Number(m.fakeBreakoutRate).toFixed(1)}%`, d: "冲3%未站稳占比（高=止损会多）" },
-    { k: "最大15m涨/跌", v: `+${Number(m.max15mUp).toFixed(1)}% / ${Number(m.max15mDown).toFixed(1)}%`, d: "当日最猛的单根异动" },
-    { k: "BTC波动", v: `ATR ${Number(m.btcATRPct).toFixed(1)}%`, d: "BTC 24h 波动率（高=肉多滑点狠）" }
+    { k: "累计异动机会", v: `${agg.oppCoins} 币 / ${agg.oppTotal} 次`, d: `${n} 天合计（日均 ${(agg.oppTotal / n).toFixed(1)} 次）` },
+    { k: "累计5m爆拉", v: `${agg.burst} 次`, d: `日均 ${(agg.burst / n).toFixed(1)} 次` },
+    { k: "平均假突破率", v: `${(agg.fake / n).toFixed(1)}%`, d: "区间平均（高=止损会多）" },
+    { k: "平均机会池", v: `${Math.round(agg.pool / n)} 个币`, d: "日均成交额≥2000万 合约数" },
+    { k: "最大15m涨/跌", v: `+${agg.up.toFixed(1)}% / ${agg.down.toFixed(1)}%`, d: "区间内最猛单根异动" },
+    { k: "平均BTC波动", v: `ATR ${(agg.atr / n).toFixed(1)}%`, d: "区间平均波动率" }
   ];
 });
 /** 大白话归因 */
 const attribution = computed(() => reportMeta.value.attribution || "");
 /** 按周期过滤后的历史记录 */
 const filteredList = computed(() => {
-  const periodTypes: Record<string, string[]> = {
-    day: ["daily", "morning", "auto"],
-    week: ["weekly"],
-    month: ["monthly"],
-    year: ["yearly"]
-  };
-  const allow = periodTypes[period.value] || periodTypes.day;
+  const allow = periodTypes(period.value);
   return list.value.filter((r) => allow.includes(r.summaryType));
 });
 const auto = ref<any>({ market: {}, modes: {}, currentMode: "SIMULATION" });
@@ -233,11 +265,11 @@ onUnmounted(() => {
       </div>
 
       <!-- 归因与结论（大白话） -->
-      <div class="summary-section" v-if="attribution || (latestReport && latestReport.marketNotes)">
+      <div class="summary-section" v-if="attribution">
         <div class="section-title">
           归因与结论（{{ latestReport?.summaryDate }} · {{ typeLabel(latestReport?.summaryType) }}）
         </div>
-        <pre class="market-note">{{ attribution || latestReport.marketNotes }}</pre>
+        <div class="attribution-box">{{ attribution }}</div>
       </div>
 
       <!-- 账户对账（权益 vs 本地统计） -->
@@ -268,8 +300,8 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- 市场概况（全局） -->
-      <div class="summary-section">
+      <!-- 市场概况（全局，仅日视图展示当日大盘） -->
+      <div class="summary-section" v-if="period === 'day'">
         <div class="section-title">市场环境 · 大盘（24h，两模式共用）</div>
         <div class="summary-grid">
           <div class="summary-item">
@@ -324,8 +356,8 @@ onUnmounted(() => {
         </el-table>
       </div>
 
-      <!-- 当前模式交易总结 -->
-      <div class="summary-section">
+      <!-- 当前模式交易总结（仅日视图） -->
+      <div class="summary-section" v-if="period === 'day'">
         <div class="section-title">
           今日交易（{{ activeMode === "LIVE" ? "实盘" : "模拟盘" }}）
         </div>
@@ -370,8 +402,8 @@ onUnmounted(() => {
         </el-table>
       </div>
 
-      <!-- 改进建议（自动） -->
-      <div class="summary-section" v-if="modeSummary.suggestions.length">
+      <!-- 改进建议（自动，仅日视图） -->
+      <div class="summary-section" v-if="period === 'day' && modeSummary.suggestions.length">
         <div class="section-title">改进建议（自动生成）</div>
         <ul class="suggest-list">
           <li v-for="(s, i) in modeSummary.suggestions" :key="i">{{ s }}</li>
@@ -457,6 +489,15 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.attribution-box {
+  padding: 10px 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--quant-border, #2c2f3a);
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--quant-text, #e0e0e0);
 }
 .quant-card {
   background: var(--quant-card, #1d1f27);
