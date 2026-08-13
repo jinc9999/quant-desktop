@@ -1104,9 +1104,9 @@ const (
 // replayForcedOpen 反事实回放：一笔被拦截的机会「假如开仓」会怎样。
 // 在 5m K 线索引 j 处以该根收盘价入仓（与策略口径模拟一致），按出口规则走完：
 // 止损 → 激活(+2%)后跟踪回撤 3% → 超时 180 分钟。
-// 返回（虚拟盈亏：100U 名义 × 桶倍数，离场原因，是否已平仓）。
+// 返回（虚拟盈亏：100U 名义 × 桶倍数，离场原因，是否已平仓，盘中是否曾达 +2% 盈利高点）。
 // 数据到底仍持有 → 返回 ("HOLDING", false)，不计入挡对/误杀。
-func replayForcedOpen(k5 []kline, j int, bucket string) (float64, string, bool) {
+func replayForcedOpen(k5 []kline, j int, bucket string) (float64, string, bool, bool) {
 	mult := 1.0
 	switch bucket {
 	case "爆拉桶":
@@ -1115,18 +1115,23 @@ func replayForcedOpen(k5 []kline, j int, bucket string) (float64, string, bool) 
 		mult = 0.7
 	}
 	if j < 0 || j >= len(k5) || k5[j].close <= 0 {
-		return 0, "", false
+		return 0, "", false, false
 	}
 	entry := k5[j].close
 	extreme := entry
 	active := false
+	hitProfit := false
 	held := 1
 	for i := j + 1; i < len(k5); i++ {
 		k := k5[i]
 		held++
+		// 口径 B：盘中是否曾达 +2% 浮盈（盈利高点），与最终盈亏无关
+		if k.high >= entry*(1+actPct) {
+			hitProfit = true
+		}
 		// 止损优先（与回测保守顺序一致）
 		if k.low <= entry*(1-slPct) {
-			return (k.low - entry) / entry * nominal * mult, "STOP_LOSS", true
+			return (k.low - entry) / entry * nominal * mult, "STOP_LOSS", true, hitProfit
 		}
 		if !active && k.high >= entry*(1+actPct) {
 			active = true
@@ -1137,14 +1142,14 @@ func replayForcedOpen(k5 []kline, j int, bucket string) (float64, string, bool) 
 				extreme = k.high
 			}
 			if k.low <= extreme*(1-cbPct) {
-				return (extreme*(1-cbPct) - entry) / entry * nominal * mult, "TRAILING", true
+				return (extreme*(1-cbPct) - entry) / entry * nominal * mult, "TRAILING", true, hitProfit
 			}
 		}
 		if held >= maxBars {
-			return (k.close - entry) / entry * nominal * mult, "MAX_HOLD", true
+			return (k.close - entry) / entry * nominal * mult, "MAX_HOLD", true, hitProfit
 		}
 	}
-	return 0, "HOLDING", false
+	return 0, "HOLDING", false, hitProfit
 }
 
 // 归因结果分类（与 daily_summaries feature_json.lossClass 对应）
@@ -1328,6 +1333,20 @@ type interceptDetail struct {
 	pnl                    float64
 	exit                   string
 	closed                 bool
+}
+
+// ovAgg 机会价值漏斗单桶聚合（价值口径：次数 → 钱）
+type ovAgg struct {
+	opp, closedV, profitCnt, hitProfit int
+	virtualVal, profitVal              float64
+	actCnt, actClosed                  int
+	actVal, actProfit                  float64
+}
+
+// lossAgg 漏掉的肉：按归因类别聚合未成交机会的虚拟价值
+type lossAgg struct {
+	cnt, closedV int
+	val, miss, dodge float64
 }
 
 func analyzeStrategy(proxy, clientDB string) error {
@@ -1660,6 +1679,10 @@ func analyzeStrategy(proxy, clientDB string) error {
 	//    消除 SKYAIUSDT 19:40 机会 / 19:45 成交 之类的时间错位假损耗）
 	simMatched := make([]bool, len(simOpens))
 	actUsed := make([]bool, len(actuals))
+	simActIdx := make([]int, len(simOpens)) // 每条模拟机会匹配到的实际持仓下标（-1=未匹配）
+	for i := range simActIdx {
+		simActIdx[i] = -1
+	}
 	for i, so := range simOpens {
 		best, bestD := -1, int64(45*60*1000)
 		for j, a := range actuals {
@@ -1678,6 +1701,7 @@ func analyzeStrategy(proxy, clientDB string) error {
 		if best >= 0 {
 			actUsed[best] = true
 			simMatched[i] = true
+			simActIdx[i] = best
 		}
 	}
 	// 2) 未成交的逐条归因（拦截=该挡 / 执行损耗=真因 / 未运行 / 未归因）
@@ -1871,7 +1895,7 @@ func analyzeStrategy(proxy, clientDB string) error {
 			ihSkipped++
 			continue
 		}
-		pnl, exit, closed := replayForcedOpen(k5, idx, it.bucket)
+		pnl, exit, closed, _ := replayForcedOpen(k5, idx, it.bucket)
 		ihDetails = append(ihDetails, interceptDetail{reason: it.reason, symbol: it.symbol, bucket: it.bucket, ts: it.ts, pnl: pnl, exit: exit, closed: closed})
 		st, ok2 := ih[it.reason]
 		if !ok2 {
@@ -1934,6 +1958,150 @@ func analyzeStrategy(proxy, clientDB string) error {
 		if err := writeInterceptCSV(now.Format("2006-01-02"), ihDetails, ihOrder, ih); err != nil {
 			log.Printf("⚠ 写拦截健康度 CSV 失败: %v", err)
 		}
+	}
+
+	// ==================== 机会价值漏斗（价值口径：次数 → 钱） ====================
+	// 机会价值 = 每笔可开机会按 D 出口规则回放的虚拟盈亏（理论天花板）；
+	// 盈利机会 = 虚拟盈亏>0；实际捕获 = 匹配到的实际成交已平仓盈亏；
+	// 捕获率 = 实际盈亏 / 机会价值；盈利捕获率 = 实际正盈亏 / 盈利机会虚拟价值。
+	// 该挡的拦截机会若虚拟为负，实际盈亏可超过机会价值（规则加分）。
+	ov := map[string]*ovAgg{}
+	for _, name := range []string{"爆拉桶", "中间桶", "温和桶"} {
+		ov[name] = &ovAgg{}
+	}
+	totalOv := &ovAgg{}
+	ovSkipped := 0
+	ovFindIdx := func(k5 []kline, ts int64) int {
+		for z := 0; z < len(k5); z++ {
+			if k5[z].openTime == ts {
+				return z
+			}
+		}
+		return -1
+	}
+	for i, so := range simOpens {
+		k5, ok := k5Cache[so.symbol]
+		if !ok {
+			ovSkipped++
+			continue
+		}
+		idx := ovFindIdx(k5, so.ts)
+		if idx < 0 {
+			ovSkipped++
+			continue
+		}
+		pnl, _, closed, hit := replayForcedOpen(k5, idx, so.bucket)
+		a := ov[so.bucket]
+		a.opp++
+		totalOv.opp++
+		if hit {
+			a.hitProfit++
+			totalOv.hitProfit++
+		}
+		if closed {
+			a.closedV++
+			a.virtualVal += pnl
+			totalOv.closedV++
+			totalOv.virtualVal += pnl
+			if pnl > 0 {
+				a.profitCnt++
+				a.profitVal += pnl
+				totalOv.profitCnt++
+				totalOv.profitVal += pnl
+			}
+		}
+		if simActIdx[i] >= 0 {
+			act := actuals[simActIdx[i]]
+			a.actCnt++
+			totalOv.actCnt++
+			if act.Status == "CLOSED" {
+				a.actClosed++
+				a.actVal += act.Pnl
+				totalOv.actClosed++
+				totalOv.actVal += act.Pnl
+				if act.Pnl > 0 {
+					a.actProfit += act.Pnl
+					totalOv.actProfit += act.Pnl
+				}
+			}
+		}
+	}
+	fmt.Println("\n机会价值漏斗（价值口径：机会价值=每笔可开机会按 D 出口规则回放的虚拟盈亏）:")
+	fmt.Println("盈利机会=虚拟盈亏>0；曾盈利=盘中曾达 +2% 浮盈；捕获率=实际盈亏/机会价值；盈利捕获率=实际正盈亏/盈利机会价值")
+	var ovRows [][]string
+	ovAppend := func(name string, a *ovAgg) {
+		capRate := "--"
+		if a.virtualVal > 0 {
+			capRate = fmt.Sprintf("%.1f%%", a.actVal/a.virtualVal*100)
+		}
+		profitCap := "--"
+		if a.profitVal > 0 {
+			profitCap = fmt.Sprintf("%.1f%%", a.actProfit/a.profitVal*100)
+		}
+		ovRows = append(ovRows, []string{
+			name, fmt.Sprintf("%d", a.opp), fmt.Sprintf("%d", a.closedV),
+			fmt.Sprintf("%+.2f", a.virtualVal), fmt.Sprintf("%d", a.profitCnt),
+			fmt.Sprintf("%+.2f", a.profitVal), fmt.Sprintf("%d", a.hitProfit),
+			fmt.Sprintf("%d", a.actCnt), fmt.Sprintf("%d", a.actClosed),
+			fmt.Sprintf("%+.2f", a.actVal), capRate, profitCap,
+		})
+	}
+	for _, name := range []string{"爆拉桶", "中间桶", "温和桶"} {
+		ovAppend(name, ov[name])
+	}
+	ovAppend("合计", totalOv)
+	fmt.Println(fmtTable([]string{"桶", "机会数", "虚拟已平仓", "机会价值", "盈利机会", "盈利价值", "曾盈利机会", "实际成交", "实际已平仓", "实际盈亏", "捕获率", "盈利捕获率"}, ovRows))
+	if ovSkipped > 0 {
+		fmt.Printf("（%d 条机会因 K 线数据缺失跳过）\n", ovSkipped)
+	}
+
+	// 漏掉的肉（未成交机会按归因类别拆账）
+	lossByCls := map[string]*lossAgg{}
+	for _, c := range []string{clsActivation, clsOrderFail, clsBalance, clsDataGap, clsSignalRace, clsOffline, clsUnknown, clsRule} {
+		lossByCls[c] = &lossAgg{}
+	}
+	for i, so := range simOpens {
+		cls := details[i].cls
+		a, ok := lossByCls[cls]
+		if !ok || simActIdx[i] >= 0 {
+			continue
+		}
+		k5, ok2 := k5Cache[so.symbol]
+		if !ok2 {
+			continue
+		}
+		idx := ovFindIdx(k5, so.ts)
+		if idx < 0 {
+			continue
+		}
+		pnl, _, closed, _ := replayForcedOpen(k5, idx, so.bucket)
+		a.cnt++
+		if !closed {
+			continue
+		}
+		a.closedV++
+		a.val += pnl
+		if pnl > 0 {
+			a.miss += pnl
+		} else {
+			a.dodge += pnl
+		}
+	}
+	fmt.Println("\n漏掉的肉（未成交机会按归因拆账：漏掉盈利=虚拟为正但没吃到；躲过亏损=虚拟为负但没亏）:")
+	var lr [][]string
+	for _, c := range []string{clsActivation, clsOrderFail, clsBalance, clsDataGap, clsSignalRace, clsOffline, clsUnknown, clsRule} {
+		a := lossByCls[c]
+		if a.cnt == 0 {
+			continue
+		}
+		lr = append(lr, []string{c, fmt.Sprintf("%d", a.cnt), fmt.Sprintf("%d", a.closedV),
+			fmt.Sprintf("%+.2f", a.val), fmt.Sprintf("%+.2f", a.miss), fmt.Sprintf("%+.2f", a.dodge)})
+	}
+	if len(lr) > 0 {
+		fmt.Println(fmtTable([]string{"类别", "机会数", "已平仓", "虚拟盈亏", "漏掉盈利", "躲过亏损"}, lr))
+	}
+	if err := writeOpportunityValueCSV(now.Format("2006-01-02"), simOpens, details, simActIdx, actuals, k5Cache, ov, totalOv, lossByCls); err != nil {
+		log.Printf("⚠ 写机会价值 CSV 失败: %v", err)
 	}
 
 	// 明细样例（完整明细见 CSV）
@@ -2037,7 +2205,41 @@ func analyzeStrategy(proxy, clientDB string) error {
 				"avg":          round2(safeDiv(st.pnl, float64(st.closed))),
 			}
 		}
-		if err := writeStrategySummary(clientDB, sim, bucketList, rejectList, detailList, ihJSON); err != nil {
+		// 机会价值漏斗（价值口径）写入每日总结，供前端「机会价值」板块展示
+		ovJSON := map[string]interface{}{}
+		for _, name := range []string{"爆拉桶", "中间桶", "温和桶", "合计"} {
+			a := totalOv
+			if name != "合计" {
+				a = ov[name]
+			}
+			capRate := 0.0
+			if a.virtualVal > 0 {
+				capRate = a.actVal / a.virtualVal * 100
+			}
+			profitCap := 0.0
+			if a.profitVal > 0 {
+				profitCap = a.actProfit / a.profitVal * 100
+			}
+			ovJSON[name] = map[string]interface{}{
+				"opp": a.opp, "closedV": a.closedV, "virtualVal": round2(a.virtualVal),
+				"profitCnt": a.profitCnt, "profitVal": round2(a.profitVal), "hitProfit": a.hitProfit,
+				"actCnt": a.actCnt, "actClosed": a.actClosed, "actVal": round2(a.actVal),
+				"capRate": round2(capRate), "profitCap": round2(profitCap),
+			}
+		}
+		lossJSON := map[string]interface{}{}
+		for _, c := range []string{clsActivation, clsOrderFail, clsBalance, clsDataGap, clsSignalRace, clsOffline, clsUnknown, clsRule} {
+			a := lossByCls[c]
+			if a.cnt == 0 {
+				continue
+			}
+			lossJSON[c] = map[string]interface{}{
+				"cnt": a.cnt, "closedV": a.closedV, "val": round2(a.val),
+				"miss": round2(a.miss), "dodge": round2(a.dodge),
+			}
+		}
+		ovMeta := map[string]interface{}{"buckets": ovJSON, "loss": lossJSON}
+		if err := writeStrategySummary(clientDB, sim, bucketList, rejectList, detailList, ihJSON, ovMeta); err != nil {
 			log.Printf("⚠ 写入策略总结失败: %v", err)
 		} else {
 			log.Printf("✅ 已写入每日策略总结（%s）", clientDB)
@@ -2107,6 +2309,91 @@ func writeInterceptCSV(date string, details []interceptDetail, order []string, i
 	return w.Error()
 }
 
+// writeOpportunityValueCSV 输出机会价值漏斗逐单明细 + 汇总（每小时自动覆盖更新）
+func writeOpportunityValueCSV(date string, simOpens []simOpenRec, details []simDetail, simActIdx []int,
+	actuals []actualTrade, k5Cache map[string][]kline, ov map[string]*ovAgg, totalOv *ovAgg, lossByCls map[string]*lossAgg) error {
+	path := fmt.Sprintf(`D:\0001_ba-A - 03\market_data\opportunity_value_%s.csv`, date)
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := csv.NewWriter(f)
+	defer w.Flush()
+	w.Write([]string{"类型", "币种", "时间", "桶", "首仓/追单", "归因", "虚拟盈亏", "离场/持有", "曾盈利+2%", "是否成交", "实际盈亏"})
+	for i, so := range simOpens {
+		k5, ok := k5Cache[so.symbol]
+		if !ok {
+			continue
+		}
+		idx := -1
+		for z := 0; z < len(k5); z++ {
+			if k5[z].openTime == so.ts {
+				idx = z
+				break
+			}
+		}
+		if idx < 0 {
+			continue
+		}
+		pnl, exit, closed, hit := replayForcedOpen(k5, idx, so.bucket)
+		tag := "首仓"
+		if so.addOn {
+			tag = "追单"
+		}
+		matched := "否"
+		actPnl := ""
+		if simActIdx[i] >= 0 {
+			matched = "是"
+			a := actuals[simActIdx[i]]
+			if a.Status == "CLOSED" {
+				actPnl = fmt.Sprintf("%.2f", a.Pnl)
+			} else {
+				actPnl = "持有中"
+			}
+		}
+		closedStr := "持有中"
+		if closed {
+			closedStr = exit
+		}
+		hitStr := "否"
+		if hit {
+			hitStr = "是"
+		}
+		w.Write([]string{"明细", so.symbol, time.UnixMilli(so.ts).In(beijing).Format("15:04"),
+			so.bucket, tag, details[i].cls, fmt.Sprintf("%.2f", pnl), closedStr, hitStr, matched, actPnl})
+	}
+	w.Write([]string{"汇总-机会价值", "桶", "机会数", "虚拟已平仓", "机会价值", "盈利机会", "盈利价值", "曾盈利", "实际成交", "实际已平仓", "实际盈亏", "捕获率", "盈利捕获率"})
+	ovCSV := func(name string, a *ovAgg) {
+		capRate := 0.0
+		if a.virtualVal > 0 {
+			capRate = a.actVal / a.virtualVal * 100
+		}
+		profitCap := 0.0
+		if a.profitVal > 0 {
+			profitCap = a.actProfit / a.profitVal * 100
+		}
+		w.Write([]string{"汇总-机会价值", name, fmt.Sprintf("%d", a.opp), fmt.Sprintf("%d", a.closedV),
+			fmt.Sprintf("%.2f", a.virtualVal), fmt.Sprintf("%d", a.profitCnt), fmt.Sprintf("%.2f", a.profitVal),
+			fmt.Sprintf("%d", a.hitProfit), fmt.Sprintf("%d", a.actCnt), fmt.Sprintf("%d", a.actClosed),
+			fmt.Sprintf("%.2f", a.actVal), fmt.Sprintf("%.1f%%", capRate), fmt.Sprintf("%.1f%%", profitCap)})
+	}
+	for _, name := range []string{"爆拉桶", "中间桶", "温和桶"} {
+		ovCSV(name, ov[name])
+	}
+	ovCSV("合计", totalOv)
+	w.Write([]string{"汇总-漏掉的肉", "类别", "机会数", "已平仓", "虚拟盈亏", "漏掉盈利", "躲过亏损"})
+	for _, c := range []string{clsActivation, clsOrderFail, clsBalance, clsDataGap, clsSignalRace, clsOffline, clsUnknown, clsRule} {
+		a := lossByCls[c]
+		if a.cnt == 0 {
+			continue
+		}
+		w.Write([]string{"汇总-漏掉的肉", c, fmt.Sprintf("%d", a.cnt), fmt.Sprintf("%d", a.closedV),
+			fmt.Sprintf("%.2f", a.val), fmt.Sprintf("%.2f", a.miss), fmt.Sprintf("%.2f", a.dodge)})
+	}
+	return w.Error()
+}
+
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
 
 func safeDiv(a, b float64) float64 {
@@ -2116,8 +2403,8 @@ func safeDiv(a, b float64) float64 {
 	return a / b
 }
 
-// writeStrategySummary 将策略口径模拟、漏斗归因、逐单明细与拦截健康度写入客户端库 daily_summaries（type=strategy）
-func writeStrategySummary(clientDB string, sim map[string]interface{}, buckets []map[string]interface{}, rejects, details []map[string]interface{}, interceptHealth map[string]interface{}) error {
+// writeStrategySummary 将策略口径模拟、漏斗归因、逐单明细、拦截健康度与机会价值写入客户端库 daily_summaries（type=strategy）
+func writeStrategySummary(clientDB string, sim map[string]interface{}, buckets []map[string]interface{}, rejects, details []map[string]interface{}, interceptHealth, opportunityValue map[string]interface{}) error {
 	db, err := sql.Open("sqlite3", "file:"+clientDB+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return err
@@ -2125,7 +2412,7 @@ func writeStrategySummary(clientDB string, sim map[string]interface{}, buckets [
 	defer db.Close()
 	meta, _ := json.Marshal(map[string]interface{}{
 		"sim": sim, "buckets": buckets, "rejects": rejects, "details": details,
-		"interceptHealth": interceptHealth,
+		"interceptHealth": interceptHealth, "opportunityValue": opportunityValue,
 	})
 	now := time.Now().In(beijing)
 	date := now.Format("2006-01-02")

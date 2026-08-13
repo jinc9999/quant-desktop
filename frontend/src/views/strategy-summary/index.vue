@@ -72,6 +72,20 @@ const interceptHealth = computed<any[]>(() => {
     }))
     .sort((a, b) => b.count - a.count);
 });
+/** 机会价值漏斗（价值口径） */
+const oppValue = computed<any>(() => latest.value?.meta.opportunityValue || null);
+const oppValueRows = computed<any[]>(() => {
+  const b = oppValue.value?.buckets;
+  if (!b) return [];
+  return ["爆拉桶", "中间桶", "温和桶", "合计"]
+    .filter((k) => b[k])
+    .map((k) => ({ bucket: k, ...b[k] }));
+});
+const oppLossRows = computed<any[]>(() => {
+  const l = oppValue.value?.loss;
+  if (!l) return [];
+  return Object.entries(l).map(([k, v]: any) => ({ cls: k, ...v }));
+});
 
 /** 策略模拟指标行 */
 const simRows = computed<any[]>(() => {
@@ -280,6 +294,70 @@ onUnmounted(() => {
           </el-table-column>
         </el-table>
         <div v-else class="empty-state">拦截健康度每小时自动生成，数据积累后可见</div>
+      </div>
+
+      <!-- 板块六：机会价值漏斗（价值口径） -->
+      <div class="summary-section">
+        <div class="section-title">机会价值漏斗（价值口径：次数 → 钱）</div>
+        <div class="rule-note">
+          机会价值 = 每笔可开机会按 D 出口规则回放的虚拟盈亏（理论天花板）；盈利机会 = 虚拟盈亏 &gt; 0；
+          捕获率 = 实际盈亏 ÷ 机会价值；盈利捕获率 = 实际正盈亏 ÷ 盈利机会价值。
+          该挡的拦截机会若虚拟为负，实际盈亏可超过机会价值（规则加分）。
+        </div>
+        <el-table v-if="oppValueRows.length" :data="oppValueRows" size="small" stripe>
+          <el-table-column prop="bucket" label="桶" min-width="70" />
+          <el-table-column prop="opp" label="机会数" width="70" align="right" />
+          <el-table-column prop="closedV" label="虚拟已平仓" width="90" align="right" />
+          <el-table-column label="机会价值(U)" width="100" align="right">
+            <template #default="{ row }">
+              <span :class="chgClass(row.virtualVal)">{{ fmtNum(row.virtualVal, true) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="profitCnt" label="盈利机会" width="80" align="right" />
+          <el-table-column label="盈利价值(U)" width="100" align="right">
+            <template #default="{ row }">
+              <span :class="chgClass(row.profitVal)">{{ fmtNum(row.profitVal, true) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="hitProfit" label="曾盈利" width="70" align="right" />
+          <el-table-column prop="actCnt" label="实际成交" width="80" align="right" />
+          <el-table-column label="实际盈亏(U)" width="100" align="right">
+            <template #default="{ row }">
+              <span :class="chgClass(row.actVal)">{{ fmtNum(row.actVal, true) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="捕获率" width="80" align="right">
+            <template #default="{ row }">
+              {{ row.virtualVal <= 0 ? "--" : Number(row.capRate).toFixed(1) + "%" }}
+            </template>
+          </el-table-column>
+          <el-table-column label="盈利捕获率" width="95" align="right">
+            <template #default="{ row }">
+              {{ row.profitVal <= 0 ? "--" : Number(row.profitCap).toFixed(1) + "%" }}
+            </template>
+          </el-table-column>
+        </el-table>
+        <div v-else class="empty-state">机会价值每小时自动生成，数据积累后可见</div>
+        <div class="sub-title" v-if="oppLossRows.length">漏掉的肉（未成交机会按归因拆账）</div>
+        <el-table v-if="oppLossRows.length" :data="oppLossRows" size="small" stripe>
+          <el-table-column prop="cls" label="类别" min-width="120" />
+          <el-table-column prop="cnt" label="机会数" width="70" align="right" />
+          <el-table-column label="虚拟盈亏(U)" width="110" align="right">
+            <template #default="{ row }">
+              <span :class="chgClass(row.val)">{{ fmtNum(row.val, true) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="漏掉盈利(U)" width="110" align="right">
+            <template #default="{ row }">
+              <span class="text-green">{{ fmtNum(row.miss, true) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="躲过亏损(U)" width="110" align="right">
+            <template #default="{ row }">
+              <span class="text-red">{{ fmtNum(row.dodge, true) }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
       </div>
 
       <div class="rule-note footnote">
