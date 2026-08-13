@@ -971,6 +971,7 @@ type actualTrade struct {
 	Pnl     float64
 	Opened  int64
 	Status  string
+	Closed  int64
 }
 
 // loadActualTrades 读取客户端库当天实际开仓记录（含未平仓），用于"机会 vs 实际"对比。
@@ -980,7 +981,7 @@ func loadActualTrades(clientDB string, dayStart int64) ([]actualTrade, error) {
 		return nil, err
 	}
 	defer db.Close()
-	rows, err := db.Query(`SELECT symbol, ifnull(realized_pnl,0), opened_at, status
+	rows, err := db.Query(`SELECT symbol, ifnull(realized_pnl,0), opened_at, status, ifnull(closed_at,0)
 		FROM positions WHERE opened_at >= ?`, dayStart)
 	if err != nil {
 		return nil, err
@@ -990,10 +991,12 @@ func loadActualTrades(clientDB string, dayStart int64) ([]actualTrade, error) {
 	for rows.Next() {
 		var t actualTrade
 		var st string
-		if err := rows.Scan(&t.Symbol, &t.Pnl, &t.Opened, &st); err != nil {
+		var closed int64
+		if err := rows.Scan(&t.Symbol, &t.Pnl, &t.Opened, &st, &closed); err != nil {
 			continue
 		}
 		t.Status = st
+		t.Closed = closed
 		out = append(out, t)
 	}
 	return out, nil
@@ -1104,6 +1107,7 @@ func analyzeStrategy(proxy, clientDB string) error {
 	actualClosedByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
 	simFirstByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
 	simAddonByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
+	addonLimitByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
 	actFirstByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
 	actAddonByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
 	k5Cache := map[string][]kline{}
@@ -1247,6 +1251,8 @@ func analyzeStrategy(proxy, clientDB string) error {
 						if !anyActive {
 							rejects = append(rejects, rejectRec{symbol: t.Symbol, timeStr: time.UnixMilli(k.openTime).In(beijing).Format("15:04"), bucket: bkt, reason: "no_active", seq: seq})
 						} else {
+							// 已达追单上限：仍算一次追单机会（想追但满 3 仓）
+							addonLimitByBucket[bkt]++
 							rejects = append(rejects, rejectRec{symbol: t.Symbol, timeStr: time.UnixMilli(k.openTime).In(beijing).Format("15:04"), bucket: bkt, reason: "addon_limit", seq: seq})
 						}
 					}
@@ -1265,15 +1271,26 @@ func analyzeStrategy(proxy, clientDB string) error {
 			simFirstByBucket[so.bucket]++
 		}
 	}
+	for k, v := range addonLimitByBucket {
+		simAddonByBucket[k] += v
+	}
 
 	// 实际交易回放桶（复用已拉 K 线，缺则补拉）；按币按时间序，第 1 单=首仓，其余=追单
-	sort.Slice(actuals, func(i, j int) bool {
-		if actuals[i].Symbol != actuals[j].Symbol {
-			return actuals[i].Symbol < actuals[j].Symbol
+	// 追单判定：开仓时同币是否有另一笔未平仓（时间重叠）→ 追单；否则为（首仓或循环后的新首仓）
+	actualBySymbol := map[string][]actualTrade{}
+	for _, a := range actuals {
+		actualBySymbol[a.Symbol] = append(actualBySymbol[a.Symbol], a)
+	}
+	isAddOnActual := func(a actualTrade) bool {
+		for _, b := range actualBySymbol[a.Symbol] {
+			if b.Opened < a.Opened {
+				if b.Status == "OPEN" || (b.Closed > a.Opened) {
+					return true
+				}
+			}
 		}
-		return actuals[i].Opened < actuals[j].Opened
-	})
-	actSeq := map[string]int{}
+		return false
+	}
 	for _, a := range actuals {
 		k5, ok := k5Cache[a.Symbol]
 		if !ok {
@@ -1300,11 +1317,10 @@ func analyzeStrategy(proxy, clientDB string) error {
 		}
 		bkt := bucketOf(max5mEntity(k5, idx))
 		actualByBucket[bkt]++
-		actSeq[a.Symbol]++
-		if actSeq[a.Symbol] == 1 {
-			actFirstByBucket[bkt]++
-		} else {
+		if isAddOnActual(a) {
 			actAddonByBucket[bkt]++
+		} else {
+			actFirstByBucket[bkt]++
 		}
 		if a.Status == "CLOSED" {
 			actualClosedByBucket[bkt]++
