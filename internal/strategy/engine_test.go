@@ -1866,7 +1866,19 @@ func TestMonitor_ActiveStopOrders_FallbackTimeout(t *testing.T) {
 		t.Fatalf("超时前不应平仓: status=%v err=%v", after.Status, err)
 	}
 
-	time.Sleep(80 * time.Millisecond)
+	// 1×delay：本地兜底需标记价确认（防针核心）。DRY_RUN 标记价固定 100，未击穿止损 45，
+	// 视为疑似插针，本地不平仓（等待交易所条件单 / 强制兜底阀）。
+	time.Sleep(80 * time.Millisecond) // 80ms > 60ms 且 < 2×60ms
+	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 44.0})
+	mid, err := db.GetPositionByID(pos.ID)
+	if err != nil {
+		t.Fatalf("查询持仓失败: %v", err)
+	}
+	if mid.Status != "OPEN" {
+		t.Fatalf("标记价未确认时本地不应兜底平仓（疑似插针），Status = %q, 期望 OPEN", mid.Status)
+	}
+	// 2×delay：强制兜底阀（防标记价长期滞后导致保护悬空）→ 平仓
+	time.Sleep(70 * time.Millisecond) // 累计 150ms > 2×60ms
 	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 44.0})
 	after2, err := db.GetPositionByID(pos.ID)
 	if err != nil {
@@ -1953,7 +1965,8 @@ func TestMonitor_ActiveStopOrders_FallbackBufferIgnoresGrind(t *testing.T) {
 	if _, ok := e.stopBreachSince[pos.ID]; !ok {
 		t.Fatal("真跌破缓冲带后应启动兜底计时")
 	}
-	time.Sleep(80 * time.Millisecond)
+	// 2×delay（50ms→100ms）：真跌破后强制兜底阀平仓（1×delay 时标记价未确认会被插针守卫拦下）
+	time.Sleep(120 * time.Millisecond)
 	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 44.8})
 	after2, err := db.GetPositionByID(pos.ID)
 	if err != nil {
@@ -1978,8 +1991,19 @@ func TestMonitor_ActiveStopOrders_FallbackTrailing(t *testing.T) {
 		t.Fatalf("更新风控状态失败: %v", err)
 	}
 
+	// 1×delay：标记价未确认（DRY_RUN 固定 100 > 跟踪止损 53.35）→ 插针守卫拦下不平仓
 	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 53.0})
 	time.Sleep(80 * time.Millisecond)
+	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 53.0})
+	mid, err := db.GetPositionByID(pos.ID)
+	if err != nil {
+		t.Fatalf("查询持仓失败: %v", err)
+	}
+	if mid.Status != "OPEN" {
+		t.Fatalf("标记价未确认时本地不应兜底平仓（疑似插针），Status = %q, 期望 OPEN", mid.Status)
+	}
+	// 2×delay：强制兜底阀 → 平仓，reason=TRAILING_STOP
+	time.Sleep(70 * time.Millisecond)
 	e.monitorPositions(ctx, map[string]float64{"BTCUSDT": 53.0})
 	after, err := db.GetPositionByID(pos.ID)
 	if err != nil {

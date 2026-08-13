@@ -130,6 +130,9 @@ type Engine struct {
 	// closeExitBar: positionID -> 最近一次按收盘价判定出场所用的 5m K 线开盘时间（去重）
 	closeExitBar map[int64]int64
 
+	// wickGuards: positionID -> 插针守卫（多源 + 持续确认，本地兜底平仓前验证）
+	wickGuards map[int64]*WickGuard
+
 	// attemptLogged: symbol|stage|reason|5m周期 -> 已写入开仓尝试记录（防信号持续期内刷屏）
 	attemptLogged map[string]bool
 }
@@ -183,6 +186,7 @@ func NewEngine(cfg binance.StrategyConfig, client *binance.Client, ws *binance.W
 		close5mFetched:     make(map[string]int64),
 		exit5mCache:        make(map[string]kline5mExit),
 		closeExitBar:       make(map[int64]int64),
+		wickGuards:         make(map[int64]*WickGuard),
 		attemptLogged:      make(map[string]bool),
 		newListLogged:      make(map[string]bool),
 		signalDebug:        os.Getenv("QUANT_SIGNAL_DEBUG") == "1",
@@ -2281,8 +2285,24 @@ func (e *Engine) checkStopFallback(ctx context.Context, pos *storage.Position, p
 	}
 	if !breached {
 		delete(e.stopBreachSince, pos.ID)
+		delete(e.wickGuards, pos.ID)
 		return
 	}
+
+	// 插针守卫（多源 + 持续确认，对应 Python 伪代码 verify_breakdown）：
+	// 每次击穿 tick 刷新标记价并记录样本；标记价拉取失败时用最新价兜底（不丢保护）。
+	// 窗口按引擎 tick 设置：3 个 tick = 45s，至少 2 个样本（15s/tick 下 3s/3 个样本永远凑不够）。
+	nowMs := time.Now().UnixMilli()
+	mark := price
+	if m, merr := e.client.GetMarkPrice(ctx, pos.Symbol); merr == nil && m > 0 {
+		mark = m
+	}
+	g, ok := e.wickGuards[pos.ID]
+	if !ok {
+		g = NewWickGuard(45*1000, 2)
+		e.wickGuards[pos.ID] = g
+	}
+	g.Push(price, mark, nowMs)
 
 	first, ok := e.stopBreachSince[pos.ID]
 	if !ok {
@@ -2302,7 +2322,33 @@ func (e *Engine) checkStopFallback(ctx context.Context, pos *storage.Position, p
 		return
 	}
 
+	// 多源确认：本地兜底前要求标记价也击穿（0.5% 容差，标记价平滑滞后）。
+	// 标记价未确认 = 疑似插针，本地不抢跑（交易所条件单本身按标记价触发，真崩它会成交）。
+	// 超过 2 倍等待时间仍未确认则强制兜底（防标记价长期滞后导致保护悬空）。
+	elapsed := time.Since(first)
+	if elapsed < 2*e.stopFallbackDelay {
+		confirmed := false
+		if pos.Side == "SHORT" {
+			confirmed = mark >= stopPrice*(1-0.005) && g.ConfirmRise(stopPrice, nowMs)
+		} else {
+			confirmed = mark <= stopPrice*(1+0.005) && g.ConfirmBreak(stopPrice, nowMs)
+		}
+		if !confirmed {
+			e.db.InsertLog(&storage.TradeLog{
+				Timestamp: time.Now().UnixMilli(),
+				Level:     "warn",
+				Module:    "strategy",
+				Message:   fmt.Sprintf("插针守卫：%s 持仓#%d 最新价击穿止损位 %.6f 但标记价 %.6f 未确认，疑似插针，本地不兜底（交易所条件单继续负责）", pos.Symbol, pos.ID, stopPrice, mark),
+				Symbol:    pos.Symbol,
+				Price:     price,
+				Amount:    pos.Amount,
+			})
+			return
+		}
+	}
+
 	delete(e.stopBreachSince, pos.ID)
+	delete(e.wickGuards, pos.ID)
 	reason := "STOP_LOSS"
 	if pos.TrailingActive {
 		reason = "TRAILING_STOP"
