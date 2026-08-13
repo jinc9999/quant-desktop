@@ -2042,6 +2042,41 @@ func TestMonitor_CancelOrdersRestoresLocalClose(t *testing.T) {
 	}
 }
 
+// TestCheckCloseBarExit_SharedDedupFix 回归：路1 收盘判定出场不能因候选通道共享的
+// close5mFetched 去重而跳过（修复前：候选通道先拉取 5m 状态 → 出场通道永远不推进，
+// 3% 止损/跟踪收盘判定失效）。修复后应复用 klineOpenCache 的新状态正常平仓。
+func TestCheckCloseBarExit_SharedDedupFix(t *testing.T) {
+	e, db := newTestEngine(t)
+	ctx := context.Background()
+	e.cfg.ExitOnClose = true
+	e.cfg.HardStopPct = 0.08
+
+	pos := openPositionWithOrders(t, e, db, "BTCUSDT", 50.0) // 测试默认 sl=0.10 → 止损 45
+	now := time.Now().UnixMilli()
+	barStart := now - now%300000 - 300000
+
+	// 模拟候选通道已拉取：共享去重被占用 + klineOpenCache 已有最新已收盘 5m 状态
+	e.close5mFetched["BTCUSDT"] = barStart
+	e.klineOpenCache["BTCUSDT"] = klineOpenEntry{
+		open: 50, periodStart: now - now%900000,
+		close5m: 44, high5m: 51, close5mOpenTime: barStart,
+	}
+
+	// 路1 收盘判定：最新已收盘 5m 收盘价 44 <= 止损 45 → 应平仓
+	e.checkCloseBarExit(ctx, &pos)
+
+	after, err := db.GetPositionByID(pos.ID)
+	if err != nil {
+		t.Fatalf("查询持仓失败: %v", err)
+	}
+	if after.Status != "CLOSED" {
+		t.Fatalf("候选通道先拉取后，路1收盘判定应仍能平仓（共享去重 bug 回归），Status = %q, 期望 CLOSED", after.Status)
+	}
+	if after.CloseReason == nil || *after.CloseReason != "STOP_LOSS" {
+		t.Errorf("CloseReason = %v, 期望 STOP_LOSS", after.CloseReason)
+	}
+}
+
 // ========== 十五、K 线信号模式（buildKlineOpenMap）测试 ==========
 
 // TestBuildKlineOpenMap 验证 K 线开盘价构建：

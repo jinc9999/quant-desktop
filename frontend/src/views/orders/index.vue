@@ -47,6 +47,8 @@ interface OrderEventRow {
 // 委托数据
 const orders = ref<OrderRow[]>([]);
 const loading = ref(false);
+/** 当前运行模式（模拟盘/实盘，用于明确数据性质） */
+const modeLabel = ref("");
 // 自动刷新开关
 const autoRefresh = ref(true);
 // 自动刷新定时器
@@ -270,6 +272,9 @@ function toggleAutoRefresh(val: boolean | string | number) {
 
 onMounted(() => {
   refreshOrders();
+  callService(() => QuantService.GetMode(), { silent: true }).then((r) => {
+    if (r) modeLabel.value = r;
+  });
   // 每 3 秒自动刷新一次委托
   refreshTimer = setInterval(() => refreshOrders(false), 3000);
 });
@@ -287,6 +292,7 @@ onUnmounted(() => {
   <div class="orders-panel">
     <div class="panel-header">
       <h2>委托状态</h2>
+      <el-tag size="small" :type="modeLabel === 'LIVE' ? 'danger' : 'warning'">{{ modeLabel === 'LIVE' ? '实盘' : '模拟盘' }}</el-tag>
       <div class="header-actions">
         <el-switch
           v-model="autoRefresh"

@@ -50,6 +50,8 @@ const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "�
 /** 持仓数据（shallowRef：整体替换数组，避免大列表深度响应开销） */
 const positions = shallowRef<PositionDetail[]>([]);
 const loading = ref(false);
+/** 当前运行模式（模拟盘/实盘，用于明确数据性质） */
+const modeLabel = ref("");
 /** 自动刷新开关 */
 const autoRefresh = ref(true);
 /** 自动刷新定时器 */
@@ -372,6 +374,9 @@ onMounted(() => {
   calcTableHeight();
   window.addEventListener("resize", calcTableHeight);
   refreshPositions();
+  callService(() => QuantService.GetMode(), { silent: true }).then((r) => {
+    if (r) modeLabel.value = r;
+  });
   // 每 3 秒自动刷新一次持仓
   refreshTimer = setInterval(() => refreshPositions(false), 3000);
 });
@@ -390,6 +395,7 @@ onUnmounted(() => {
   <div class="positions-panel">
     <div class="panel-header">
       <h2>实时持仓</h2>
+      <el-tag size="small" :type="modeLabel === 'LIVE' ? 'danger' : 'warning'">{{ modeLabel === 'LIVE' ? '实盘' : '模拟盘' }}</el-tag>
       <div class="header-actions">
         <el-switch
           v-model="autoRefresh"

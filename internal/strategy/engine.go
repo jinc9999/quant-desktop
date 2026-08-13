@@ -2188,18 +2188,22 @@ func (e *Engine) monitorPositions(ctx context.Context, priceMap map[string]float
 func (e *Engine) checkCloseBarExit(ctx context.Context, pos *storage.Position) {
 	now := time.Now().UnixMilli()
 	barStart := now - now%300000 - 300000 // 最新已收盘 5m K 线开盘时间
-	if e.close5mFetched[pos.Symbol] < barStart {
+	bs, ok := e.exit5mCache[pos.Symbol]
+	// 优先复用候选通道已拉取并写入 klineOpenCache 的最新已收盘 5m 状态。
+	// 注意：close5mFetched 是候选通道的共享去重，不能作为出场通道的拉取门禁——
+	// 候选通道先拉取后，出场通道若据此跳过，exit5mCache 将永远不推进（收盘判定出场失效）。
+	if entry, has := e.klineOpenCache[pos.Symbol]; has && entry.close5mOpenTime > bs.openTime {
+		bs = kline5mExit{openTime: entry.close5mOpenTime, close: entry.close5m, high: entry.high5m}
+		e.exit5mCache[pos.Symbol] = bs
+	} else if !ok || bs.openTime < barStart {
 		st, err := e.client.GetKline5mState(ctx, pos.Symbol, now)
 		if err != nil {
 			return // 拉取失败本 tick 跳过，下个 tick 重试（硬止损条件单仍在交易所兜底）
 		}
-		e.close5mFetched[pos.Symbol] = st.Close5mOpenTime
-		if st.Close5mOpenTime > e.exit5mCache[pos.Symbol].openTime {
-			e.exit5mCache[pos.Symbol] = kline5mExit{openTime: st.Close5mOpenTime, close: st.Close5m, high: st.High5m}
-		}
+		bs = kline5mExit{openTime: st.Close5mOpenTime, close: st.Close5m, high: st.High5m}
+		e.exit5mCache[pos.Symbol] = bs
 	}
-	bs, ok := e.exit5mCache[pos.Symbol]
-	if !ok || bs.close <= 0 || bs.openTime <= e.closeExitBar[pos.ID] {
+	if bs.openTime <= 0 || bs.close <= 0 || bs.openTime <= e.closeExitBar[pos.ID] {
 		return // 无新收盘 K 线（本根已判定过）
 	}
 	e.closeExitBar[pos.ID] = bs.openTime

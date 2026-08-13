@@ -13,6 +13,8 @@ defineOptions({ name: "StrategySummary" });
 const loading = ref(false);
 const rows = ref<any[]>([]);
 const updatedAt = ref<string>("");
+/** 当前运行模式（模拟盘/实盘）：金额类数据需明确标注数据性质 */
+const curMode = ref("");
 let timer: ReturnType<typeof setInterval> | null = null;
 
 const latest = computed(() => {
@@ -180,6 +182,7 @@ function chgClass(v: number): string {
 async function fetchData() {
   const res = await callService(() => QuantService.GetDailySummaries("", "", "strategy"), { silent: true });
   if (res && res.ok) {
+    curMode.value = res.mode || "";
     rows.value = [...(res.list ?? [])].sort((a, b) => (a.summaryDate < b.summaryDate ? 1 : -1));
     if (rows.value[0]?.updatedAt) {
       updatedAt.value = new Date(rows.value[0].updatedAt).toLocaleString("zh-CN", { hour12: false });
@@ -202,6 +205,7 @@ onUnmounted(() => {
     <div class="quant-card">
       <div class="card-header">
         <h2 class="card-title">每日策略总结</h2>
+        <el-tag size="small" :type="curMode === 'LIVE' ? 'danger' : 'warning'">{{ curMode === 'LIVE' ? '实盘' : '模拟盘' }}</el-tag>
         <span class="summary-hint">每小时自动更新 · {{ updatedAt || "等待数据" }}</span>
       </div>
 
@@ -236,7 +240,8 @@ onUnmounted(() => {
         <div class="section-title">市场给了什么（蓝）</div>
         <div class="rule-note">
           用同一套规则回放今天所有可开机会：哪些机会本来能赚钱、最多能赚多少。
-          这是「理论天花板」，不代表一定能赚到（还有滑点和手续费）。
+          回放已含手续费 0.05%/边 + 滑点 0.1%，并按客户端过滤器（24h涨幅/山顶/新币）。
+          这是「理论天花板」，实际还受成交价差与执行影响。
         </div>
         <el-table v-if="ovRows.length" :data="ovRows" size="small" stripe>
           <el-table-column prop="bucket" label="类型" min-width="80" />
@@ -382,7 +387,8 @@ onUnmounted(() => {
       </el-collapse>
 
       <div class="rule-note footnote">
-        口径：回放按 5m 收盘/高低价近似，未含手续费与滑点；机会数是每次拉取行情时的快照。
+        口径：回放按 5m 收盘/高低价近似，已含手续费 0.05%/边 + 滑点 0.1%，并按客户端过滤器
+        （24h涨幅/山顶/新币）；「实际」为{{ curMode === 'LIVE' ? '实盘' : '模拟盘' }}成交数据。
         市场与实际的差距 = 理论天花板 vs 真实执行，趋势比单日数字更重要。
       </div>
     </div>

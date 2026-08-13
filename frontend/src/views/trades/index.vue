@@ -30,6 +30,8 @@ interface ClosedTradeRow {
 // 已完成交易数据（shallowRef：整体替换数组，避免大列表深度响应开销）
 const trades = ref<ClosedTradeRow[]>([]);
 const loading = ref(false);
+/** 当前运行模式（模拟盘/实盘，用于明确数据性质） */
+const modeLabel = ref("");
 // 自动刷新定时器
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -327,6 +329,9 @@ function handleManualRefresh() {
 
 onMounted(() => {
   refreshTrades();
+  callService(() => QuantService.GetMode(), { silent: true }).then((r) => {
+    if (r) modeLabel.value = r;
+  });
   // 每 5 秒自动刷新一次已完成交易
   refreshTimer = setInterval(() => refreshTrades(false), 5000);
 });
@@ -344,6 +349,7 @@ onUnmounted(() => {
   <div class="trades-panel">
     <div class="panel-header">
       <h2>已完成交易</h2>
+      <el-tag size="small" :type="modeLabel === 'LIVE' ? 'danger' : 'warning'">{{ modeLabel === 'LIVE' ? '实盘' : '模拟盘' }}</el-tag>
       <el-button size="small" @click="handleManualRefresh" :loading="loading">
         刷新
       </el-button>

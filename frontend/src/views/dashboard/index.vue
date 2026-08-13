@@ -50,10 +50,10 @@ const data = ref<DashboardData>({
   totalUnrealizedPnl: 0,
   totalMarginBalance: 0,
   availableBalance: 0,
-  scanIntervalSec: 30,
+  scanIntervalSec: 15,
   timeframe: "15m",
-  topN: 3,
-  cooldownMin: 60,
+  topN: 10,
+  cooldownMin: 30,
   marginMode: "ISOLATED",
   tickerLoadMsg: ""
 });
@@ -192,7 +192,7 @@ onUnmounted(() => {
       <!-- 账户权益 -->
       <div class="quant-card">
         <div class="card-header">
-          <span class="card-title">账户权益</span>
+          <span class="card-title">账户权益{{ data.mode === "SIMULATION" ? "（模拟）" : "" }}</span>
           <span class="card-unit">USDT</span>
         </div>
         <div class="card-body">
@@ -217,7 +217,7 @@ onUnmounted(() => {
       <!-- 今日盈利 -->
       <div class="quant-card">
         <div class="card-header">
-          <span class="card-title">今日盈利</span>
+          <span class="card-title">今日盈利{{ data.mode === "SIMULATION" ? "（模拟）" : "" }}</span>
           <span class="card-unit">USDT</span>
         </div>
         <div class="card-body">
@@ -302,7 +302,7 @@ onUnmounted(() => {
             </div>
             <div class="detail-row">
               <span class="detail-label">数据源</span>
-              <span class="text-green">WS 实时流</span>
+              <span class="text-green">{{ data.mode === "SIMULATION" ? "行情=实盘fapi · 订单=模拟demo" : "实盘" }}</span>
             </div>
           </div>
         </div>
