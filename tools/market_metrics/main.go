@@ -745,6 +745,7 @@ func main() {
 	analyzeRaw := analyzeCmd.Bool("raw", false, "原始爆拉后续走势分析（默认=策略口径模拟）")
 	analyzeDB := analyzeCmd.String("db", "", "客户端数据库路径（写入每日策略总结）")
 	analyzeDate := analyzeCmd.String("date", "", "分析指定日期（YYYY-MM-DD，默认今天）")
+	analyzeBucket1m := analyzeCmd.Bool("bucket1m", false, "3桶改用 1m 收盘 vs 前一根 1m 收盘（对比实验；CSV 加 _1m 后缀，不写每日总结）")
 
 	reportCmd := flag.NewFlagSet("report", flag.ExitOnError)
 	mode := reportCmd.String("mode", "SIMULATION", "SIMULATION / LIVE")
@@ -767,7 +768,7 @@ func main() {
 		if *analyzeRaw {
 			err = analyzeBurst(*analyzeProxy, *analyzeDate)
 		} else {
-			err = analyzeStrategy(*analyzeProxy, *analyzeDB, *analyzeDate)
+			err = analyzeStrategy(*analyzeProxy, *analyzeDB, *analyzeDate, *analyzeBucket1m)
 		}
 		if err != nil {
 			log.Fatalf("分析失败: %v", err)
@@ -982,6 +983,53 @@ func max5mGainClose(k5 []kline, j int) float64 {
 		prev = k5[z].close
 	}
 	return mx
+}
+
+// max1mGainClose 与 max5mGainClose 同口径的 1m 版本（--bucket1m 对比实验）：
+// 当前 15m 周期内（截至所在 5m 收盘时刻）每根 1m 收盘 vs 前一根 1m 收盘的涨幅取最大。
+func max1mGainClose(k1 []kline, j5 int, k5 []kline) float64 {
+	if j5 < 0 || j5 >= len(k5) {
+		return 0
+	}
+	periodStart := k5[j5].openTime - k5[j5].openTime%900000
+	barEnd := k5[j5].openTime + 300000 // 该 5m 收盘时刻（含该 5m 内全部 1m）
+	first := -1
+	for z, k := range k1 {
+		if k.openTime >= periodStart && k.openTime < barEnd {
+			first = z
+			break
+		}
+	}
+	if first < 0 {
+		return 0
+	}
+	prev := 0.0
+	if first >= 1 {
+		prev = k1[first-1].close
+	}
+	mx := 0.0
+	for z := first; z < len(k1) && k1[z].openTime < barEnd; z++ {
+		if k1[z].close <= 0 {
+			prev = k1[z].close
+			continue
+		}
+		if prev > 0 {
+			g := (k1[z].close - prev) / prev * 100
+			if g > mx {
+				mx = g
+			}
+		}
+		prev = k1[z].close
+	}
+	return mx
+}
+
+// bucketGainAt 分桶涨幅（5m 或 1m 粒度，--bucket1m 对比实验用）
+func bucketGainAt(k5, k1 []kline, j int, use1m bool) float64 {
+	if use1m {
+		return max1mGainClose(k1, j, k5)
+	}
+	return max5mGainClose(k5, j)
 }
 
 func bucketOf(m5 float64) string {
@@ -1378,7 +1426,7 @@ type lossAgg struct {
 	val, miss, dodge float64
 }
 
-func analyzeStrategy(proxy, clientDB, dateStr string) error {
+func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool) error {
 	client := httpClient(proxy)
 	tickers, err := fetchTickers(client)
 	if err != nil {
@@ -1394,6 +1442,11 @@ func analyzeStrategy(proxy, clientDB, dateStr string) error {
 	}
 	dayStart := beijingDayStartUTC(now)
 	dayEnd := dayStart + 24*60*60*1000
+	use1m := bucket1m
+	csvSuffix := ""
+	if use1m {
+		csvSuffix = "_1m"
+	}
 
 	pool := make([]ticker24, 0, len(tickers))
 	for _, t := range tickers {
@@ -1454,6 +1507,8 @@ func analyzeStrategy(proxy, clientDB, dateStr string) error {
 	actFirstByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
 	actAddonByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
 	k5Cache := map[string][]kline{}
+	k1Cache := map[string][]kline{}
+	k1Skipped := 0
 
 	for i, t := range pool {
 		if i >= 160 {
@@ -1464,6 +1519,14 @@ func analyzeStrategy(proxy, clientDB, dateStr string) error {
 			continue
 		}
 		k5Cache[t.Symbol] = k5
+		if use1m {
+			k1, err1 := fetchKlines(client, t.Symbol, "1m", 1440)
+			if err1 != nil || len(k1) < 10 {
+				k1Skipped++
+				continue
+			}
+			k1Cache[t.Symbol] = k1
+		}
 		k15, err15 := fetchKlines(client, t.Symbol, "15m", 96)
 		if err15 != nil {
 			continue
@@ -1496,7 +1559,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string) error {
 			}
 			m5 := 0.0
 			if signal {
-				m5 = max5mGainClose(k5, j)
+				m5 = bucketGainAt(k5, k1Cache[t.Symbol], j, use1m)
 				signalsByBucket[bucketOf(m5)]++
 				// 去重机会：同一币同一 15m 周期只算一次（连续达标重复计会夸大机会数）
 				periodKey := t.Symbol + "|" + strconv.FormatInt(k.openTime/900000, 10)
@@ -1647,6 +1710,15 @@ func analyzeStrategy(proxy, clientDB, dateStr string) error {
 			}
 			k5Cache[a.Symbol] = k5
 		}
+		if use1m {
+			if _, ok := k1Cache[a.Symbol]; !ok {
+				k1, err1 := fetchKlines(client, a.Symbol, "1m", 1440)
+				if err1 != nil || len(k1) < 10 {
+					continue
+				}
+				k1Cache[a.Symbol] = k1
+			}
+		}
 		idx := -1
 		for z := 0; z < len(k5); z++ {
 			if k5[z].openTime <= a.Opened {
@@ -1658,7 +1730,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string) error {
 		if idx < 0 {
 			continue
 		}
-		bkt := bucketOf(max5mGainClose(k5, idx))
+		bkt := bucketOf(bucketGainAt(k5, k1Cache[a.Symbol], idx, use1m))
 		actualByBucket[bkt]++
 		if isAddOnActual(a) {
 			actAddonByBucket[bkt]++
@@ -1689,6 +1761,14 @@ func analyzeStrategy(proxy, clientDB, dateStr string) error {
 		if p.addOn {
 			addOnClosed++
 		}
+	}
+	bucketLabel := "5m"
+	if use1m {
+		bucketLabel = "1m（对比实验）"
+	}
+	fmt.Printf("桶粒度: %s\n", bucketLabel)
+	if k1Skipped > 0 {
+		fmt.Printf("（%d 个币 1m K 线拉取失败跳过）\n", k1Skipped)
 	}
 	fmt.Printf("\n===== D 策略口径当日模拟（%s，10U×10x=100U/仓，未计手续费/滑点）=====\n", now.Format("2006-01-02"))
 	fmt.Println(fmtTable([]string{"指标", "数值", "说明"}, [][]string{
@@ -1992,7 +2072,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string) error {
 		if ihSkipped > 0 {
 			fmt.Printf("（%d 条因 K 线数据缺失跳过）\n", ihSkipped)
 		}
-		if err := writeInterceptCSV(now.Format("2006-01-02"), ihDetails, ihOrder, ih); err != nil {
+		if err := writeInterceptCSV(now.Format("2006-01-02"), csvSuffix, ihDetails, ihOrder, ih); err != nil {
 			log.Printf("⚠ 写拦截健康度 CSV 失败: %v", err)
 		}
 	}
@@ -2137,7 +2217,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string) error {
 	if len(lr) > 0 {
 		fmt.Println(fmtTable([]string{"类别", "机会数", "已平仓", "虚拟盈亏", "漏掉盈利", "躲过亏损"}, lr))
 	}
-	if err := writeOpportunityValueCSV(now.Format("2006-01-02"), simOpens, details, simActIdx, actuals, k5Cache, ov, totalOv, lossByCls); err != nil {
+	if err := writeOpportunityValueCSV(now.Format("2006-01-02"), csvSuffix, simOpens, details, simActIdx, actuals, k5Cache, ov, totalOv, lossByCls); err != nil {
 		log.Printf("⚠ 写机会价值 CSV 失败: %v", err)
 	}
 
@@ -2166,12 +2246,13 @@ func analyzeStrategy(proxy, clientDB, dateStr string) error {
 
 	// 完整明细写 CSV（每小时计划任务自动覆盖更新）
 	date := now.Format("2006-01-02")
-	if err := writeAnalysisCSV(date, rejects, details); err != nil {
+	if err := writeAnalysisCSV(date, csvSuffix, rejects, details); err != nil {
 		log.Printf("⚠ 写分析明细 CSV 失败: %v", err)
 	}
 
 	// 写入 daily_summaries（type=strategy），供前端"每日策略总结"页展示
-	if clientDB != "" {
+	// --bucket1m 为对比实验：不覆盖标准 5m 每日总结
+	if clientDB != "" && !use1m {
 		rejectList := make([]map[string]interface{}, 0, len(rejects))
 		for _, r := range rejects {
 			rejectList = append(rejectList, map[string]interface{}{
@@ -2283,12 +2364,15 @@ func analyzeStrategy(proxy, clientDB, dateStr string) error {
 			log.Printf("✅ 已写入每日策略总结（%s）", clientDB)
 		}
 	}
+	if use1m {
+		log.Printf("（--bucket1m 对比实验：未写 daily_summaries，CSV 已带 _1m 后缀）")
+	}
 	return nil
 }
 
 // writeAnalysisCSV 输出逐单拦截（该挡）与执行损耗归因明细（每小时计划任务自动覆盖更新）
-func writeAnalysisCSV(date string, rejects []rejectRec, details []simDetail) error {
-	path := fmt.Sprintf(`D:\0001_ba-A - 03\market_data\analysis_%s.csv`, date)
+func writeAnalysisCSV(date, suffix string, rejects []rejectRec, details []simDetail) error {
+	path := fmt.Sprintf(`D:\0001_ba-A - 03\market_data\analysis_%s%s.csv`, date, suffix)
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -2315,8 +2399,8 @@ func writeAnalysisCSV(date string, rejects []rejectRec, details []simDetail) err
 }
 
 // writeInterceptCSV 输出拦截健康度明细（逐单 + 按原因汇总，每小时自动覆盖更新）
-func writeInterceptCSV(date string, details []interceptDetail, order []string, ih map[string]*interceptStat) error {
-	path := fmt.Sprintf(`D:\0001_ba-A - 03\market_data\intercept_health_%s.csv`, date)
+func writeInterceptCSV(date, suffix string, details []interceptDetail, order []string, ih map[string]*interceptStat) error {
+	path := fmt.Sprintf(`D:\0001_ba-A - 03\market_data\intercept_health_%s%s.csv`, date, suffix)
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -2348,9 +2432,9 @@ func writeInterceptCSV(date string, details []interceptDetail, order []string, i
 }
 
 // writeOpportunityValueCSV 输出机会价值漏斗逐单明细 + 汇总（每小时自动覆盖更新）
-func writeOpportunityValueCSV(date string, simOpens []simOpenRec, details []simDetail, simActIdx []int,
+func writeOpportunityValueCSV(date, suffix string, simOpens []simOpenRec, details []simDetail, simActIdx []int,
 	actuals []actualTrade, k5Cache map[string][]kline, ov map[string]*ovAgg, totalOv *ovAgg, lossByCls map[string]*lossAgg) error {
-	path := fmt.Sprintf(`D:\0001_ba-A - 03\market_data\opportunity_value_%s.csv`, date)
+	path := fmt.Sprintf(`D:\0001_ba-A - 03\market_data\opportunity_value_%s%s.csv`, date, suffix)
 	f, err := os.Create(path)
 	if err != nil {
 		return err

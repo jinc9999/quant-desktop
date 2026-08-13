@@ -47,3 +47,25 @@ func TestMax5mGainClose_NoData(t *testing.T) {
 		t.Fatalf("越界=%v, want 0", got)
 	}
 }
+
+// TestMax1mGainClose 验证 1m 粒度分桶（--bucket1m 对比实验）：
+// 当前 15m 周期内截至所在 5m 收盘，每根 1m 收盘 vs 前一根 1m 收盘的涨幅取最大。
+func TestMax1mGainClose(t *testing.T) {
+	periodStart := int64(9*3600+15*60) * 1000 // 09:15:00
+	k5 := []kline{{openTime: periodStart + 600000, open: 101, high: 104, low: 100, close: 103.6}} // 09:25~09:30
+	k1 := []kline{
+		{openTime: periodStart - 60000, close: 100},   // 09:14（周期前一根）
+		{openTime: periodStart, close: 101},            // 09:15 +1.0%
+		{openTime: periodStart + 60000, close: 100.5},  // 09:16 -0.5%
+		{openTime: periodStart + 120000, close: 103.5}, // 09:17 +2.985%（周期内最大）
+		{openTime: periodStart + 840000, close: 103.6}, // 09:29 +0.097%
+	}
+	got := max1mGainClose(k1, 0, k5)
+	want := 3.0 / 100.5 * 100 // 2.985074...
+	if math.Abs(got-want) > 1e-6 {
+		t.Fatalf("max1mGainClose=%v, want %v", got, want)
+	}
+	if b := bucketOf(got); b != "爆拉桶" {
+		t.Fatalf("bucketOf(%v)=%s, want 爆拉桶", got, b)
+	}
+}
