@@ -682,31 +682,31 @@ onUnmounted(() => {
         <h3>智慧版 · 5m 爆拉仓位</h3>
         <el-form label-width="150px" size="default">
           <el-form-item label="启用">
-            <el-tooltip content="开启后：当前 15m 周期内出现 ≥边界% 的 5m 爆拉 → 仓位 ×高倍；2%~边界 → 均仓；<2% → ×低倍。A/B 默认关闭，D 智慧版默认开启。回测三关验证（A 骨架+1.5/0.7/2.5）：全周期 +36%、2025-26 样本外 +39%、扰动稳定" placement="top">
+            <el-tooltip content="开启后：当前 15m 周期内最大 5m 收盘涨幅（这根5m收盘 vs 前一根5m收盘）≥边界% → 仓位 ×高倍；2%~边界 → 均仓；<2% → ×低倍。A/B 默认关闭，D 智慧版默认开启。回测三关验证（A 骨架+1.5/0.7/2.5）：全周期 +36%、2025-26 样本外 +39%、扰动稳定" placement="top">
               <el-switch v-model="strategyParams.smartSizeMode" :active-value="1" :inactive-value="0" />
             </el-tooltip>
           </el-form-item>
           <el-form-item v-if="strategyParams.smartSizeMode === 1" label="爆拉仓位倍数">
-            <el-tooltip content="5m 爆拉 ≥ 边界% 时的单仓倍数（回测最优 1.5）" placement="top">
+            <el-tooltip content="5m 收盘涨幅（收盘 vs 前一根收盘）≥ 边界% 时的单仓倍数（回测最优 1.5）" placement="top">
               <el-input-number v-model="strategyParams.smartSizeHigh" :min="1" :max="3" :step="0.1" />
             </el-tooltip>
           </el-form-item>
           <el-form-item v-if="strategyParams.smartSizeMode === 1" label="温和仓位倍数">
-            <el-tooltip content="5m 子涨幅 <2% 时的单仓倍数（回测最优 0.7）" placement="top">
+            <el-tooltip content="5m 收盘涨幅 <2% 时的单仓倍数（回测最优 0.7）" placement="top">
               <el-input-number v-model="strategyParams.smartSizeLow" :min="0.3" :max="1" :step="0.1" />
             </el-tooltip>
           </el-form-item>
           <el-form-item v-if="strategyParams.smartSizeMode === 1" label="爆拉边界(%)">
-            <el-tooltip content="15m 周期内最大 5m 收盘涨幅达到该值即算爆拉桶（回测最优 2.5%）" placement="top">
+            <el-tooltip content="15m 周期内最大 5m 收盘涨幅（收盘 vs 前一根收盘）达到该值即算爆拉桶（回测最优 2.5%）" placement="top">
               <el-input-number v-model="strategyParams.smartSizeBoundary" :min="1.5" :max="5" :step="0.1" />
             </el-tooltip>
           </el-form-item>
         </el-form>
         <div v-if="strategyParams.smartSizeMode === 1" class="smart-rule">
-          <div class="smart-rule-title">分档规则（开仓时看 15m 周期内最大单根 5m 涨幅）</div>
+          <div class="smart-rule-title">分档规则（开仓时看 15m 周期内最大 5m 收盘涨幅：这根5m收盘 vs 前一根5m收盘）</div>
           <div class="smart-rule-row">
             <span class="smart-bucket">爆拉桶</span>
-            <span class="smart-cond">最大 5m 涨幅 ≥ {{ strategyParams.smartSizeBoundary }}%</span>
+            <span class="smart-cond">最大 5m 收盘涨幅 ≥ {{ strategyParams.smartSizeBoundary }}%</span>
             <span class="smart-mult">仓位 ×{{ strategyParams.smartSizeHigh }}</span>
           </div>
           <div class="smart-rule-row">

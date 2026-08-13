@@ -67,8 +67,8 @@ const envMetrics = computed<any[]>(() => {
   if (period.value === "day") {
     return [
       { k: "机会池宽度", v: `${m.poolWidth} 个币`, d: "24h成交额≥2000万 的合约数" },
-      { k: "异动机会", v: `${m.opportunityCount} 币 / ${m.opportunityTotal} 次`, d: "15m单根涨≥3%（策略的肉）" },
-      { k: "5m爆拉", v: `${m.burstCoinCount} 币 / ${m.burstTotal} 次`, d: "5m单根涨≥2.5%（智慧版1.5倍机会）" },
+      { k: "异动机会", v: `${m.opportunityCount} 币 / ${m.opportunityTotal} 次`, d: "15m收盘涨≥3%（收盘 vs 本周期开盘）" },
+      { k: "5m爆拉", v: `${m.burstCoinCount} 币 / ${m.burstTotal} 次`, d: "5m收盘涨≥2.5%（收盘 vs 前一根收盘）" },
       { k: "假突破率", v: fakeLabel(m.fakeBreakoutRate), d: "冲3%未站稳占比（骗炮多=止损会多）" },
       { k: "最大15m涨/跌", v: `+${Number(m.max15mUp).toFixed(1)}% / ${Number(m.max15mDown).toFixed(1)}%`, d: "当日最猛的单根异动" },
       { k: "BTC波动", v: atrLabel(m.btcATRPct), d: "BTC 24h 波动率（高=肉多滑点狠）" }

@@ -340,11 +340,13 @@ func collect(proxy string) error {
 		if err5 != nil {
 			continue
 		}
-		for _, k := range k5 {
-			if k.openTime < dayStart || k.open <= 0 {
+		for j := 1; j < len(k5); j++ {
+			k := k5[j]
+			prev := k5[j-1].close
+			if k.openTime < dayStart || k.close <= 0 || prev <= 0 {
 				continue
 			}
-			if (k.close-k.open)/k.open*100 >= 2.5 {
+			if (k.close-prev)/prev*100 >= 2.5 {
 				m.BurstTotal++
 				burstSet[t.Symbol] = true
 			}
@@ -635,8 +637,8 @@ func genReport(mode, typ string) (string, float64, reportMeta, error) {
 			m := metrics[len(metrics)-1]
 			sb.WriteString(fmtTable([]string{"指标", "数值", "解读"}, [][]string{
 				{"机会池宽度", fmt.Sprintf("%d 个币", m.PoolWidth), "24h成交额≥2000万 的合约数"},
-				{"异动机会", fmt.Sprintf("%d 个币 / %d 次", m.OpportunityCount, m.OpportunityTotal), "15m单根涨≥3% 的次数（策略的肉）"},
-				{"5m爆拉", fmt.Sprintf("%d 次", m.BurstTotal), "5m单根涨≥2.5%（智慧版1.5倍机会）"},
+				{"异动机会", fmt.Sprintf("%d 个币 / %d 次", m.OpportunityCount, m.OpportunityTotal), "15m收盘涨≥3%（收盘 vs 本周期开盘）的次数（策略的肉）"},
+				{"5m爆拉", fmt.Sprintf("%d 次", m.BurstTotal), "5m收盘涨≥2.5%（收盘 vs 前一根收盘，智慧版1.5倍机会）"},
 				{"假突破率", fmt.Sprintf("%.1f%%", m.FakeBreakoutRate), "冲3%未站稳占比（高=止损会多）"},
 				{"最大15m涨/跌", fmt.Sprintf("+%.1f%% / %.1f%%", m.Max15mUp, m.Max15mDown), "当日最猛的单根异动"},
 				{"BTC波动", fmt.Sprintf("ATR %.1f%%", m.BTCATRPct), "BTC 24h 波动率（高=肉多滑点狠）"},
@@ -742,6 +744,7 @@ func main() {
 	analyzeProxy := analyzeCmd.String("proxy", os.Getenv("HTTPS_PROXY"), "HTTP 代理地址")
 	analyzeRaw := analyzeCmd.Bool("raw", false, "原始爆拉后续走势分析（默认=策略口径模拟）")
 	analyzeDB := analyzeCmd.String("db", "", "客户端数据库路径（写入每日策略总结）")
+	analyzeDate := analyzeCmd.String("date", "", "分析指定日期（YYYY-MM-DD，默认今天）")
 
 	reportCmd := flag.NewFlagSet("report", flag.ExitOnError)
 	mode := reportCmd.String("mode", "SIMULATION", "SIMULATION / LIVE")
@@ -762,9 +765,9 @@ func main() {
 		analyzeCmd.Parse(os.Args[2:])
 		var err error
 		if *analyzeRaw {
-			err = analyzeBurst(*analyzeProxy)
+			err = analyzeBurst(*analyzeProxy, *analyzeDate)
 		} else {
-			err = analyzeStrategy(*analyzeProxy, *analyzeDB)
+			err = analyzeStrategy(*analyzeProxy, *analyzeDB, *analyzeDate)
 		}
 		if err != nil {
 			log.Fatalf("分析失败: %v", err)
@@ -786,15 +789,22 @@ func main() {
 	}
 }
 
-// analyzeBurst 复盘分析（--raw）：今天每根"5m 单根实体≥2.5%"的爆拉之后，
+// analyzeBurst 复盘分析（--raw）：今天每根"5m 收盘涨幅≥2.5%"（收盘 vs 前一根收盘）的爆拉之后，
 // 价格续涨情况 / 15m 累计是否突破 3% / 继续上涨幅度分布。
-func analyzeBurst(proxy string) error {
+func analyzeBurst(proxy, dateStr string) error {
 	client := httpClient(proxy)
 	tickers, err := fetchTickers(client)
 	if err != nil {
 		return fmt.Errorf("拉取行情失败: %w", err)
 	}
 	now := time.Now().In(beijing)
+	if dateStr != "" {
+		t, perr := time.ParseInLocation("2006-01-02", dateStr, beijing)
+		if perr != nil {
+			return fmt.Errorf("日期格式错误（应为 YYYY-MM-DD）: %w", perr)
+		}
+		now = t
+	}
 	dayStart := beijingDayStartUTC(now)
 
 	pool := make([]ticker24, 0, len(tickers))
@@ -806,7 +816,7 @@ func analyzeBurst(proxy string) error {
 
 	type event struct {
 		symbol       string
-		burstGain    float64 // 爆拉 5m 实体 %
+		burstGain    float64 // 爆拉 5m 收盘涨幅 %（收盘 vs 前一根收盘）
 		cycleOpen    float64 // 所在 15m 周期开盘价
 		cycleGain    float64 // 爆拉收盘时 15m 累计 %
 		maxGainAfter float64 // 爆拉后 6 根 5m 内相对爆拉收盘的最大涨幅 %
@@ -830,10 +840,14 @@ func analyzeBurst(proxy string) error {
 		// 构建 15m 周期 open 查找（按时间）
 		for j := 1; j < len(k5)-6; j++ {
 			k := k5[j]
-			if k.openTime < dayStart || k.open <= 0 {
+			if k.openTime < dayStart || k.close <= 0 {
 				continue
 			}
-			burst := (k.close - k.open) / k.open * 100
+			prev := k5[j-1].close
+			if prev <= 0 {
+				continue
+			}
+			burst := (k.close - prev) / prev * 100
 			if burst < 2.5 {
 				continue
 			}
@@ -916,7 +930,7 @@ func analyzeBurst(proxy string) error {
 	pct := func(v int) string { return fmt.Sprintf("%.1f%%", float64(v)/float64(n)*100) }
 	fmt.Printf("\n===== 今日 5m 爆拉复盘（%s，池内成交额≥2000万）=====\n", now.Format("2006-01-02"))
 	fmt.Println(fmtTable([]string{"指标", "数值", "说明"}, [][]string{
-		{"爆拉事件", fmt.Sprintf("%d 币 / %d 次", len(symbols), n), "5m 单根实体≥2.5%"},
+		{"爆拉事件", fmt.Sprintf("%d 币 / %d 次", len(symbols), n), "5m 收盘涨≥2.5%（收盘 vs 前一根收盘）"},
 		{"爆拉时已达标", fmt.Sprintf("%d 次（%s）", reach3AtBurst, pct(reach3AtBurst)), "爆拉收盘时该 15m 累计已≥3%"},
 		{"爆拉后达 3%", fmt.Sprintf("%d 次（%s）", reach3N, pct(reach3N)), "爆拉后 3 根 5m 内 15m 累计触及 3%"},
 		{"爆拉后续涨", fmt.Sprintf("%d 次（%s）", upN, pct(upN)), "爆拉后 6 根 5m 内最高价高于爆拉收盘"},
@@ -941,16 +955,31 @@ func maxInt(a, b int) int {
 	return b
 }
 
-// max5mEntity 开仓时当前 15m 周期内最大 5m 实体涨幅（桶判定口径）
-func max5mEntity(k5 []kline, j int) float64 {
+// max5mGainClose 开仓时当前 15m 周期内最大 5m 收盘涨幅（桶判定口径，与客户端/回测一致）：
+// 每根 5m 的涨幅 = 该根收盘价 vs 前一根 5m 收盘价；周期内首根以前一根（周期外）收盘价为基准。
+func max5mGainClose(k5 []kline, j int) float64 {
+	if j < 0 || j >= len(k5) {
+		return 0
+	}
+	periodStart := k5[j].openTime - k5[j].openTime%900000
+	first := j
+	for first >= 1 && k5[first-1].openTime >= periodStart {
+		first--
+	}
+	prev := 0.0
+	if first >= 1 {
+		prev = k5[first-1].close
+	}
 	mx := 0.0
-	for z := j; z >= 0 && z > j-3; z-- {
-		if k5[z].open > 0 {
-			e := (k5[z].close - k5[z].open) / k5[z].open * 100
-			if e > mx {
-				mx = e
-			}
+	for z := first; z <= j; z++ {
+		if k5[z].close <= 0 || prev <= 0 {
+			continue
 		}
+		g := (k5[z].close - prev) / prev * 100
+		if g > mx {
+			mx = g
+		}
+		prev = k5[z].close
 	}
 	return mx
 }
@@ -974,15 +1003,15 @@ type actualTrade struct {
 	Closed  int64
 }
 
-// loadActualTrades 读取客户端库当天实际开仓记录（含未平仓），用于"机会 vs 实际"对比。
-func loadActualTrades(clientDB string, dayStart int64) ([]actualTrade, error) {
+// loadActualTrades 读取客户端库指定自然日实际开仓记录（含未平仓），用于"机会 vs 实际"对比。
+func loadActualTrades(clientDB string, dayStart, dayEnd int64) ([]actualTrade, error) {
 	db, err := sql.Open("sqlite3", "file:"+clientDB+"?mode=ro")
 	if err != nil {
 		return nil, err
 	}
 	defer db.Close()
 	rows, err := db.Query(`SELECT symbol, ifnull(realized_pnl,0), opened_at, status, ifnull(closed_at,0)
-		FROM positions WHERE opened_at >= ?`, dayStart)
+		FROM positions WHERE opened_at >= ? AND opened_at < ?`, dayStart, dayEnd)
 	if err != nil {
 		return nil, err
 	}
@@ -1014,7 +1043,7 @@ type attemptRow struct {
 	ErrorCode int64
 }
 
-func loadAttempts(clientDB string, dayStart int64) ([]attemptRow, bool, error) {
+func loadAttempts(clientDB string, dayStart, dayEnd int64) ([]attemptRow, bool, error) {
 	if clientDB == "" {
 		return nil, false, nil
 	}
@@ -1024,7 +1053,7 @@ func loadAttempts(clientDB string, dayStart int64) ([]attemptRow, bool, error) {
 	}
 	defer db.Close()
 	rows, err := db.Query(`SELECT ts, symbol, stage, reason, ifnull(bucket,''), ifnull(error_code,0)
-		FROM open_attempts WHERE ts >= ? ORDER BY ts`, dayStart)
+		FROM open_attempts WHERE ts >= ? AND ts < ? ORDER BY ts`, dayStart, dayEnd)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such table") {
 			return nil, false, nil // 旧构建无此表：无法逐单归因
@@ -1043,7 +1072,7 @@ func loadAttempts(clientDB string, dayStart int64) ([]attemptRow, bool, error) {
 	return out, true, rows.Err()
 }
 
-func loadHeartbeats(clientDB string, dayStart int64) ([]int64, bool, error) {
+func loadHeartbeats(clientDB string, dayStart, dayEnd int64) ([]int64, bool, error) {
 	if clientDB == "" {
 		return nil, false, nil
 	}
@@ -1052,7 +1081,7 @@ func loadHeartbeats(clientDB string, dayStart int64) ([]int64, bool, error) {
 		return nil, false, err
 	}
 	defer db.Close()
-	rows, err := db.Query(`SELECT ts FROM engine_heartbeat WHERE ts >= ? ORDER BY ts`, dayStart)
+	rows, err := db.Query(`SELECT ts FROM engine_heartbeat WHERE ts >= ? AND ts < ? ORDER BY ts`, dayStart, dayEnd)
 	if err != nil {
 		if strings.Contains(err.Error(), "no such table") {
 			return nil, false, nil
@@ -1271,7 +1300,7 @@ func classifySim(so simOpenRec, attempts []attemptRow, beats []int64) (string, s
 //   追单: 已激活且再次命中信号 → 追加独立单（同币最多 1+2=3 仓）
 //   平仓: 止损 -3% / 跟踪止盈(激活后从最高回撤3%) / 超时 180 分钟(36 根)
 //   冷却: 移动止盈平仓后 15 分钟可再入，止损/超时后 30 分钟
-//   名义: 每仓 100U（10U 保证金 × 10x，未按 5m 爆拉分桶放大，口径标注）
+//   名义: 每仓 100U（10U 保证金 × 10x）× 桶倍数（爆拉1.5 / 中间1.0 / 温和0.7）
 
 type simPos struct {
 	entry    float64
@@ -1349,14 +1378,22 @@ type lossAgg struct {
 	val, miss, dodge float64
 }
 
-func analyzeStrategy(proxy, clientDB string) error {
+func analyzeStrategy(proxy, clientDB, dateStr string) error {
 	client := httpClient(proxy)
 	tickers, err := fetchTickers(client)
 	if err != nil {
 		return fmt.Errorf("拉取行情失败: %w", err)
 	}
 	now := time.Now().In(beijing)
+	if dateStr != "" {
+		t, perr := time.ParseInLocation("2006-01-02", dateStr, beijing)
+		if perr != nil {
+			return fmt.Errorf("日期格式错误（应为 YYYY-MM-DD）: %w", perr)
+		}
+		now = t
+	}
 	dayStart := beijingDayStartUTC(now)
+	dayEnd := dayStart + 24*60*60*1000
 
 	pool := make([]ticker24, 0, len(tickers))
 	for _, t := range tickers {
@@ -1395,14 +1432,14 @@ func analyzeStrategy(proxy, clientDB string) error {
 	// 实际交易（客户端库当天开仓）
 	var actuals []actualTrade
 	if clientDB != "" {
-		actuals, _ = loadActualTrades(clientDB, dayStart)
+		actuals, _ = loadActualTrades(clientDB, dayStart, dayEnd)
 	}
 	// 开仓尝试 + 引擎心跳（转化率逐单归因；旧构建无表时为空）
 	var attempts []attemptRow
 	var beats []int64
 	if clientDB != "" {
-		attempts, _, _ = loadAttempts(clientDB, dayStart)
-		beats, _, _ = loadHeartbeats(clientDB, dayStart)
+		attempts, _, _ = loadAttempts(clientDB, dayStart, dayEnd)
+		beats, _, _ = loadHeartbeats(clientDB, dayStart, dayEnd)
 	}
 	attemptsBySym := map[string][]attemptRow{}
 	for _, a := range attempts {
@@ -1459,7 +1496,7 @@ func analyzeStrategy(proxy, clientDB string) error {
 			}
 			m5 := 0.0
 			if signal {
-				m5 = max5mEntity(k5, j)
+				m5 = max5mGainClose(k5, j)
 				signalsByBucket[bucketOf(m5)]++
 				// 去重机会：同一币同一 15m 周期只算一次（连续达标重复计会夸大机会数）
 				periodKey := t.Symbol + "|" + strconv.FormatInt(k.openTime/900000, 10)
@@ -1621,7 +1658,7 @@ func analyzeStrategy(proxy, clientDB string) error {
 		if idx < 0 {
 			continue
 		}
-		bkt := bucketOf(max5mEntity(k5, idx))
+		bkt := bucketOf(max5mGainClose(k5, idx))
 		actualByBucket[bkt]++
 		if isAddOnActual(a) {
 			actAddonByBucket[bkt]++
@@ -1672,7 +1709,7 @@ func analyzeStrategy(proxy, clientDB string) error {
 		{"追单平仓", fmt.Sprintf("%d 笔", addOnClosed), "追单单独离场笔数"},
 		{"追单占比", fmt.Sprintf("%.1f%%", float64(addOnClosed)/float64(n)*100), ""},
 	}))
-	fmt.Println("\n⚠ 口径：本模拟按 5m 收盘/高低价近似回放，未含手续费滑点、未按 5m 爆拉分桶放大仓位；用于复盘当日策略环境，非实盘对账。")
+	fmt.Println("\n⚠ 口径：本模拟按 5m 收盘/高低价近似回放，未含手续费滑点，已按 5m 爆拉分桶放大仓位（爆拉1.5/中间1.0/温和0.7）；用于复盘当日策略环境，非实盘对账。")
 
 	// ==================== 转化率归因：模拟机会 → 成交 / 拦截(该挡) / 执行损耗 ====================
 	// 1) 实际成交匹配：同币 + 时间窗 ±45min 贪婪匹配（替代旧版按序号硬匹配，
@@ -2240,7 +2277,7 @@ func analyzeStrategy(proxy, clientDB string) error {
 			}
 		}
 		ovMeta := map[string]interface{}{"buckets": ovJSON, "loss": lossJSON}
-		if err := writeStrategySummary(clientDB, sim, bucketList, rejectList, detailList, ihJSON, ovMeta); err != nil {
+		if err := writeStrategySummary(clientDB, now.Format("2006-01-02"), sim, bucketList, rejectList, detailList, ihJSON, ovMeta); err != nil {
 			log.Printf("⚠ 写入策略总结失败: %v", err)
 		} else {
 			log.Printf("✅ 已写入每日策略总结（%s）", clientDB)
@@ -2405,7 +2442,7 @@ func safeDiv(a, b float64) float64 {
 }
 
 // writeStrategySummary 将策略口径模拟、漏斗归因、逐单明细、拦截健康度与机会价值写入客户端库 daily_summaries（type=strategy）
-func writeStrategySummary(clientDB string, sim map[string]interface{}, buckets []map[string]interface{}, rejects, details []map[string]interface{}, interceptHealth, opportunityValue map[string]interface{}) error {
+func writeStrategySummary(clientDB, date string, sim map[string]interface{}, buckets []map[string]interface{}, rejects, details []map[string]interface{}, interceptHealth, opportunityValue map[string]interface{}) error {
 	db, err := sql.Open("sqlite3", "file:"+clientDB+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return err
@@ -2416,7 +2453,6 @@ func writeStrategySummary(clientDB string, sim map[string]interface{}, buckets [
 		"interceptHealth": interceptHealth, "opportunityValue": opportunityValue,
 	})
 	now := time.Now().In(beijing)
-	date := now.Format("2006-01-02")
 	var id int64
 	err = db.QueryRow(`SELECT id FROM daily_summaries WHERE mode='SIMULATION' AND summary_date=? AND summary_type='strategy' AND deleted_at=0`, date).Scan(&id)
 	if err == nil {
