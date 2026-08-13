@@ -2122,6 +2122,25 @@ func (e *Engine) closePosition(ctx context.Context, pos *storage.Position, curre
 		return
 	}
 
+	// 本地平仓异常校验：成交价相对入场跌幅 >8%（理论止损 -3%）→ 红色告警日志
+	if pos.EntryPrice > 0 {
+		lossPct := 0.0
+		if pos.Side == "LONG" {
+			lossPct = (pos.EntryPrice - currentPrice) / pos.EntryPrice * 100
+		} else {
+			lossPct = (currentPrice - pos.EntryPrice) / pos.EntryPrice * 100
+		}
+		if lossPct > 8 {
+			msg := fmt.Sprintf("⚠ 异常平仓 %s 持仓#%d reason=%s 价格=%.6f 相对入场跌幅=%.2f%%（理论止损 %.2f%%）",
+				pos.Symbol, pos.ID, reason, currentPrice, lossPct, e.cfg.StopLossPct*100)
+			log.Printf("[Strategy] ❌ %s", msg)
+			_ = e.db.InsertLog(&storage.TradeLog{
+				Timestamp: time.Now().UnixMilli(), Level: "error", Module: "strategy",
+				Message: msg, Symbol: pos.Symbol, Price: currentPrice, Amount: pos.Amount, PositionID: pos.ID,
+			})
+		}
+	}
+
 	// 计算盈亏: 做多=(出场-入场)*数量, 做空=(入场-出场)*数量
 	exitPrice := currentPrice
 	var pnl float64

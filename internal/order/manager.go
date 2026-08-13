@@ -188,6 +188,18 @@ func (m *Manager) PlaceStopOrders(ctx context.Context, pos *storage.Position, cf
 		return fmt.Errorf("挂止损条件单失败（已重试 %d 次）: %w", m.maxRetries, err)
 	}
 
+	// 挂单后校验触发价合理性（防 demo 标记价失真把止损压太低，AKEUSDT 爆仓案例：触发价被压到 entry 的 89%）
+	expectedStop := pos.EntryPrice * (1 - cfg.StopLossPct)
+	if expectedStop > 0 && math.Abs(stopPrice-expectedStop)/expectedStop > 0.03 {
+		msg := fmt.Sprintf("⚠ 止损触发价异常 %s 持仓#%d：实际 %.6f vs 理论 %.6f（偏差 %.1f%%），疑似标记价失真，请核查",
+			pos.Symbol, pos.ID, stopPrice, expectedStop, math.Abs(stopPrice-expectedStop)/expectedStop*100)
+		log.Printf("[ORDER] ❌ %s", msg)
+		_ = m.db.InsertLog(&storage.TradeLog{
+			Timestamp: time.Now().UnixMilli(), Level: "error", Module: "order",
+			Message: msg, Symbol: pos.Symbol, Price: stopPrice, Amount: pos.Amount, PositionID: pos.ID,
+		})
+	}
+
 	// 写入止损委托记录
 	now := time.Now().UnixMilli()
 	stopSide := "SELL"
@@ -703,6 +715,34 @@ func (m *Manager) handleFilledOrder(ctx context.Context, localOrder *storage.Ord
 		log.Printf("[ORDER] 平仓更新失败 positionID=%d: %v", localOrder.PositionID, err)
 	} else if wasOpen {
 		m.notifyClosed(localOrder.Symbol, reason)
+	}
+
+	// 平仓异常校验（防失真触发价/异常成交导致爆仓级亏损）：
+	// ① 成交价相对入场价跌幅 >8%（理论止损 -3% 却跌 8%+ 才成交 = 明显异常）；
+	// ② 亏损超过该仓保证金（爆仓级）。
+	if pos != nil {
+		lossPct := 0.0
+		if pos.EntryPrice > 0 {
+			if pos.Side == "LONG" {
+				lossPct = (pos.EntryPrice - exitPrice) / pos.EntryPrice * 100
+			} else {
+				lossPct = (exitPrice - pos.EntryPrice) / pos.EntryPrice * 100
+			}
+		}
+		leverage := pos.Leverage
+		if leverage <= 0 {
+			leverage = 10
+		}
+		margin := pos.Amount * pos.EntryPrice / float64(leverage)
+		if lossPct > 8 || pnl < -margin {
+			msg := fmt.Sprintf("⚠ 异常平仓 %s 持仓#%d reason=%s 成交价=%.6f 相对入场跌幅=%.2f%% 盈亏=%+.2fU 保证金=%.2fU（理论止损约 %.2f%%）",
+				localOrder.Symbol, localOrder.PositionID, reason, exitPrice, lossPct, pnl, margin, pos.EntryPrice*(1-0.03))
+			log.Printf("[ORDER] ❌ %s", msg)
+			_ = m.db.InsertLog(&storage.TradeLog{
+				Timestamp: time.Now().UnixMilli(), Level: "error", Module: "order",
+				Message: msg, Symbol: localOrder.Symbol, Price: exitPrice, Amount: localOrder.Amount, PositionID: localOrder.PositionID,
+			})
+		}
 	}
 
 	// 取消关联的另一条委托
