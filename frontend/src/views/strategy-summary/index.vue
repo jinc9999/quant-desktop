@@ -29,6 +29,29 @@ const sim = computed(() => latest.value?.meta.sim || null);
 const buckets = computed<any[]>(() => latest.value?.meta.buckets || []);
 const rejects = computed<any[]>(() => latest.value?.meta.rejects || []);
 const gap = computed<any[]>(() => latest.value?.meta.gap || []);
+/** 按币种分组折叠：每币一行（未做成单数/执行损耗/拦截），点击展开明细 */
+const detailGroups = computed<any[]>(() => {
+  const groups = new Map<string, any>();
+  const push = (item: any) => {
+    const g = groups.get(item.symbol) || { symbol: item.symbol, lossCount: 0, rejectCount: 0, children: [] };
+    g.children.push(item);
+    groups.set(item.symbol, g);
+  };
+  (gap.value || []).forEach((i: any) => {
+    push({ ...i, kind: "执行损耗", kindLabel: i.addOn ? "追单" : "首仓" });
+  });
+  (rejects.value || []).forEach((i: any) => {
+    push({ ...i, kind: "拦截", kindLabel: reasonLabel(i.reason) });
+  });
+  return [...groups.values()]
+    .map((g) => {
+      g.lossCount = g.children.filter((c: any) => c.kind === "执行损耗").length;
+      g.rejectCount = g.children.filter((c: any) => c.kind === "拦截").length;
+      g.total = g.children.length;
+      return g;
+    })
+    .sort((a, b) => b.total - a.total);
+});
 const reasonLabel = (r: string) =>
   ({ maxpos: "全局10仓上限", cooldown: "冷却期内", no_active: "持仓未激活(无法追单)", addon_limit: "追单达上限" }[r] || r);
 
@@ -131,34 +154,39 @@ onUnmounted(() => {
         <div v-else class="empty-state">三桶分析每小时自动生成，暂无数据不影响策略运行</div>
       </div>
 
-      <!-- 板块三：逐单明细 -->
+      <!-- 板块三：'有机会但没做成'的单 -->
       <div class="summary-section">
-        <div class="section-title">逐单明细（可开未做 & 拦截）</div>
+        <div class="section-title">"有机会但没做成"的单（{{ detailGroups.length }} 个币 · 点击展开）</div>
         <div class="rule-note">
           执行损耗 = 模拟规则可开但实际未成交（demo/tick 粒度/零星失败）；拦截 = 策略规则内未开（该挡）。
           完整明细每小时自动更新。
         </div>
-        <h4 class="sub-title">执行损耗（{{ gap.length }} 单）</h4>
-        <el-table v-if="gap.length" :data="gap" size="small" stripe>
-          <el-table-column prop="symbol" label="币种" min-width="110" />
-          <el-table-column prop="seq" label="第几单" width="70" align="right" />
-          <el-table-column prop="time" label="时间" width="70" />
-          <el-table-column prop="bucket" label="桶" width="90" />
-          <el-table-column label="类型" width="80">
-            <template #default="{ row }">{{ row.addOn ? "追单" : "首仓" }}</template>
+        <el-table v-if="detailGroups.length" :data="detailGroups" size="small" stripe>
+          <el-table-column type="expand">
+            <template #default="{ row }">
+              <el-table :data="row.children" size="small">
+                <el-table-column prop="time" label="时间" width="80" />
+                <el-table-column prop="bucket" label="桶" width="90" />
+                <el-table-column label="类型" width="100">
+                  <template #default="{ row: c }">{{ c.kindLabel }}</template>
+                </el-table-column>
+                <el-table-column label="分类" width="90">
+                  <template #default="{ row: c }">{{ c.kind }}</template>
+                </el-table-column>
+                <el-table-column label="说明" min-width="200">
+                  <template #default="{ row: c }">
+                    {{ c.kind === "执行损耗" ? "模拟可开但实际未成交" : reasonLabel(c.reason) }}
+                  </template>
+                </el-table-column>
+              </el-table>
+            </template>
           </el-table-column>
-        </el-table>
-        <h4 class="sub-title">拦截明细（{{ rejects.length }} 单）</h4>
-        <el-table v-if="rejects.length" :data="rejects" size="small" stripe>
           <el-table-column prop="symbol" label="币种" min-width="110" />
-          <el-table-column prop="seq" label="第几信号" width="80" align="right" />
-          <el-table-column prop="time" label="时间" width="70" />
-          <el-table-column prop="bucket" label="桶" width="90" />
-          <el-table-column label="原因" min-width="180">
-            <template #default="{ row }">{{ reasonLabel(row.reason) }}</template>
-          </el-table-column>
+          <el-table-column prop="total" label="未做成单数" width="100" align="right" />
+          <el-table-column prop="lossCount" label="执行损耗" width="90" align="right" />
+          <el-table-column prop="rejectCount" label="拦截" width="80" align="right" />
         </el-table>
-        <div v-if="!rejects.length && !gap.length" class="empty-state">逐单明细每小时自动生成</div>
+        <div v-if="!detailGroups.length" class="empty-state">逐单明细每小时自动生成</div>
       </div>
 
       <div class="rule-note footnote">
