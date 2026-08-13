@@ -51,6 +51,7 @@ var structuralOpenErrors = map[int64]bool{
 	-2019: true, // 保证金不足（逐仓占用 / 交易对处于强平模式）
 	-4131: true, // 市价单价格 filter 拒绝（测试网薄盘）
 	-4411: true, // 未签署 TradFi-Perps 协议（demo 平台需网页端签署，重启应用后恢复）
+	-1121: true, // Invalid symbol：模拟盘信号走实盘 fapi、下单走 demo，实盘新币/下架币 demo 无对应合约
 }
 
 // orphanScanInterval 孤儿仓位扫描间隔（每 N 个 Tick 执行一次）。
