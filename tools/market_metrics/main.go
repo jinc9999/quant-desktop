@@ -2224,6 +2224,7 @@ func analyzeStrategy(proxy, clientDB string) error {
 				"opp": a.opp, "closedV": a.closedV, "virtualVal": round2(a.virtualVal),
 				"profitCnt": a.profitCnt, "profitVal": round2(a.profitVal), "hitProfit": a.hitProfit,
 				"actCnt": a.actCnt, "actClosed": a.actClosed, "actVal": round2(a.actVal),
+				"actProfit": round2(a.actProfit),
 				"capRate": round2(capRate), "profitCap": round2(profitCap),
 			}
 		}
