@@ -746,6 +746,7 @@ func main() {
 	analyzeDB := analyzeCmd.String("db", "", "客户端数据库路径（写入每日策略总结）")
 	analyzeDate := analyzeCmd.String("date", "", "分析指定日期（YYYY-MM-DD，默认今天）")
 	analyzeBucket1m := analyzeCmd.Bool("bucket1m", false, "3桶改用 1m 收盘 vs 前一根 1m 收盘（对比实验；CSV 加 _1m 后缀，不写每日总结）")
+	analyzeVariant := analyzeCmd.String("variant", "D", "策略变体: D=智慧版(爆拉1.5/中间1.0/温和0.7) / A=A骨架(全桶1.0)")
 
 	reportCmd := flag.NewFlagSet("report", flag.ExitOnError)
 	mode := reportCmd.String("mode", "SIMULATION", "SIMULATION / LIVE")
@@ -768,7 +769,7 @@ func main() {
 		if *analyzeRaw {
 			err = analyzeBurst(*analyzeProxy, *analyzeDate)
 		} else {
-			err = analyzeStrategy(*analyzeProxy, *analyzeDB, *analyzeDate, *analyzeBucket1m)
+			err = analyzeStrategy(*analyzeProxy, *analyzeDB, *analyzeDate, *analyzeBucket1m, *analyzeVariant)
 		}
 		if err != nil {
 			log.Fatalf("分析失败: %v", err)
@@ -1169,7 +1170,7 @@ func onlineAt(beats []int64, t int64) (bool, bool) {
 	return best <= 3*60*1000, true
 }
 
-// 反事实回放出口规则常量（与策略口径模拟一致：D 骨架 sl3 / act2 / cb3 / 超时 36 根）
+// 反事实回放出口规则常量（与 A/D 口径模拟一致：sl3 / act2 / cb3 / 超时 36 根）
 const (
 	nominal = 100.0 // 每仓名义 100U（10U 保证金 × 10x）
 	slPct   = 0.03  // 止损 -3%
@@ -1178,18 +1179,26 @@ const (
 	maxBars = 36    // 最长持仓 36 根 5m = 180 分钟
 )
 
-// replayForcedOpen 反事实回放：一笔被拦截的机会「假如开仓」会怎样。
+// replayForcedOpen 反事实回放（D 默认：爆拉×1.5 / 中间×1.0 / 温和×0.7）
+func replayForcedOpen(k5 []kline, j int, bucket string) (float64, string, bool, bool) {
+	return replayForcedOpenR(k5, j, false, bucket)
+}
+
+// replayForcedOpenR 反事实回放：一笔被拦截的机会「假如开仓」会怎样。
+// flat=true（A 骨架）所有桶 ×1.0；flat=false（D 智慧版）按桶放大。
 // 在 5m K 线索引 j 处以该根收盘价入仓（与策略口径模拟一致），按出口规则走完：
 // 止损 → 激活(+2%)后跟踪回撤 3% → 超时 180 分钟。
 // 返回（虚拟盈亏：100U 名义 × 桶倍数，离场原因，是否已平仓，盘中是否曾达 +2% 盈利高点）。
 // 数据到底仍持有 → 返回 ("HOLDING", false)，不计入挡对/误杀。
-func replayForcedOpen(k5 []kline, j int, bucket string) (float64, string, bool, bool) {
+func replayForcedOpenR(k5 []kline, j int, flat bool, bucket string) (float64, string, bool, bool) {
 	mult := 1.0
-	switch bucket {
-	case "爆拉桶":
-		mult = 1.5
-	case "温和桶":
-		mult = 0.7
+	if !flat {
+		switch bucket {
+		case "爆拉桶":
+			mult = 1.5
+		case "温和桶":
+			mult = 0.7
+		}
 	}
 	if j < 0 || j >= len(k5) || k5[j].close <= 0 {
 		return 0, "", false, false
@@ -1426,7 +1435,7 @@ type lossAgg struct {
 	val, miss, dodge float64
 }
 
-func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool) error {
+func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant string) error {
 	client := httpClient(proxy)
 	tickers, err := fetchTickers(client)
 	if err != nil {
@@ -1443,9 +1452,13 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool) error {
 	dayStart := beijingDayStartUTC(now)
 	dayEnd := dayStart + 24*60*60*1000
 	use1m := bucket1m
+	flat := variant == "A"
 	csvSuffix := ""
+	if flat {
+		csvSuffix = "_A"
+	}
 	if use1m {
-		csvSuffix = "_1m"
+		csvSuffix += "_1m"
 	}
 
 	pool := make([]ticker24, 0, len(tickers))
@@ -1477,7 +1490,11 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool) error {
 		"中间桶": {},
 		"温和桶": {},
 	}
-	bucketMult := map[string]float64{"爆拉桶": 1.5, "中间桶": 1.0, "温和桶": 0.7}
+	bucketMult := map[string]float64{"爆拉桶": 1.0, "中间桶": 1.0, "温和桶": 1.0}
+	if !flat {
+		bucketMult["爆拉桶"] = 1.5
+		bucketMult["温和桶"] = 0.7
+	}
 	signalsByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
 	dedupSignalsByBucket := map[string]int{"爆拉桶": 0, "中间桶": 0, "温和桶": 0}
 	dedupSeen := map[string]bool{}
@@ -1766,11 +1783,18 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool) error {
 	if use1m {
 		bucketLabel = "1m（对比实验）"
 	}
+	simTitle := "D"
+	variantLabel := "D（智慧版，爆拉×1.5 / 中间×1.0 / 温和×0.7）"
+	if flat {
+		simTitle = "A"
+		variantLabel = "A（A骨架，全桶×1.0，无爆拉仓位）"
+	}
+	fmt.Printf("策略变体: %s\n", variantLabel)
 	fmt.Printf("桶粒度: %s\n", bucketLabel)
 	if k1Skipped > 0 {
 		fmt.Printf("（%d 个币 1m K 线拉取失败跳过）\n", k1Skipped)
 	}
-	fmt.Printf("\n===== D 策略口径当日模拟（%s，10U×10x=100U/仓，未计手续费/滑点）=====\n", now.Format("2006-01-02"))
+	fmt.Printf("\n===== %s 策略口径当日模拟（%s，10U×10x=100U/仓，未计手续费/滑点）=====\n", simTitle, now.Format("2006-01-02"))
 	fmt.Println(fmtTable([]string{"指标", "数值", "说明"}, [][]string{
 		{"15m 信号次数", fmt.Sprintf("%d", totalSignals), "收盘 vs 15m 周期开盘 ≥3%"},
 		{"开仓次数", fmt.Sprintf("%d（追单 %d）", totalOpens, totalAddons), "含冷却过滤；同币最多 1+2 仓"},
@@ -1789,7 +1813,11 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool) error {
 		{"追单平仓", fmt.Sprintf("%d 笔", addOnClosed), "追单单独离场笔数"},
 		{"追单占比", fmt.Sprintf("%.1f%%", float64(addOnClosed)/float64(n)*100), ""},
 	}))
-	fmt.Println("\n⚠ 口径：本模拟按 5m 收盘/高低价近似回放，未含手续费滑点，已按 5m 爆拉分桶放大仓位（爆拉1.5/中间1.0/温和0.7）；用于复盘当日策略环境，非实盘对账。")
+	sizeNote := "已按 5m 爆拉分桶放大仓位（爆拉1.5/中间1.0/温和0.7）"
+	if flat {
+		sizeNote = "全桶仓位 ×1.0（无爆拉放大）"
+	}
+	fmt.Printf("\n⚠ 口径：本模拟按 5m 收盘/高低价近似回放，未含手续费滑点，%s；用于复盘当日策略环境，非实盘对账。\n", sizeNote)
 
 	// ==================== 转化率归因：模拟机会 → 成交 / 拦截(该挡) / 执行损耗 ====================
 	// 1) 实际成交匹配：同币 + 时间窗 ±45min 贪婪匹配（替代旧版按序号硬匹配，
@@ -2012,7 +2040,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool) error {
 			ihSkipped++
 			continue
 		}
-		pnl, exit, closed, _ := replayForcedOpen(k5, idx, it.bucket)
+		pnl, exit, closed, _ := replayForcedOpenR(k5, idx, flat, it.bucket)
 		ihDetails = append(ihDetails, interceptDetail{reason: it.reason, symbol: it.symbol, bucket: it.bucket, ts: it.ts, pnl: pnl, exit: exit, closed: closed})
 		st, ok2 := ih[it.reason]
 		if !ok2 {
@@ -2107,7 +2135,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool) error {
 			ovSkipped++
 			continue
 		}
-		pnl, _, closed, hit := replayForcedOpen(k5, idx, so.bucket)
+		pnl, _, closed, hit := replayForcedOpenR(k5, idx, flat, so.bucket)
 		a := ov[so.bucket]
 		a.opp++
 		totalOv.opp++
@@ -2191,7 +2219,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool) error {
 		if idx < 0 {
 			continue
 		}
-		pnl, _, closed, _ := replayForcedOpen(k5, idx, so.bucket)
+		pnl, _, closed, _ := replayForcedOpenR(k5, idx, flat, so.bucket)
 		a.cnt++
 		if !closed {
 			continue
@@ -2217,7 +2245,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool) error {
 	if len(lr) > 0 {
 		fmt.Println(fmtTable([]string{"类别", "机会数", "已平仓", "虚拟盈亏", "漏掉盈利", "躲过亏损"}, lr))
 	}
-	if err := writeOpportunityValueCSV(now.Format("2006-01-02"), csvSuffix, simOpens, details, simActIdx, actuals, k5Cache, ov, totalOv, lossByCls); err != nil {
+	if err := writeOpportunityValueCSV(now.Format("2006-01-02"), csvSuffix, flat, simOpens, details, simActIdx, actuals, k5Cache, ov, totalOv, lossByCls); err != nil {
 		log.Printf("⚠ 写机会价值 CSV 失败: %v", err)
 	}
 
@@ -2251,8 +2279,8 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool) error {
 	}
 
 	// 写入 daily_summaries（type=strategy），供前端"每日策略总结"页展示
-	// --bucket1m 为对比实验：不覆盖标准 5m 每日总结
-	if clientDB != "" && !use1m {
+	// --bucket1m / --variant A 为对比实验：不覆盖标准 D+5m 每日总结
+	if clientDB != "" && !use1m && !flat {
 		rejectList := make([]map[string]interface{}, 0, len(rejects))
 		for _, r := range rejects {
 			rejectList = append(rejectList, map[string]interface{}{
@@ -2364,8 +2392,8 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool) error {
 			log.Printf("✅ 已写入每日策略总结（%s）", clientDB)
 		}
 	}
-	if use1m {
-		log.Printf("（--bucket1m 对比实验：未写 daily_summaries，CSV 已带 _1m 后缀）")
+	if use1m || flat {
+		log.Printf("（对比实验：未写 daily_summaries，CSV 已带 %s 后缀）", csvSuffix)
 	}
 	return nil
 }
@@ -2432,7 +2460,7 @@ func writeInterceptCSV(date, suffix string, details []interceptDetail, order []s
 }
 
 // writeOpportunityValueCSV 输出机会价值漏斗逐单明细 + 汇总（每小时自动覆盖更新）
-func writeOpportunityValueCSV(date, suffix string, simOpens []simOpenRec, details []simDetail, simActIdx []int,
+func writeOpportunityValueCSV(date, suffix string, flat bool, simOpens []simOpenRec, details []simDetail, simActIdx []int,
 	actuals []actualTrade, k5Cache map[string][]kline, ov map[string]*ovAgg, totalOv *ovAgg, lossByCls map[string]*lossAgg) error {
 	path := fmt.Sprintf(`D:\0001_ba-A - 03\market_data\opportunity_value_%s%s.csv`, date, suffix)
 	f, err := os.Create(path)
@@ -2458,7 +2486,7 @@ func writeOpportunityValueCSV(date, suffix string, simOpens []simOpenRec, detail
 		if idx < 0 {
 			continue
 		}
-		pnl, exit, closed, hit := replayForcedOpen(k5, idx, so.bucket)
+		pnl, exit, closed, hit := replayForcedOpenR(k5, idx, flat, so.bucket)
 		tag := "首仓"
 		if so.addOn {
 			tag = "追单"
