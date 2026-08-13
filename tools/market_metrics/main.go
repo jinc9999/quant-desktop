@@ -1092,6 +1092,61 @@ func onlineAt(beats []int64, t int64) (bool, bool) {
 	return best <= 3*60*1000, true
 }
 
+// 反事实回放出口规则常量（与策略口径模拟一致：D 骨架 sl3 / act2 / cb3 / 超时 36 根）
+const (
+	nominal = 100.0 // 每仓名义 100U（10U 保证金 × 10x）
+	slPct   = 0.03  // 止损 -3%
+	actPct  = 0.02  // 跟踪止盈激活 +2%
+	cbPct   = 0.03  // 激活后回撤 3% 平仓
+	maxBars = 36    // 最长持仓 36 根 5m = 180 分钟
+)
+
+// replayForcedOpen 反事实回放：一笔被拦截的机会「假如开仓」会怎样。
+// 在 5m K 线索引 j 处以该根收盘价入仓（与策略口径模拟一致），按出口规则走完：
+// 止损 → 激活(+2%)后跟踪回撤 3% → 超时 180 分钟。
+// 返回（虚拟盈亏：100U 名义 × 桶倍数，离场原因，是否已平仓）。
+// 数据到底仍持有 → 返回 ("HOLDING", false)，不计入挡对/误杀。
+func replayForcedOpen(k5 []kline, j int, bucket string) (float64, string, bool) {
+	mult := 1.0
+	switch bucket {
+	case "爆拉桶":
+		mult = 1.5
+	case "温和桶":
+		mult = 0.7
+	}
+	if j < 0 || j >= len(k5) || k5[j].close <= 0 {
+		return 0, "", false
+	}
+	entry := k5[j].close
+	extreme := entry
+	active := false
+	held := 1
+	for i := j + 1; i < len(k5); i++ {
+		k := k5[i]
+		held++
+		// 止损优先（与回测保守顺序一致）
+		if k.low <= entry*(1-slPct) {
+			return (k.low - entry) / entry * nominal * mult, "STOP_LOSS", true
+		}
+		if !active && k.high >= entry*(1+actPct) {
+			active = true
+			extreme = k.high
+		}
+		if active {
+			if k.high > extreme {
+				extreme = k.high
+			}
+			if k.low <= extreme*(1-cbPct) {
+				return (extreme*(1-cbPct) - entry) / entry * nominal * mult, "TRAILING", true
+			}
+		}
+		if held >= maxBars {
+			return (k.close - entry) / entry * nominal * mult, "MAX_HOLD", true
+		}
+	}
+	return 0, "HOLDING", false
+}
+
 // 归因结果分类（与 daily_summaries feature_json.lossClass 对应）
 const (
 	clsFill       = "成交"
@@ -1157,8 +1212,8 @@ func attemptPriority(a attemptRow, so simOpenRec) int {
 }
 
 // classifySim 对一条模拟可开机会做归因（调用方负责先做成交匹配）。
-// 返回（分类, 说明）。
-func classifySim(so simOpenRec, attempts []attemptRow, beats []int64) (string, string) {
+// 返回（分类, 说明, 原始拦截原因）。原始拦截原因仅拦截类非空，供拦截健康度分组。
+func classifySim(so simOpenRec, attempts []attemptRow, beats []int64) (string, string, string) {
 	best := -1
 	bestPrio := 99
 	bestD := int64(10 * 60 * 1000) // ±10 分钟窗口（5m K 线开盘时间 vs 客户端实时动作）
@@ -1180,28 +1235,28 @@ func classifySim(so simOpenRec, attempts []attemptRow, beats []int64) (string, s
 		a := attempts[best]
 		switch {
 		case a.Stage == "failed":
-			return clsOrderFail, fmt.Sprintf("执行损耗-交易所拒绝 code=%d", a.ErrorCode)
+			return clsOrderFail, fmt.Sprintf("执行损耗-交易所拒绝 code=%d", a.ErrorCode), ""
 		case a.Reason == "balance":
-			return clsBalance, "执行损耗-余额不足（逐候选预算）"
+			return clsBalance, "执行损耗-余额不足（逐候选预算）", ""
 		case a.Reason == "kline_missing":
-			return clsDataGap, "执行损耗-15m K线拉取失败"
+			return clsDataGap, "执行损耗-15m K线拉取失败", ""
 		case a.Reason == "no_active" && so.addOn:
-			return clsActivation, "执行损耗-模拟判可追单但客户端未激活（K线高点补判已修复）"
+			return clsActivation, "执行损耗-模拟判可追单但客户端未激活（K线高点补判已修复）", ""
 		case a.Reason == "no_active":
-			return clsRule, "拦截-该挡（持仓未激活无法追单）"
+			return clsRule, "拦截-该挡（持仓未激活无法追单）", a.Reason
 		case isRuleReason(a.Reason):
-			return clsRule, "拦截-该挡（" + ruleReasonCN[a.Reason] + "）"
+			return clsRule, "拦截-该挡（" + ruleReasonCN[a.Reason] + "）", a.Reason
 		default:
-			return clsSignalRace, "信号未触发（客户端看到候选但无成交/失败记录）"
+			return clsSignalRace, "信号未触发（客户端看到候选但无成交/失败记录）", ""
 		}
 	}
 	if on, known := onlineAt(beats, so.ts); known {
 		if on {
-			return clsSignalRace, "信号未触发（tick采样差/收盘判定未覆盖）"
+			return clsSignalRace, "信号未触发（tick采样差/收盘判定未覆盖）", ""
 		}
-		return clsOffline, "客户端未运行（不计损耗）"
+		return clsOffline, "客户端未运行（不计损耗）", ""
 	}
-	return clsUnknown, "旧构建无尝试记录，无法归因"
+	return clsUnknown, "旧构建无尝试记录，无法归因", ""
 }
 
 // ==================== 策略口径模拟（analyze 默认）====================
@@ -1238,6 +1293,7 @@ type simState struct {
 // rejectRec 一笔"有信号但未开仓"的逐单记录（根因细化用）
 type rejectRec struct {
 	symbol  string
+	ts      int64 // 信号对应 5m K 线开盘时间（反事实回放定位用）
 	timeStr string
 	bucket  string
 	reason  string // maxpos=全局10仓上限 / cooldown=冷却中 / no_active=持仓未激活无法追单 / addon_limit=追单达上限
@@ -1253,9 +1309,25 @@ type simOpenRec struct {
 
 // simDetail 一条模拟可开机会的归因结果（分类 + 说明）
 type simDetail struct {
-	so  simOpenRec
-	cls string
-	why string
+	so     simOpenRec
+	cls    string
+	why    string
+	reason string // 拦截类对应的原始拒绝原因（非拦截为空）
+}
+
+// interceptStat 拦截健康度单原因统计（反事实回放聚合）
+type interceptStat struct {
+	count, closed, holding, win, loss int
+	pnl                              float64
+}
+
+// interceptDetail 拦截健康度逐单明细（CSV 用）
+type interceptDetail struct {
+	reason, symbol, bucket string
+	ts                     int64
+	pnl                    float64
+	exit                   string
+	closed                 bool
 }
 
 func analyzeStrategy(proxy, clientDB string) error {
@@ -1275,15 +1347,10 @@ func analyzeStrategy(proxy, clientDB string) error {
 	}
 
 	const (
-		nominal    = 100.0 // 每仓名义 100U
-		gainReq    = 3.0
-		slPct      = 0.03
-		actPct     = 0.02
-		cbPct      = 0.03
-		maxBars    = 36
-		cdTrail    = int64(15 * 60 * 1000)
-		cdStop     = int64(30 * 60 * 1000)
-		maxAddOn   = 2
+		gainReq  = 3.0
+		cdTrail  = int64(15 * 60 * 1000)
+		cdStop   = int64(30 * 60 * 1000)
+		maxAddOn = 2
 	)
 
 	var allClosed []*simPos
@@ -1441,7 +1508,7 @@ func analyzeStrategy(proxy, clientDB string) error {
 				mult := bucketMult[bkt]
 				// 全局同时持仓上限（模拟建模：实际 Top10，信号密集时是主要执行约束）
 				if globalOpen >= 10 {
-					rejects = append(rejects, rejectRec{symbol: t.Symbol, timeStr: time.UnixMilli(k.openTime).In(beijing).Format("15:04"), bucket: bkt, reason: "maxpos", seq: seq})
+					rejects = append(rejects, rejectRec{symbol: t.Symbol, ts: k.openTime, timeStr: time.UnixMilli(k.openTime).In(beijing).Format("15:04"), bucket: bkt, reason: "maxpos", seq: seq})
 					continue
 				}
 				if len(st.positions) == 0 {
@@ -1469,16 +1536,16 @@ func analyzeStrategy(proxy, clientDB string) error {
 						buckets[bkt].opens++
 					} else {
 						if !anyActive {
-							rejects = append(rejects, rejectRec{symbol: t.Symbol, timeStr: time.UnixMilli(k.openTime).In(beijing).Format("15:04"), bucket: bkt, reason: "no_active", seq: seq})
+							rejects = append(rejects, rejectRec{symbol: t.Symbol, ts: k.openTime, timeStr: time.UnixMilli(k.openTime).In(beijing).Format("15:04"), bucket: bkt, reason: "no_active", seq: seq})
 						} else {
 							// 已达追单上限：仍算一次追单机会（想追但满 3 仓）
 							addonLimitByBucket[bkt]++
-							rejects = append(rejects, rejectRec{symbol: t.Symbol, timeStr: time.UnixMilli(k.openTime).In(beijing).Format("15:04"), bucket: bkt, reason: "addon_limit", seq: seq})
+							rejects = append(rejects, rejectRec{symbol: t.Symbol, ts: k.openTime, timeStr: time.UnixMilli(k.openTime).In(beijing).Format("15:04"), bucket: bkt, reason: "addon_limit", seq: seq})
 						}
 					}
 				}
 			} else if signal {
-				rejects = append(rejects, rejectRec{symbol: t.Symbol, timeStr: time.UnixMilli(k.openTime).In(beijing).Format("15:04"), bucket: bucketOf(m5), reason: "cooldown", seq: seq})
+				rejects = append(rejects, rejectRec{symbol: t.Symbol, ts: k.openTime, timeStr: time.UnixMilli(k.openTime).In(beijing).Format("15:04"), bucket: bucketOf(m5), reason: "cooldown", seq: seq})
 			}
 		}
 	}
@@ -1616,11 +1683,11 @@ func analyzeStrategy(proxy, clientDB string) error {
 	// 2) 未成交的逐条归因（拦截=该挡 / 执行损耗=真因 / 未运行 / 未归因）
 	var details []simDetail
 	for i, so := range simOpens {
-		cls, why := clsFill, "实际成交"
+		cls, why, reason := clsFill, "实际成交", ""
 		if !simMatched[i] {
-			cls, why = classifySim(so, attemptsBySym[so.symbol], beats)
+			cls, why, reason = classifySim(so, attemptsBySym[so.symbol], beats)
 		}
-		details = append(details, simDetail{so: so, cls: cls, why: why})
+		details = append(details, simDetail{so: so, cls: cls, why: why, reason: reason})
 	}
 	// 客户端多开（模拟无对应机会但实际成交，实时通道更早入场等）
 	extraOpens := 0
@@ -1763,6 +1830,112 @@ func analyzeStrategy(proxy, clientDB string) error {
 		fmt.Println(fmtTable([]string{"客户端侧拦截（该挡，新增归因）", "次数"}, crRows))
 	}
 
+	// ==================== 拦截健康度：反事实回放（该挡验证） ====================
+	// 对每笔「拦截 = 策略规则内未开」的机会做反事实回放：假如当时开仓，
+	// 按 D 出口规则（止损3% / 激活2% / 跟踪回撤3% / 超时180分）走到平仓的虚拟盈亏。
+	// 挡对率 = 虚拟亏损占比（拦对了）；误杀率 = 虚拟盈利占比（拦错了，错过利润）。
+	// 目的：用数据验证规则是真该挡，而不是只看「规则挡了」。
+	type interceptItem struct {
+		symbol string
+		ts     int64
+		bucket string
+		reason string
+	}
+	var intercepts []interceptItem
+	for _, r := range rejects {
+		intercepts = append(intercepts, interceptItem{symbol: r.symbol, ts: r.ts, bucket: r.bucket, reason: r.reason})
+	}
+	for _, d := range details {
+		if d.cls == clsRule && d.reason != "" {
+			intercepts = append(intercepts, interceptItem{symbol: d.so.symbol, ts: d.so.ts, bucket: d.so.bucket, reason: d.reason})
+		}
+	}
+	ih := map[string]*interceptStat{}
+	var ihOrder []string
+	ihSkipped := 0
+	var ihDetails []interceptDetail
+	for _, it := range intercepts {
+		k5, ok := k5Cache[it.symbol]
+		if !ok {
+			ihSkipped++
+			continue
+		}
+		idx := -1
+		for z := 0; z < len(k5); z++ {
+			if k5[z].openTime == it.ts {
+				idx = z
+				break
+			}
+		}
+		if idx < 0 {
+			ihSkipped++
+			continue
+		}
+		pnl, exit, closed := replayForcedOpen(k5, idx, it.bucket)
+		ihDetails = append(ihDetails, interceptDetail{reason: it.reason, symbol: it.symbol, bucket: it.bucket, ts: it.ts, pnl: pnl, exit: exit, closed: closed})
+		st, ok2 := ih[it.reason]
+		if !ok2 {
+			st = &interceptStat{}
+			ih[it.reason] = st
+			ihOrder = append(ihOrder, it.reason)
+		}
+		st.count++
+		if !closed {
+			st.holding++
+			continue
+		}
+		st.closed++
+		st.pnl += pnl
+		if pnl > 0 {
+			st.win++
+		} else {
+			st.loss++
+		}
+	}
+	if len(ihOrder) > 0 {
+		ihName := func(r string) string {
+			if cn, ok := ruleReasonCN[r]; ok {
+				return cn
+			}
+			return r
+		}
+		fmt.Println("\n拦截健康度（反事实验证该挡：拦截=策略规则内未开；假如开仓按 D 出口规则回放）:")
+		fmt.Println("挡对率=虚拟亏损占比（拦对了）；误杀率=虚拟盈利占比（拦错了，错过利润）")
+		var ihRows [][]string
+		var tCnt, tClosed, tHold, tWin, tLoss int
+		var tPnl float64
+		for _, r := range ihOrder {
+			st := ih[r]
+			ihRows = append(ihRows, []string{
+				ihName(r), fmt.Sprintf("%d", st.count), fmt.Sprintf("%d", st.closed),
+				fmt.Sprintf("%d", st.holding), fmt.Sprintf("%+.2f", st.pnl),
+				fmt.Sprintf("%.1f%%", safeDiv(float64(st.loss), float64(st.closed))*100),
+				fmt.Sprintf("%.1f%%", safeDiv(float64(st.win), float64(st.closed))*100),
+				fmt.Sprintf("%+.2f", safeDiv(st.pnl, float64(st.closed))),
+			})
+			tCnt += st.count
+			tClosed += st.closed
+			tHold += st.holding
+			tWin += st.win
+			tLoss += st.loss
+			tPnl += st.pnl
+		}
+		ihRows = append(ihRows, []string{
+			"合计", fmt.Sprintf("%d", tCnt), fmt.Sprintf("%d", tClosed), fmt.Sprintf("%d", tHold),
+			fmt.Sprintf("%+.2f", tPnl),
+			fmt.Sprintf("%.1f%%", safeDiv(float64(tLoss), float64(tClosed))*100),
+			fmt.Sprintf("%.1f%%", safeDiv(float64(tWin), float64(tClosed))*100),
+			fmt.Sprintf("%+.2f", safeDiv(tPnl, float64(tClosed))),
+		})
+		fmt.Println(fmtTable([]string{"拦截原因", "次数", "已平仓", "持有中", "虚拟盈亏", "挡对率", "误杀率", "平均每单"}, ihRows))
+		if ihSkipped > 0 {
+			fmt.Printf("（%d 条因 K 线数据缺失跳过）\n", ihSkipped)
+		}
+		if err := writeInterceptCSV(now.Format("2006-01-02"), ihDetails, ihOrder, ih); err != nil {
+			log.Printf("⚠ 写拦截健康度 CSV 失败: %v", err)
+		}
+	}
+
 	// 明细样例（完整明细见 CSV）
 	fmt.Println("\n明细样例（完整明细见 market_data/analysis_<date>.csv，每小时自动更新）:")
 	shown := map[string]int{}
@@ -1852,7 +2025,19 @@ func analyzeStrategy(proxy, clientDB string) error {
 			},
 			"lossClass": clsTotal,
 		}
-		if err := writeStrategySummary(clientDB, sim, bucketList, rejectList, detailList); err != nil {
+		// 拦截健康度（反事实回放）写入每日总结，供前端「拦截健康度」板块展示
+		ihJSON := map[string]interface{}{}
+		for _, r := range ihOrder {
+			st := ih[r]
+			ihJSON[r] = map[string]interface{}{
+				"count": st.count, "closed": st.closed, "holding": st.holding,
+				"pnl": round2(st.pnl),
+				"blockCorrect": round2(safeDiv(float64(st.loss), float64(st.closed))*100),
+				"missProfit":   round2(safeDiv(float64(st.win), float64(st.closed))*100),
+				"avg":          round2(safeDiv(st.pnl, float64(st.closed))),
+			}
+		}
+		if err := writeStrategySummary(clientDB, sim, bucketList, rejectList, detailList, ihJSON); err != nil {
 			log.Printf("⚠ 写入策略总结失败: %v", err)
 		} else {
 			log.Printf("✅ 已写入每日策略总结（%s）", clientDB)
@@ -1889,6 +2074,39 @@ func writeAnalysisCSV(date string, rejects []rejectRec, details []simDetail) err
 	return w.Error()
 }
 
+// writeInterceptCSV 输出拦截健康度明细（逐单 + 按原因汇总，每小时自动覆盖更新）
+func writeInterceptCSV(date string, details []interceptDetail, order []string, ih map[string]*interceptStat) error {
+	path := fmt.Sprintf(`D:\0001_ba-A - 03\market_data\intercept_health_%s.csv`, date)
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := csv.NewWriter(f)
+	defer w.Flush()
+	w.Write([]string{"类型", "拦截原因", "币种/次数", "时间/已平仓", "桶/持有中", "虚拟盈亏", "离场原因/挡对率", "结论/误杀率"})
+	for _, d := range details {
+		conclusion := "持有中"
+		if d.closed {
+			if d.pnl > 0 {
+				conclusion = "误杀(错过利润)"
+			} else {
+				conclusion = "挡对(躲过亏损)"
+			}
+		}
+		w.Write([]string{"明细", d.reason, d.symbol, time.UnixMilli(d.ts).In(beijing).Format("15:04"),
+			d.bucket, fmt.Sprintf("%.2f", d.pnl), d.exit, conclusion})
+	}
+	for _, r := range order {
+		st := ih[r]
+		w.Write([]string{"汇总", r, fmt.Sprintf("%d", st.count), fmt.Sprintf("%d", st.closed),
+			fmt.Sprintf("%d", st.holding), fmt.Sprintf("%.2f", st.pnl),
+			fmt.Sprintf("%.1f%%", safeDiv(float64(st.loss), float64(st.closed))*100),
+			fmt.Sprintf("%.1f%%", safeDiv(float64(st.win), float64(st.closed))*100)})
+	}
+	return w.Error()
+}
+
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
 
 func safeDiv(a, b float64) float64 {
@@ -1898,8 +2116,8 @@ func safeDiv(a, b float64) float64 {
 	return a / b
 }
 
-// writeStrategySummary 将策略口径模拟、漏斗归因与逐单明细写入客户端库 daily_summaries（type=strategy）
-func writeStrategySummary(clientDB string, sim map[string]interface{}, buckets []map[string]interface{}, rejects, details []map[string]interface{}) error {
+// writeStrategySummary 将策略口径模拟、漏斗归因、逐单明细与拦截健康度写入客户端库 daily_summaries（type=strategy）
+func writeStrategySummary(clientDB string, sim map[string]interface{}, buckets []map[string]interface{}, rejects, details []map[string]interface{}, interceptHealth map[string]interface{}) error {
 	db, err := sql.Open("sqlite3", "file:"+clientDB+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return err
@@ -1907,6 +2125,7 @@ func writeStrategySummary(clientDB string, sim map[string]interface{}, buckets [
 	defer db.Close()
 	meta, _ := json.Marshal(map[string]interface{}{
 		"sim": sim, "buckets": buckets, "rejects": rejects, "details": details,
+		"interceptHealth": interceptHealth,
 	})
 	now := time.Now().In(beijing)
 	date := now.Format("2006-01-02")

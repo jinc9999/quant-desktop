@@ -61,6 +61,17 @@ const reasonLabel = (r: string) =>
     addon_limit: "追单达上限", new_listing: "新币过滤", volume: "成交额不足",
     rank: "24h涨幅排名未通过", pullback: "山顶过滤器", balance: "余额不足", slots: "槽位已满"
   }[r] || r);
+/** 拦截健康度（反事实验证该挡） */
+const interceptHealth = computed<any[]>(() => {
+  const m = latest.value?.meta.interceptHealth;
+  if (!m) return [];
+  return Object.entries(m)
+    .map(([k, v]: any) => ({
+      reason: reasonLabel(k), count: v.count, closed: v.closed, holding: v.holding,
+      pnl: v.pnl, blockCorrect: v.blockCorrect, missProfit: v.missProfit, avg: v.avg
+    }))
+    .sort((a, b) => b.count - a.count);
+});
 
 /** 策略模拟指标行 */
 const simRows = computed<any[]>(() => {
@@ -241,6 +252,34 @@ onUnmounted(() => {
           <el-table-column prop="rejectCount" label="拦截" width="80" align="right" />
         </el-table>
         <div v-if="!detailGroups.length" class="empty-state">逐单明细每小时自动生成</div>
+      </div>
+
+      <!-- 板块五：拦截健康度（反事实验证该挡） -->
+      <div class="summary-section">
+        <div class="section-title">拦截健康度（反事实验证该挡）</div>
+        <div class="rule-note">
+          对每笔「拦截=策略规则内未开」的机会做反事实回放：假如当时开仓，按 D 出口规则
+          （止损3% / 激活2% / 跟踪回撤3% / 超时180分）走到平仓的虚拟盈亏。
+          挡对率=虚拟亏损占比（拦对了）；误杀率=虚拟盈利占比（拦错了，错过利润）。
+        </div>
+        <el-table v-if="interceptHealth.length" :data="interceptHealth" size="small" stripe>
+          <el-table-column prop="reason" label="拦截原因" min-width="140" />
+          <el-table-column prop="count" label="次数" width="70" align="right" />
+          <el-table-column prop="closed" label="已平仓" width="80" align="right" />
+          <el-table-column prop="holding" label="持有中" width="80" align="right" />
+          <el-table-column label="虚拟盈亏(U)" min-width="100" align="right">
+            <template #default="{ row }">
+              <span :class="chgClass(row.pnl)">{{ fmtNum(row.pnl, true) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="挡对率" width="90" align="right">
+            <template #default="{ row }">{{ Number(row.blockCorrect).toFixed(1) }}%</template>
+          </el-table-column>
+          <el-table-column label="误杀率" width="90" align="right">
+            <template #default="{ row }">{{ Number(row.missProfit).toFixed(1) }}%</template>
+          </el-table-column>
+        </el-table>
+        <div v-else class="empty-state">拦截健康度每小时自动生成，数据积累后可见</div>
       </div>
 
       <div class="rule-note footnote">
