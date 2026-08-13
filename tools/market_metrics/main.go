@@ -64,9 +64,13 @@ func httpClient(proxy string) *http.Client {
 }
 
 func getJSON(client *http.Client, path string, out interface{}) error {
+	return getURL(client, fapiBase+path, out)
+}
+
+func getURL(client *http.Client, fullURL string, out interface{}) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fapiBase+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fullURL, nil)
 	if err != nil {
 		return err
 	}
@@ -186,6 +190,10 @@ type dailyMetrics struct {
 	UpCount            int
 	DownCount          int
 	FakeBreakoutDenom  int
+	FNG                int     // 恐惧贪婪指数 0-100（0=未采到）
+	BTCChg24h          float64 // BTC 24h 涨跌幅 %
+	ETHChg24h          float64 // ETH 24h 涨跌幅 %
+	BTCFundingRate     float64 // BTC 当前资金费率 %
 }
 
 // beijingDayStartUTC 北京时间某自然日 00:00 对应的 UTC 毫秒。
@@ -244,6 +252,12 @@ func collect(proxy string) error {
 	}
 	for _, t := range tickers {
 		m.TotalQuoteVolume += t.QuoteVolume
+		switch t.Symbol {
+		case "BTCUSDT":
+			m.BTCChg24h = t.PriceChange
+		case "ETHUSDT":
+			m.ETHChg24h = t.PriceChange
+		}
 		if t.PriceChange > 0 {
 			m.UpCount++
 		} else if t.PriceChange < 0 {
@@ -258,6 +272,32 @@ func collect(proxy string) error {
 	if btc, err := fetchKlines(client, "BTCUSDT", "15m", 96); err == nil {
 		m.BTCATRPct = atrPct(btc)
 	}
+	// 恐惧贪婪指数（Alternative.me 公开 API）
+	var fng struct {
+		Data []struct {
+			Value string `json:"value"`
+		} `json:"data"`
+	}
+	if err := getURL(client, "https://api.alternative.me/fng/?limit=1", &fng); err == nil && len(fng.Data) > 0 {
+		if v, e := strconv.Atoi(fng.Data[0].Value); e == nil {
+			m.FNG = v
+		}
+	} else if err != nil {
+		log.Printf("⚠ FNG 采集失败: %v", err)
+	}
+	// BTC 资金费率（premiumIndex，公开端点）
+	var prem struct {
+		LastFundingRate string `json:"lastFundingRate"`
+	}
+	if err := getJSON(client, "/fapi/v1/premiumIndex?symbol=BTCUSDT", &prem); err == nil {
+		if v, e := strconv.ParseFloat(prem.LastFundingRate, 64); e == nil {
+			m.BTCFundingRate = v * 100
+		}
+	} else {
+		log.Printf("⚠ BTC 费率采集失败: %v", err)
+	}
+	log.Printf("大盘: FNG=%d BTC24h=%.2f%% ETH24h=%.2f%% BTC费率=%.4f%%",
+		m.FNG, m.BTCChg24h, m.ETHChg24h, m.BTCFundingRate)
 
 	oppSet := map[string]bool{}
 	burstSet := map[string]bool{}
@@ -347,15 +387,34 @@ func saveMetrics(m dailyMetrics) error {
 		total_quote_volume REAL NOT NULL DEFAULT 0,
 		up_count INTEGER NOT NULL DEFAULT 0,
 		down_count INTEGER NOT NULL DEFAULT 0,
+		fng INTEGER NOT NULL DEFAULT 0,
+		btc_chg_24h REAL NOT NULL DEFAULT 0,
+		eth_chg_24h REAL NOT NULL DEFAULT 0,
+		btc_funding_rate REAL NOT NULL DEFAULT 0,
 		updated_at INTEGER NOT NULL
 	)`); err != nil {
 		return err
 	}
+	// 旧表补列（SQLite 无 ADD COLUMN IF NOT EXISTS，先查列再补）
+	for _, col := range []string{"fng", "btc_chg_24h", "eth_chg_24h", "btc_funding_rate"} {
+		var n int
+		db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('market_daily_metrics') WHERE name=?`, col).Scan(&n)
+		if n == 0 {
+			typ := "INTEGER NOT NULL DEFAULT 0"
+			if col != "fng" {
+				typ = "REAL NOT NULL DEFAULT 0"
+			}
+			if _, err := db.Exec(`ALTER TABLE market_daily_metrics ADD COLUMN ` + col + ` ` + typ); err != nil {
+				return err
+			}
+		}
+	}
 	_, err = db.Exec(`INSERT INTO market_daily_metrics
 		(date, pool_width, opportunity_count, opportunity_total, burst_coin_count, burst_total,
 		 fake_breakout_count, fake_breakout_rate, max_15m_up, max_15m_down, big_drop_count,
-		 btc_atr_pct, total_quote_volume, up_count, down_count, updated_at)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 btc_atr_pct, total_quote_volume, up_count, down_count, fng, btc_chg_24h, eth_chg_24h,
+		 btc_funding_rate, updated_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(date) DO UPDATE SET
 		 pool_width=excluded.pool_width, opportunity_count=excluded.opportunity_count,
 		 opportunity_total=excluded.opportunity_total, burst_coin_count=excluded.burst_coin_count,
@@ -363,25 +422,32 @@ func saveMetrics(m dailyMetrics) error {
 		 fake_breakout_rate=excluded.fake_breakout_rate, max_15m_up=excluded.max_15m_up,
 		 max_15m_down=excluded.max_15m_down, big_drop_count=excluded.big_drop_count,
 		 btc_atr_pct=excluded.btc_atr_pct, total_quote_volume=excluded.total_quote_volume,
-		 up_count=excluded.up_count, down_count=excluded.down_count, updated_at=excluded.updated_at`,
+		 up_count=excluded.up_count, down_count=excluded.down_count,
+		 fng=excluded.fng, btc_chg_24h=excluded.btc_chg_24h, eth_chg_24h=excluded.eth_chg_24h,
+		 btc_funding_rate=excluded.btc_funding_rate, updated_at=excluded.updated_at`,
 		m.Date, m.PoolWidth, m.OpportunityCount, m.OpportunityTotal, m.BurstCoinCount, m.BurstTotal,
 		m.FakeBreakoutCount, m.FakeBreakoutRate, m.Max15mUp, m.Max15mDown, m.BigDropCount,
-		m.BTCATRPct, m.TotalQuoteVolume, m.UpCount, m.DownCount, time.Now().UnixMilli())
+		m.BTCATRPct, m.TotalQuoteVolume, m.UpCount, m.DownCount, m.FNG, m.BTCChg24h, m.ETHChg24h,
+		m.BTCFundingRate, time.Now().UnixMilli())
 	return err
 }
 
 // ==================== 报告 ====================
 
 type metricRow struct {
-	Date              string
-	PoolWidth         int
-	OpportunityCount  int
-	OpportunityTotal  int
-	BurstTotal        int
-	FakeBreakoutRate  float64
-	BTCATRPct         float64
-	Max15mUp          float64
-	Max15mDown        float64
+	Date              string  `json:"date"`
+	PoolWidth         int     `json:"poolWidth"`
+	OpportunityCount  int     `json:"opportunityCount"`
+	OpportunityTotal  int     `json:"opportunityTotal"`
+	BurstTotal        int     `json:"burstTotal"`
+	FakeBreakoutRate  float64 `json:"fakeBreakoutRate"`
+	BTCATRPct         float64 `json:"btcATRPct"`
+	Max15mUp          float64 `json:"max15mUp"`
+	Max15mDown        float64 `json:"max15mDown"`
+	FNG               int     `json:"fng"`
+	BTCChg24h         float64 `json:"btcChg24h"`
+	ETHChg24h         float64 `json:"ethChg24h"`
+	BTCFundingRate    float64 `json:"btcFundingRate"`
 }
 
 type summaryRow struct {
@@ -404,7 +470,8 @@ func loadMetrics(from, to string) ([]metricRow, error) {
 	}
 	defer db.Close()
 	rows, err := db.Query(`SELECT date, pool_width, opportunity_count, opportunity_total,
-		burst_total, fake_breakout_rate, btc_atr_pct, max_15m_up, max_15m_down
+		burst_total, fake_breakout_rate, btc_atr_pct, max_15m_up, max_15m_down,
+		fng, btc_chg_24h, eth_chg_24h, btc_funding_rate
 		FROM market_daily_metrics WHERE date BETWEEN ? AND ? ORDER BY date`, from, to)
 	if err != nil {
 		return nil, err
@@ -414,7 +481,8 @@ func loadMetrics(from, to string) ([]metricRow, error) {
 	for rows.Next() {
 		var r metricRow
 		if err := rows.Scan(&r.Date, &r.PoolWidth, &r.OpportunityCount, &r.OpportunityTotal,
-			&r.BurstTotal, &r.FakeBreakoutRate, &r.BTCATRPct, &r.Max15mUp, &r.Max15mDown); err != nil {
+			&r.BurstTotal, &r.FakeBreakoutRate, &r.BTCATRPct, &r.Max15mUp, &r.Max15mDown,
+			&r.FNG, &r.BTCChg24h, &r.ETHChg24h, &r.BTCFundingRate); err != nil {
 			return nil, err
 		}
 		out = append(out, r)

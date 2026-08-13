@@ -69,18 +69,53 @@ const envMetrics = computed<any[]>(() => {
       { k: "机会池宽度", v: `${m.poolWidth} 个币`, d: "24h成交额≥2000万 的合约数" },
       { k: "异动机会", v: `${m.opportunityCount} 币 / ${m.opportunityTotal} 次`, d: "15m单根涨≥3%（策略的肉）" },
       { k: "5m爆拉", v: `${m.burstTotal} 次`, d: "5m单根涨≥2.5%（智慧版1.5倍机会）" },
-      { k: "假突破率", v: `${Number(m.fakeBreakoutRate).toFixed(1)}%`, d: "冲3%未站稳占比（高=止损会多）" },
+      { k: "假突破率", v: fakeLabel(m.fakeBreakoutRate), d: "冲3%未站稳占比（骗炮多=止损会多）" },
       { k: "最大15m涨/跌", v: `+${Number(m.max15mUp).toFixed(1)}% / ${Number(m.max15mDown).toFixed(1)}%`, d: "当日最猛的单根异动" },
-      { k: "BTC波动", v: `ATR ${Number(m.btcATRPct).toFixed(1)}%`, d: "BTC 24h 波动率（高=肉多滑点狠）" }
+      { k: "BTC波动", v: atrLabel(m.btcATRPct), d: "BTC 24h 波动率（高=肉多滑点狠）" }
     ];
   }
   return [
     { k: "累计异动机会", v: `${agg.oppCoins} 币 / ${agg.oppTotal} 次`, d: `${n} 天合计（日均 ${(agg.oppTotal / n).toFixed(1)} 次）` },
     { k: "累计5m爆拉", v: `${agg.burst} 次`, d: `日均 ${(agg.burst / n).toFixed(1)} 次` },
-    { k: "平均假突破率", v: `${(agg.fake / n).toFixed(1)}%`, d: "区间平均（高=止损会多）" },
+    { k: "平均假突破率", v: fakeLabel(agg.fake / n), d: "区间平均（骗炮多=止损会多）" },
     { k: "平均机会池", v: `${Math.round(agg.pool / n)} 个币`, d: "日均成交额≥2000万 合约数" },
     { k: "最大15m涨/跌", v: `+${agg.up.toFixed(1)}% / ${agg.down.toFixed(1)}%`, d: "区间内最猛单根异动" },
-    { k: "平均BTC波动", v: `ATR ${(agg.atr / n).toFixed(1)}%`, d: "区间平均波动率" }
+    { k: "平均BTC波动", v: atrLabel(agg.atr / n), d: "区间平均波动率" }
+  ];
+});
+/** 大盘指标（恐慌指数/BTC/ETH/费率，来自当日 market_metrics） */
+const marketExtra = computed(() => {
+  const ms = (reportMeta.value.metrics as any[]) || [];
+  return ms.length ? ms[ms.length - 1] : {};
+});
+function fngLabel(v: number): string {
+  if (!v) return "--";
+  const lv = v <= 25 ? "极度恐慌" : v <= 45 ? "恐慌" : v <= 55 ? "中性" : v <= 75 ? "贪婪" : "极度贪婪";
+  return `${v}（${lv}）`;
+}
+function fakeLabel(v: number): string {
+  if (v === undefined || v === null || isNaN(v)) return "--";
+  const lv = v >= 40 ? "骗炮多" : v >= 20 ? "正常" : "偏少";
+  return `${Number(v).toFixed(1)}%（${lv}）`;
+}
+function atrLabel(v: number): string {
+  if (v === undefined || v === null || isNaN(v)) return "--";
+  const lv = v < 0.5 ? "低波动" : v <= 1 ? "中等" : "高波动";
+  return `${Number(v).toFixed(1)}%（${lv}）`;
+}
+/** 大盘指标行（表格化）：恐慌指数 / BTC / ETH / 费率 / 广度 / 量能 */
+const marketRows = computed(() => {
+  const m = marketExtra.value;
+  const mk = auto.value.market || {};
+  return [
+    { k: "恐慌贪婪指数", v: fngLabel(m.fng), d: "0=极度恐慌 100=极度贪婪（偏低=抄底情绪浓，偏高=过热）" },
+    { k: "BTC 24h", v: fmtChg(m.btcChg24h ?? 0), d: "大盘风向" },
+    { k: "ETH 24h", v: fmtChg(m.ethChg24h ?? 0), d: "主流联动" },
+    { k: "BTC 资金费率", v: m.btcFundingRate ? `${Number(m.btcFundingRate).toFixed(4)}%` : "--", d: "永续持仓成本（偏高=多头过热）" },
+    { k: "上涨 / 下跌", v: `${mk.up ?? 0} / ${mk.down ?? 0}`, d: `全市场（共 ${mk.total ?? 0}）` },
+    { k: "中位涨跌", v: fmtChg(mk.medianChange ?? 0), d: "一半币种涨过该值" },
+    { k: "平均涨跌", v: fmtChg(mk.avgChange ?? 0), d: "全市场平均涨跌" },
+    { k: "总成交额", v: `${fmtVolume(mk.totalQuoteVolume)} U`, d: "全市场合约 24h 成交额" }
   ];
 });
 /** 大白话归因 */
@@ -258,10 +293,6 @@ onUnmounted(() => {
           <span class="ov-label">交易数</span>
           <span class="ov-value">{{ modeSummary.trades.closedCount ?? 0 }}</span>
         </div>
-        <div class="overview-item ov-wide">
-          <span class="ov-label">市场一句话</span>
-          <span class="ov-value">{{ attribution || (latestReport ? "已生成市场解读" : "等待数据采集") }}</span>
-        </div>
       </div>
 
       <!-- 归因与结论（大白话） -->
@@ -303,28 +334,11 @@ onUnmounted(() => {
       <!-- 市场概况（全局，仅日视图展示当日大盘） -->
       <div class="summary-section" v-if="period === 'day'">
         <div class="section-title">市场环境 · 大盘（24h，两模式共用）</div>
-        <div class="summary-grid">
-          <div class="summary-item">
-            <span class="sum-label">上涨 / 下跌</span>
-            <span>
-              <b class="text-green">{{ auto.market.up ?? 0 }}</b> /
-              <b class="text-red">{{ auto.market.down ?? 0 }}</b>
-              <span class="sum-sub">（共 {{ auto.market.total ?? 0 }}）</span>
-            </span>
-          </div>
-          <div class="summary-item">
-            <span class="sum-label">中位涨跌</span>
-            <span :class="chgClass(auto.market.medianChange ?? 0)">{{ fmtChg(auto.market.medianChange) }}</span>
-          </div>
-          <div class="summary-item">
-            <span class="sum-label">平均涨跌</span>
-            <span :class="chgClass(auto.market.avgChange ?? 0)">{{ fmtChg(auto.market.avgChange) }}</span>
-          </div>
-          <div class="summary-item">
-            <span class="sum-label">总成交额</span>
-            <span>{{ fmtVolume(auto.market.totalQuoteVolume) }} U</span>
-          </div>
-        </div>
+        <el-table :data="marketRows" size="small" stripe>
+          <el-table-column prop="k" label="指标" min-width="130" />
+          <el-table-column prop="v" label="数值" min-width="170" align="right" />
+          <el-table-column prop="d" label="解读" min-width="280" />
+        </el-table>
         <div class="mover-row" v-if="auto.market.topGainers && auto.market.topGainers.length">
           <div class="mover-col">
             <div class="mover-title text-green">领涨</div>
@@ -351,7 +365,7 @@ onUnmounted(() => {
           <el-table-column prop="v" label="数值" min-width="170" align="right" />
           <el-table-column prop="d" label="解读" min-width="280" />
           <template #empty>
-            <div class="empty-state">今天还没采集市场指标，运行 market_metrics collect 后自动展示</div>
+            <div class="empty-state">市场指标每天自动采集刷新，暂无数据不影响策略运行</div>
           </template>
         </el-table>
       </div>
