@@ -16,11 +16,48 @@ const activeMode = ref("SIMULATION");
 const loading = ref(false);
 const list = ref<any[]>([]);
 const recon = ref<any>(null);
+/** 周期筛选：day=日结记录 / week=周结 / month=月结 / year=年结 */
+const period = ref("day");
 
 /** 最新一条带市场解读的记录（每日 00:10 完整版 / 08:00 晨间速览），用于顶部展示 */
 const latestReport = computed(
   () => list.value.find((r: any) => r.marketNotes && r.marketNotes.trim()) ?? null
 );
+/** 结构化元数据（feature_json）：市场指标表格 + 大白话归因 */
+const reportMeta = computed(() => {
+  try {
+    return JSON.parse(latestReport.value?.featureJson || "{}") || {};
+  } catch {
+    return {};
+  }
+});
+/** 策略环境指标（今天） */
+const envMetrics = computed<any[]>(() => {
+  const ms = (reportMeta.value.metrics as any[]) || [];
+  if (!ms.length) return [];
+  const m = ms[ms.length - 1];
+  return [
+    { k: "机会池宽度", v: `${m.poolWidth} 个币`, d: "24h成交额≥2000万 的合约数" },
+    { k: "异动机会", v: `${m.opportunityCount} 币 / ${m.opportunityTotal} 次`, d: "15m单根涨≥3%（策略的肉）" },
+    { k: "5m爆拉", v: `${m.burstTotal} 次`, d: "5m单根涨≥2.5%（智慧版1.5倍机会）" },
+    { k: "假突破率", v: `${Number(m.fakeBreakoutRate).toFixed(1)}%`, d: "冲3%未站稳占比（高=止损会多）" },
+    { k: "最大15m涨/跌", v: `+${Number(m.max15mUp).toFixed(1)}% / ${Number(m.max15mDown).toFixed(1)}%`, d: "当日最猛的单根异动" },
+    { k: "BTC波动", v: `ATR ${Number(m.btcATRPct).toFixed(1)}%`, d: "BTC 24h 波动率（高=肉多滑点狠）" }
+  ];
+});
+/** 大白话归因 */
+const attribution = computed(() => reportMeta.value.attribution || "");
+/** 按周期过滤后的历史记录 */
+const filteredList = computed(() => {
+  const periodTypes: Record<string, string[]> = {
+    day: ["daily", "morning", "auto"],
+    week: ["weekly"],
+    month: ["monthly"],
+    year: ["yearly"]
+  };
+  const allow = periodTypes[period.value] || periodTypes.day;
+  return list.value.filter((r) => allow.includes(r.summaryType));
+});
 const auto = ref<any>({ market: {}, modes: {}, currentMode: "SIMULATION" });
 
 /** 当前展示模式的自动总结 */
@@ -54,17 +91,24 @@ async function fetchList() {
     silent: true
   });
   if (res && res.ok) {
-    // 每天只保留一条：优先 每日(daily 带市场解读) > 晨间(morning) > 自动(auto 纯盈亏)，
-    // 避免同一天出现多条记录（2026-08-11 新增市场总结后 daily/auto 并存）
+    // 日记录按天去重（优先 每日>晨间>自动）；周/月/年总结独立保留（不受按天去重影响）
     const rank: Record<string, number> = { daily: 3, morning: 2, auto: 1 };
     const byDate = new Map<string, any>();
     for (const r of res.list ?? []) {
+      if (r.summaryType === "weekly" || r.summaryType === "monthly" || r.summaryType === "yearly") {
+        continue; // 周期总结在后面单独并入
+      }
       const cur = byDate.get(r.summaryDate);
       if (!cur || (rank[r.summaryType] ?? 0) > (rank[cur.summaryType] ?? 0)) {
         byDate.set(r.summaryDate, r);
       }
     }
-    list.value = [...byDate.values()].sort((a, b) => (a.summaryDate < b.summaryDate ? 1 : -1));
+    const periodRows = (res.list ?? []).filter((r: any) =>
+      ["weekly", "monthly", "yearly"].includes(r.summaryType)
+    );
+    list.value = [...byDate.values(), ...periodRows].sort((a, b) =>
+      a.summaryDate < b.summaryDate ? 1 : -1
+    );
     renderChart();
   }
 }
@@ -79,7 +123,7 @@ function renderChart() {
   const el = document.getElementById("pnl-chart");
   if (!el) return;
   if (!chart) chart = echarts.init(el);
-  const rows = [...list.value].reverse();
+  const rows = [...filteredList.value].reverse();
   chart.setOption(
     {
       tooltip: { trigger: "axis" },
@@ -166,12 +210,34 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- 市场解读（大白话，每日 00:10 完整版 / 08:00 晨间速览自动写入） -->
-      <div class="summary-section" v-if="latestReport">
-        <div class="section-title">
-          市场解读（{{ latestReport.summaryDate }} · {{ typeLabel(latestReport.summaryType) }}）
+      <!-- 概览条 -->
+      <div class="overview-grid">
+        <div class="overview-item">
+          <span class="ov-label">今日盈亏</span>
+          <span class="ov-value" :class="chgClass(modeSummary.trades.todayPnl ?? 0)">
+            {{ fmtNum(modeSummary.trades.todayPnl ?? 0, true) }} U
+          </span>
         </div>
-        <pre class="market-note">{{ latestReport.marketNotes }}</pre>
+        <div class="overview-item">
+          <span class="ov-label">胜率</span>
+          <span class="ov-value">{{ (modeSummary.trades.winRate ?? 0).toFixed(1) }}%</span>
+        </div>
+        <div class="overview-item">
+          <span class="ov-label">交易数</span>
+          <span class="ov-value">{{ modeSummary.trades.closedCount ?? 0 }}</span>
+        </div>
+        <div class="overview-item ov-wide">
+          <span class="ov-label">市场一句话</span>
+          <span class="ov-value">{{ attribution || (latestReport ? "已生成市场解读" : "等待数据采集") }}</span>
+        </div>
+      </div>
+
+      <!-- 归因与结论（大白话） -->
+      <div class="summary-section" v-if="attribution || (latestReport && latestReport.marketNotes)">
+        <div class="section-title">
+          归因与结论（{{ latestReport?.summaryDate }} · {{ typeLabel(latestReport?.summaryType) }}）
+        </div>
+        <pre class="market-note">{{ attribution || latestReport.marketNotes }}</pre>
       </div>
 
       <!-- 账户对账（权益 vs 本地统计） -->
@@ -204,7 +270,7 @@ onUnmounted(() => {
 
       <!-- 市场概况（全局） -->
       <div class="summary-section">
-        <div class="section-title">市场概况（24h，两模式共用）</div>
+        <div class="section-title">市场环境 · 大盘（24h，两模式共用）</div>
         <div class="summary-grid">
           <div class="summary-item">
             <span class="sum-label">上涨 / 下跌</span>
@@ -243,6 +309,19 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- 策略环境（今日市场指标，market_metrics 采集） -->
+      <div class="summary-section" v-if="envMetrics.length">
+        <div class="section-title">市场环境 · 策略视角（今天有没有肉）</div>
+        <el-table :data="envMetrics" size="small" stripe>
+          <el-table-column prop="k" label="指标" min-width="130" />
+          <el-table-column prop="v" label="数值" min-width="170" align="right" />
+          <el-table-column prop="d" label="解读" min-width="280" />
+          <template #empty>
+            <div class="empty-state">今天还没采集市场指标，运行 market_metrics collect 后自动展示</div>
+          </template>
+        </el-table>
       </div>
 
       <!-- 当前模式交易总结 -->
@@ -300,14 +379,22 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 历史 + 趋势图 -->
+    <!-- 历史与趋势 -->
     <div class="quant-card">
       <div class="card-header">
-        <h2 class="card-title">每日盈亏历史（系统自动记录，{{ list.length }} 天）</h2>
-        <span class="summary-hint">运行中每小时自动更新当天记录</span>
+        <h2 class="card-title">历史与趋势（{{ filteredList.length }} 条）</h2>
+        <div class="summary-tools">
+          <el-radio-group v-model="period" size="small">
+            <el-radio-button value="day">日</el-radio-button>
+            <el-radio-button value="week">周</el-radio-button>
+            <el-radio-button value="month">月</el-radio-button>
+            <el-radio-button value="year">年</el-radio-button>
+          </el-radio-group>
+          <span class="summary-hint">运行中每小时自动更新当天记录</span>
+        </div>
       </div>
       <div id="pnl-chart" class="chart-box"></div>
-      <el-table :data="list" v-loading="loading" size="small" stripe class="history-table">
+      <el-table :data="filteredList" v-loading="loading" size="small" stripe class="history-table">
         <el-table-column prop="summaryDate" label="日期" min-width="100" />
         <el-table-column label="类型" width="70" align="center">
           <template #default="{ row }">{{ typeLabel(row.summaryType) }}</template>
@@ -340,6 +427,37 @@ onUnmounted(() => {
   gap: 16px;
 }
 
+.overview-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.overview-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--quant-border, #2c2f3a);
+  border-radius: 8px;
+}
+.overview-item.ov-wide {
+  grid-column: span 2;
+}
+.ov-label {
+  font-size: 12px;
+  color: var(--quant-text-secondary, #9ca3af);
+}
+.ov-value {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--quant-text, #e0e0e0);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .quant-card {
   background: var(--quant-card, #1d1f27);
   border: 1px solid var(--quant-border, #2c2f3a);

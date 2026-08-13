@@ -391,6 +391,12 @@ type summaryRow struct {
 	WinRate    float64
 }
 
+// reportMeta 结构化写入 feature_json 的总结元数据（前端渲染真表格用）
+type reportMeta struct {
+	Metrics     []metricRow `json:"metrics"`
+	Attribution string      `json:"attribution"`
+}
+
 func loadMetrics(from, to string) ([]metricRow, error) {
 	db, err := sql.Open("sqlite3", "file:"+marketDBPath+"?mode=ro")
 	if err != nil {
@@ -480,7 +486,7 @@ func fmtTable(head []string, rows [][]string) string {
 	return sb.String()
 }
 
-func genReport(mode, typ string) (string, float64, error) {
+func genReport(mode, typ string) (string, float64, reportMeta, error) {
 	now := time.Now().In(beijing)
 	today := now.Format("2006-01-02")
 	var from string
@@ -494,15 +500,15 @@ func genReport(mode, typ string) (string, float64, error) {
 	case "yearly":
 		from = now.AddDate(-1, 0, 0).Format("2006-01-02")
 	default:
-		return "", 0, fmt.Errorf("类型仅支持 daily/weekly/monthly/yearly: %s", typ)
+		return "", 0, reportMeta{}, fmt.Errorf("类型仅支持 daily/weekly/monthly/yearly: %s", typ)
 	}
 	metrics, err := loadMetrics(from, today)
 	if err != nil {
-		return "", 0, err
+		return "", 0, reportMeta{}, err
 	}
 	sums, err := loadSummaries(mode, from, today)
 	if err != nil {
-		return "", 0, err
+		return "", 0, reportMeta{}, err
 	}
 
 	// 策略表现聚合
@@ -551,6 +557,7 @@ func genReport(mode, typ string) (string, float64, error) {
 	}
 
 	var sb strings.Builder
+	var attribution strings.Builder
 	if typ == "daily" {
 		sb.WriteString("## 市场环境（" + today + "）\n")
 		if len(metrics) > 0 {
@@ -575,13 +582,14 @@ func genReport(mode, typ string) (string, float64, error) {
 			sb.WriteString("\n## 大白话归因\n")
 			if len(metrics) > 0 {
 				m := metrics[len(metrics)-1]
-				sb.WriteString(fmt.Sprintf("今天市场给了 %d 次异动机会（%d 个币），其中 5m 爆拉 %d 次；假突破率 %.0f%%。策略交易 %d 笔，盈亏 %+.2fU。",
+				attribution.WriteString(fmt.Sprintf("今天市场给了 %d 次异动机会（%d 个币），其中 5m 爆拉 %d 次；假突破率 %.0f%%。策略交易 %d 笔，盈亏 %+.2fU。",
 					m.OpportunityTotal, m.OpportunityCount, m.BurstTotal, m.FakeBreakoutRate, s.TradeCount, s.TodayPnl))
 				if m.FakeBreakoutRate >= 40 {
-					sb.WriteString(" 市场骗炮偏多，止损多属正常，不是策略失灵。")
+					attribution.WriteString(" 市场骗炮偏多，止损多属正常，不是策略失灵。")
 				} else if m.OpportunityTotal < 5 {
-					sb.WriteString(" 今天肉少，交易少/亏损大概率是环境问题。")
+					attribution.WriteString(" 今天肉少，交易少/亏损大概率是环境问题。")
 				}
+				sb.WriteString(attribution.String())
 			}
 		} else {
 			sb.WriteString("（当日无已平仓记录）\n")
@@ -612,22 +620,23 @@ func genReport(mode, typ string) (string, float64, error) {
 			sb.WriteString(fmtTable([]string{"日期", "异动次数", "5m爆拉", "假突破率"}, dayRows))
 		}
 		sb.WriteString("\n## 大白话\n")
-		sb.WriteString(fmt.Sprintf("%s累计 %d 笔交易、%+.2fU；日均 %.1f 次异动机会、%.1f%% 假突破率。",
+		attribution.WriteString(fmt.Sprintf("%s累计 %d 笔交易、%+.2fU；日均 %.1f 次异动机会、%.1f%% 假突破率。",
 			label, totalTrades, totalPnl, avg(float64(oppSum), oppCnt), avg(fakeSum, oppCnt)))
 		if totalPnl < 0 && avg(float64(oppSum), oppCnt) < 5 {
-			sb.WriteString(" 这段市场肉少，亏损主要来自环境而非策略。")
+			attribution.WriteString(" 这段市场肉少，亏损主要来自环境而非策略。")
 		} else if totalPnl > 0 {
-			sb.WriteString(" 环境与策略表现匹配，策略在吃肉。")
+			attribution.WriteString(" 环境与策略表现匹配，策略在吃肉。")
 		}
+		sb.WriteString(attribution.String())
 	}
-	return sb.String(), totalPnl, nil
+	return sb.String(), totalPnl, reportMeta{Metrics: metrics, Attribution: attribution.String()}, nil
 }
 
 // ==================== 写入 daily_summaries ====================
 
 var flagDB string
 
-func writeSummary(mode, typ, clientDB, notes string, pnl float64) error {
+func writeSummary(mode, typ, clientDB, notes string, pnl float64, meta reportMeta) error {
 	db, err := sql.Open("sqlite3", "file:"+clientDB+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return err
@@ -635,17 +644,21 @@ func writeSummary(mode, typ, clientDB, notes string, pnl float64) error {
 	defer db.Close()
 	now := time.Now().In(beijing)
 	date := now.Format("2006-01-02")
+	featureJSON := "{}"
+	if b, jerr := json.Marshal(meta); jerr == nil {
+		featureJSON = string(b)
+	}
 	var id int64
 	err = db.QueryRow(`SELECT id FROM daily_summaries WHERE mode=? AND summary_date=? AND summary_type=? AND deleted_at=0`,
 		mode, date, typ).Scan(&id)
 	if err == nil {
-		_, err = db.Exec(`UPDATE daily_summaries SET market_notes=?, today_pnl=?, updated_at=? WHERE id=?`,
-			notes, pnl, now.UnixMilli(), id)
+		_, err = db.Exec(`UPDATE daily_summaries SET market_notes=?, today_pnl=?, feature_json=?, updated_at=? WHERE id=?`,
+			notes, pnl, featureJSON, now.UnixMilli(), id)
 	} else {
 		_, err = db.Exec(`INSERT INTO daily_summaries
 			(mode, summary_date, summary_type, market_notes, today_pnl, win_rate, trade_count, rating, feature_json, created_at, updated_at)
 			VALUES (?,?,?,?,?,0,0,0,'{}',?,?)`,
-			mode, date, typ, notes, pnl, now.UnixMilli(), now.UnixMilli())
+			mode, date, typ, notes, pnl, featureJSON, now.UnixMilli(), now.UnixMilli())
 	}
 	return err
 }
@@ -671,11 +684,11 @@ func main() {
 		}
 	case "report":
 		reportCmd.Parse(os.Args[2:])
-		notes, pnl, err := genReport(*mode, *typ)
+		notes, pnl, meta, err := genReport(*mode, *typ)
 		if err != nil {
 			log.Fatalf("生成报告失败: %v", err)
 		}
-		if err := writeSummary(*mode, *typ, flagDB, notes, pnl); err != nil {
+		if err := writeSummary(*mode, *typ, flagDB, notes, pnl, meta); err != nil {
 			log.Fatalf("写入总结失败: %v", err)
 		}
 		fmt.Println(notes)
