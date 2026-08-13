@@ -747,6 +747,7 @@ func main() {
 	analyzeDate := analyzeCmd.String("date", "", "分析指定日期（YYYY-MM-DD，默认今天）")
 	analyzeBucket1m := analyzeCmd.Bool("bucket1m", false, "3桶改用 1m 收盘 vs 前一根 1m 收盘（对比实验；CSV 加 _1m 后缀，不写每日总结）")
 	analyzeVariant := analyzeCmd.String("variant", "D", "策略变体: D=智慧版(爆拉1.5/中间1.0/温和0.7) / A=A骨架(全桶1.0)")
+	analyzeSimOnly := analyzeCmd.Bool("sim-only", false, "纯模拟模式：不读客户端成交/尝试/心跳，所有模拟开仓计为成交（A/B 对比用）")
 
 	reportCmd := flag.NewFlagSet("report", flag.ExitOnError)
 	mode := reportCmd.String("mode", "SIMULATION", "SIMULATION / LIVE")
@@ -769,7 +770,7 @@ func main() {
 		if *analyzeRaw {
 			err = analyzeBurst(*analyzeProxy, *analyzeDate)
 		} else {
-			err = analyzeStrategy(*analyzeProxy, *analyzeDB, *analyzeDate, *analyzeBucket1m, *analyzeVariant)
+			err = analyzeStrategy(*analyzeProxy, *analyzeDB, *analyzeDate, *analyzeBucket1m, *analyzeVariant, *analyzeSimOnly)
 		}
 		if err != nil {
 			log.Fatalf("分析失败: %v", err)
@@ -1435,7 +1436,7 @@ type lossAgg struct {
 	val, miss, dodge float64
 }
 
-func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant string) error {
+func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant string, simOnlyFlag bool) error {
 	client := httpClient(proxy)
 	tickers, err := fetchTickers(client)
 	if err != nil {
@@ -1453,9 +1454,13 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 	dayEnd := dayStart + 24*60*60*1000
 	use1m := bucket1m
 	flat := variant == "A"
+	simOnly := simOnlyFlag || flat
 	csvSuffix := ""
 	if flat {
 		csvSuffix = "_A"
+	}
+	if simOnly && !flat {
+		csvSuffix = "_sim"
 	}
 	if use1m {
 		csvSuffix += "_1m"
@@ -1501,13 +1506,13 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 
 	// 实际交易（客户端库当天开仓）
 	var actuals []actualTrade
-	if clientDB != "" {
+	if clientDB != "" && !simOnly {
 		actuals, _ = loadActualTrades(clientDB, dayStart, dayEnd)
 	}
 	// 开仓尝试 + 引擎心跳（转化率逐单归因；旧构建无表时为空）
 	var attempts []attemptRow
 	var beats []int64
-	if clientDB != "" {
+	if clientDB != "" && !simOnly {
 		attempts, _, _ = loadAttempts(clientDB, dayStart, dayEnd)
 		beats, _, _ = loadHeartbeats(clientDB, dayStart, dayEnd)
 	}
@@ -1789,6 +1794,9 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 		simTitle = "A"
 		variantLabel = "A（A骨架，全桶×1.0，无爆拉仓位）"
 	}
+	if simOnly {
+		variantLabel += " · 纯模拟（不读客户端成交）"
+	}
 	fmt.Printf("策略变体: %s\n", variantLabel)
 	fmt.Printf("桶粒度: %s\n", bucketLabel)
 	if k1Skipped > 0 {
@@ -1853,7 +1861,9 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 	var details []simDetail
 	for i, so := range simOpens {
 		cls, why, reason := clsFill, "实际成交", ""
-		if !simMatched[i] {
+		if simOnly {
+			cls, why = clsFill, "模拟成交（纯模拟，无执行层）"
+		} else if !simMatched[i] {
 			cls, why, reason = classifySim(so, attemptsBySym[so.symbol], beats)
 		}
 		details = append(details, simDetail{so: so, cls: cls, why: why, reason: reason})
@@ -1936,7 +1946,9 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 	}
 	appendFunnel("合计", totalAgg)
 	fmt.Println(fmtTable(fh, funnelRows))
-	fmt.Printf("客户端多开（模拟无对应机会但实际成交，多为实时通道更早入场）: %d 笔\n", extraOpens)
+	if !simOnly {
+		fmt.Printf("客户端多开（模拟无对应机会但实际成交，多为实时通道更早入场）: %d 笔\n", extraOpens)
+	}
 
 	// 5) 逐单归因分类汇总（执行损耗拆到真实原因）
 	clsTotal := map[string]int{}
@@ -2176,11 +2188,11 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 	var ovRows [][]string
 	ovAppend := func(name string, a *ovAgg) {
 		capRate := "--"
-		if a.virtualVal > 0 {
+		if !simOnly && a.virtualVal > 0 {
 			capRate = fmt.Sprintf("%.1f%%", a.actVal/a.virtualVal*100)
 		}
 		profitCap := "--"
-		if a.profitVal > 0 {
+		if !simOnly && a.profitVal > 0 {
 			profitCap = fmt.Sprintf("%.1f%%", a.actProfit/a.profitVal*100)
 		}
 		ovRows = append(ovRows, []string{
@@ -2198,6 +2210,9 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 	fmt.Println(fmtTable([]string{"桶", "机会数", "虚拟已平仓", "机会价值", "盈利机会", "盈利价值", "曾盈利机会", "实际成交", "实际已平仓", "实际盈亏", "捕获率", "盈利捕获率"}, ovRows))
 	if ovSkipped > 0 {
 		fmt.Printf("（%d 条机会因 K 线数据缺失跳过）\n", ovSkipped)
+	}
+	if simOnly {
+		fmt.Println("（纯模拟模式：无执行层，实际成交/捕获率不适用）")
 	}
 
 	// 漏掉的肉（未成交机会按归因类别拆账）
@@ -2245,7 +2260,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 	if len(lr) > 0 {
 		fmt.Println(fmtTable([]string{"类别", "机会数", "已平仓", "虚拟盈亏", "漏掉盈利", "躲过亏损"}, lr))
 	}
-	if err := writeOpportunityValueCSV(now.Format("2006-01-02"), csvSuffix, flat, simOpens, details, simActIdx, actuals, k5Cache, ov, totalOv, lossByCls); err != nil {
+	if err := writeOpportunityValueCSV(now.Format("2006-01-02"), csvSuffix, flat, simOnly, simOpens, details, simActIdx, actuals, k5Cache, ov, totalOv, lossByCls); err != nil {
 		log.Printf("⚠ 写机会价值 CSV 失败: %v", err)
 	}
 
@@ -2279,8 +2294,8 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 	}
 
 	// 写入 daily_summaries（type=strategy），供前端"每日策略总结"页展示
-	// --bucket1m / --variant A 为对比实验：不覆盖标准 D+5m 每日总结
-	if clientDB != "" && !use1m && !flat {
+	// --bucket1m / --variant A / --sim-only 为对比实验：不覆盖标准 D+5m 每日总结
+	if clientDB != "" && !use1m && !flat && !simOnly {
 		rejectList := make([]map[string]interface{}, 0, len(rejects))
 		for _, r := range rejects {
 			rejectList = append(rejectList, map[string]interface{}{
@@ -2392,7 +2407,7 @@ func analyzeStrategy(proxy, clientDB, dateStr string, bucket1m bool, variant str
 			log.Printf("✅ 已写入每日策略总结（%s）", clientDB)
 		}
 	}
-	if use1m || flat {
+	if use1m || flat || simOnly {
 		log.Printf("（对比实验：未写 daily_summaries，CSV 已带 %s 后缀）", csvSuffix)
 	}
 	return nil
@@ -2460,7 +2475,7 @@ func writeInterceptCSV(date, suffix string, details []interceptDetail, order []s
 }
 
 // writeOpportunityValueCSV 输出机会价值漏斗逐单明细 + 汇总（每小时自动覆盖更新）
-func writeOpportunityValueCSV(date, suffix string, flat bool, simOpens []simOpenRec, details []simDetail, simActIdx []int,
+func writeOpportunityValueCSV(date, suffix string, flat, simOnly bool, simOpens []simOpenRec, details []simDetail, simActIdx []int,
 	actuals []actualTrade, k5Cache map[string][]kline, ov map[string]*ovAgg, totalOv *ovAgg, lossByCls map[string]*lossAgg) error {
 	path := fmt.Sprintf(`D:\0001_ba-A - 03\market_data\opportunity_value_%s%s.csv`, date, suffix)
 	f, err := os.Create(path)
@@ -2493,7 +2508,9 @@ func writeOpportunityValueCSV(date, suffix string, flat bool, simOpens []simOpen
 		}
 		matched := "否"
 		actPnl := ""
-		if simActIdx[i] >= 0 {
+		if simOnly {
+			matched = "模拟成交"
+		} else if simActIdx[i] >= 0 {
 			matched = "是"
 			a := actuals[simActIdx[i]]
 			if a.Status == "CLOSED" {
@@ -2515,6 +2532,12 @@ func writeOpportunityValueCSV(date, suffix string, flat bool, simOpens []simOpen
 	}
 	w.Write([]string{"汇总-机会价值", "桶", "机会数", "虚拟已平仓", "机会价值", "盈利机会", "盈利价值", "曾盈利", "实际成交", "实际已平仓", "实际盈亏", "捕获率", "盈利捕获率"})
 	ovCSV := func(name string, a *ovAgg) {
+		if simOnly {
+			w.Write([]string{"汇总-机会价值", name, fmt.Sprintf("%d", a.opp), fmt.Sprintf("%d", a.closedV),
+				fmt.Sprintf("%.2f", a.virtualVal), fmt.Sprintf("%d", a.profitCnt), fmt.Sprintf("%.2f", a.profitVal),
+				fmt.Sprintf("%d", a.hitProfit), "--", "--", "--", "--", "--"})
+			return
+		}
 		capRate := 0.0
 		if a.virtualVal > 0 {
 			capRate = a.actVal / a.virtualVal * 100
