@@ -173,8 +173,14 @@ func (m *Manager) PlaceStopOrders(ctx context.Context, pos *storage.Position, cf
 				pos.Symbol, math.Abs(mark-currentPrice)/currentPrice*100, mark, currentPrice)
 		}
 	}
+	// 路1（ExitOnClose + HardStopPct）：交易所只挂灾难硬止损，撤掉盘中 3% 止损与跟踪条件单；
+	// 3% 止损/跟踪改由本地在每根 5m 收盘后按收盘价判定（与全周期复验口径一致）。
+	stopPct := cfg.StopLossPct
+	if cfg.ExitOnClose && cfg.HardStopPct > 0 {
+		stopPct = cfg.HardStopPct
+	}
 	stopPrice, activationPrice := computeStopPrices(
-		pos.Side, pos.EntryPrice, cfg.StopLossPct, cfg.TrailingActivation, clampBase,
+		pos.Side, pos.EntryPrice, stopPct, cfg.TrailingActivation, clampBase,
 	)
 	var stopResult *binance.OrderResult
 	err = m.retryWithBackoff(ctx, func() error {
@@ -189,7 +195,7 @@ func (m *Manager) PlaceStopOrders(ctx context.Context, pos *storage.Position, cf
 	}
 
 	// 挂单后校验触发价合理性（防 demo 标记价失真把止损压太低，AKEUSDT 爆仓案例：触发价被压到 entry 的 89%）
-	expectedStop := pos.EntryPrice * (1 - cfg.StopLossPct)
+	expectedStop := pos.EntryPrice * (1 - stopPct)
 	if expectedStop > 0 && math.Abs(stopPrice-expectedStop)/expectedStop > 0.03 {
 		msg := fmt.Sprintf("⚠ 止损触发价异常 %s 持仓#%d：实际 %.6f vs 理论 %.6f（偏差 %.1f%%），疑似标记价失真，请核查",
 			pos.Symbol, pos.ID, stopPrice, expectedStop, math.Abs(stopPrice-expectedStop)/expectedStop*100)
@@ -239,6 +245,13 @@ func (m *Manager) PlaceStopOrders(ctx context.Context, pos *storage.Position, cf
 		Message:         &stopMsg,
 		Timestamp:       now,
 	})
+
+	// 路1：撤掉交易所跟踪止损单（跟踪止盈改由本地按 5m 收盘价判定）
+	if cfg.ExitOnClose && cfg.HardStopPct > 0 {
+		log.Printf("[ORDER] %s 持仓#%d 路1收盘判定出场：仅挂 %.1f%% 灾难硬止损，跟踪止盈由本地 5m 收盘判定",
+			pos.Symbol, pos.ID, cfg.HardStopPct*100)
+		return nil
+	}
 
 	// 3. 挂 TRAILING_STOP_MARKET 跟踪止损单
 	callbackRate := cfg.TrailingCallback * 100 // API 接受百分比数值，如 3.0 表示 3%

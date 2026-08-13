@@ -65,7 +65,7 @@ if ($Action -eq "D" -or $Action -eq "both") {
     New-Item -ItemType Directory -Force -Path $dOutDir | Out-Null
     New-Item -ItemType Directory -Force -Path "$dOutDir\data" | Out-Null
     Invoke-SysoAndBuild -Icon "build\windows\icon_A.ico" -OutExe "$dOutDir\quant-desktop.exe" `
-        -LdFlags "-w -s -H windowsgui -X quant-desktop/internal/product.ProductName=币安-魔力智慧D策略 -X quant-desktop/internal/binance.defaultStrategyName=币安-魔力智慧D策略 -X quant-desktop/internal/binance.defaultStrategyVersion=V1.0_202608132200 -X quant-desktop/internal/binance.defaultSmartSizeMode=1 -X quant-desktop/internal/binance.defaultMinGainPct=3 -X quant-desktop/internal/binance.defaultMin24hGainPct=0 -X quant-desktop/internal/binance.defaultMinQuoteVolume=20000000 -X quant-desktop/internal/binance.defaultStopLossPct=3"
+        -LdFlags "-w -s -H windowsgui -X quant-desktop/internal/product.ProductName=币安-魔力智慧D策略 -X quant-desktop/internal/binance.defaultStrategyName=币安-魔力智慧D策略 -X quant-desktop/internal/binance.defaultStrategyVersion=V1.0_202608132200 -X quant-desktop/internal/binance.defaultSmartSizeMode=1 -X quant-desktop/internal/binance.defaultMinGainPct=3 -X quant-desktop/internal/binance.defaultMin24hGainPct=0 -X quant-desktop/internal/binance.defaultMinQuoteVolume=20000000 -X quant-desktop/internal/binance.defaultStopLossPct=3 -X quant-desktop/internal/binance.defaultExitOnClose=1 -X quant-desktop/internal/binance.defaultHardStopPct=0.08"
     Write-Host "D 完成: quant-desktop-smart\quant-desktop.exe"
 }
 

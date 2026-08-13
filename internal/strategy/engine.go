@@ -124,8 +124,21 @@ type Engine struct {
 	// close5mFetched: symbol -> 最近一次拉取到的已收盘 5m K 线开盘时间（收盘判定按需拉取去重）
 	close5mFetched map[string]int64
 
+	// exit5mCache: symbol -> 最新已收盘 5m K 线状态（路1 收盘判定出场用；每根 5m 拉取一次）
+	exit5mCache map[string]kline5mExit
+
+	// closeExitBar: positionID -> 最近一次按收盘价判定出场所用的 5m K 线开盘时间（去重）
+	closeExitBar map[int64]int64
+
 	// attemptLogged: symbol|stage|reason|5m周期 -> 已写入开仓尝试记录（防信号持续期内刷屏）
 	attemptLogged map[string]bool
+}
+
+// kline5mExit 路1 收盘判定出场所需的最新已收盘 5m K 线状态
+type kline5mExit struct {
+	openTime int64
+	close    float64
+	high     float64
 }
 
 // klineOpenEntry K 线开盘价缓存条目
@@ -168,6 +181,8 @@ func NewEngine(cfg binance.StrategyConfig, client *binance.Client, ws *binance.W
 		klineOpenCache:     make(map[string]klineOpenEntry),
 		closed5mSeen:       make(map[string]int64),
 		close5mFetched:     make(map[string]int64),
+		exit5mCache:        make(map[string]kline5mExit),
+		closeExitBar:       make(map[int64]int64),
 		attemptLogged:      make(map[string]bool),
 		newListLogged:      make(map[string]bool),
 		signalDebug:        os.Getenv("QUANT_SIGNAL_DEBUG") == "1",
@@ -1823,6 +1838,14 @@ func (e *Engine) openOne(ctx context.Context, symbol string, entryPrice, amount 
 		TrailingCallback:   e.cfg.TrailingCallback,
 	}
 	riskState := riskParams.InitState(entryPrice)
+	// 路1（ExitOnClose）：初始止损位 = 灾难硬止损（8%）；3% 止损/跟踪由收盘判定维护。
+	// 这样 checkStopFallback / 前端展示的"当前止损位"都是硬止损线，与交易所唯一条件单一致。
+	if e.cfg.ExitOnClose && e.cfg.HardStopPct > 0 {
+		riskState.CurrentStopPrice = entryPrice * (1 - e.cfg.HardStopPct)
+		if side == "SHORT" {
+			riskState.CurrentStopPrice = entryPrice * (1 + e.cfg.HardStopPct)
+		}
+	}
 
 	// 持久化持仓记录
 	pos := &storage.Position{
@@ -1991,6 +2014,18 @@ func (e *Engine) monitorPositions(ctx context.Context, priceMap map[string]float
 			}
 		}
 
+		// 路1（2026-08-14 全周期复验定案）：收盘判定出场 + 灾难硬止损。
+		// 交易所仅挂 HardStopPct 灾难硬止损条件单（真崩才触发，本地 checkStopFallback 兜底）；
+		// 3% 止损 / 2% 激活 / 3% 跟踪只在最新已收盘 5m 推进后按收盘价判定（与回测 close 口径一致），
+		// 盘中插针不再触发止损——这正是"装瞎"兑现回测正收益的关键。
+		if e.cfg.ExitOnClose && e.cfg.HardStopPct > 0 {
+			if e.hasActiveStopOrders(pos.ID) {
+				e.checkStopFallback(ctx, pos, price)
+			}
+			e.checkCloseBarExit(ctx, pos)
+			continue
+		}
+
 		// 双套止损防重复触发（幽灵持仓根因修复）：
 		// 开仓后交易所挂了 STOP_MARKET + TRAILING_STOP_MARKET 条件单，本地 monitorPositions
 		// 再用 WS 价格独立判断止损。价格触及止损时双方几乎同时触发——
@@ -2120,6 +2155,96 @@ func (e *Engine) monitorPositions(ctx context.Context, priceMap map[string]float
 					continue
 				}
 			}
+		}
+	}
+}
+
+// checkCloseBarExit 路1 收盘判定出场：每根 5m 收盘后，用最新已收盘 5m 的收盘价判定
+// 3% 止损 / 2% 激活 / 3% 跟踪；极值用已收盘 5m 最高价更新（不用盘中实时价，避免插针
+// 抬升跟踪线导致过早离场）。与回测 -exit-mode=close 口径一致；盘中插针不触发。
+func (e *Engine) checkCloseBarExit(ctx context.Context, pos *storage.Position) {
+	now := time.Now().UnixMilli()
+	barStart := now - now%300000 - 300000 // 最新已收盘 5m K 线开盘时间
+	if e.close5mFetched[pos.Symbol] < barStart {
+		st, err := e.client.GetKline5mState(ctx, pos.Symbol, now)
+		if err != nil {
+			return // 拉取失败本 tick 跳过，下个 tick 重试（硬止损条件单仍在交易所兜底）
+		}
+		e.close5mFetched[pos.Symbol] = st.Close5mOpenTime
+		if st.Close5mOpenTime > e.exit5mCache[pos.Symbol].openTime {
+			e.exit5mCache[pos.Symbol] = kline5mExit{openTime: st.Close5mOpenTime, close: st.Close5m, high: st.High5m}
+		}
+	}
+	bs, ok := e.exit5mCache[pos.Symbol]
+	if !ok || bs.close <= 0 || bs.openTime <= e.closeExitBar[pos.ID] {
+		return // 无新收盘 K 线（本根已判定过）
+	}
+	e.closeExitBar[pos.ID] = bs.openTime
+
+	if pos.Side == "SHORT" {
+		stop := pos.EntryPrice * (1 + e.cfg.StopLossPct)
+		if bs.close >= stop {
+			e.closePosition(ctx, pos, bs.close, "STOP_LOSS")
+			return
+		}
+		if bs.high > 0 && (pos.HighestPrice == nil || bs.high < *pos.HighestPrice) {
+			hp := bs.high
+			_ = e.db.UpdateRiskState(pos.ID, &hp, pos.TrailingActive, hp*(1+e.cfg.TrailingCallback))
+			pos.HighestPrice = &hp
+			pos.CurrentStopPrice = hp * (1 + e.cfg.TrailingCallback)
+		}
+		if !pos.TrailingActive && pos.HighestPrice != nil && *pos.HighestPrice <= pos.EntryPrice*(1-e.cfg.TrailingActivation) {
+			hp := *pos.HighestPrice
+			_ = e.db.UpdateRiskState(pos.ID, &hp, true, hp*(1+e.cfg.TrailingCallback))
+			pos.TrailingActive = true
+			pos.CurrentStopPrice = hp * (1 + e.cfg.TrailingCallback)
+			e.db.InsertLog(&storage.TradeLog{
+				Timestamp: time.Now().UnixMilli(), Level: "info", Module: "strategy",
+				Message: fmt.Sprintf("路1跟踪止盈激活(收盘判定) %s 极值=%.6f stop=%.6f", pos.Symbol, hp, pos.CurrentStopPrice),
+				Symbol: pos.Symbol, Price: hp,
+			})
+		}
+		if pos.TrailingActive && pos.HighestPrice != nil {
+			trail := *pos.HighestPrice * (1 + e.cfg.TrailingCallback)
+			if bs.close >= trail {
+				e.closePosition(ctx, pos, bs.close, "TRAILING_STOP")
+				return
+			}
+		}
+		return
+	}
+
+	// 做多（D 纯多主路径）
+	stop := pos.EntryPrice * (1 - e.cfg.StopLossPct)
+	if bs.close <= stop {
+		e.closePosition(ctx, pos, bs.close, "STOP_LOSS")
+		return
+	}
+	// 极值更新：已收盘 5m 最高价（与回测 close 口径一致，不追盘中插针）
+	if bs.high > 0 && (pos.HighestPrice == nil || bs.high > *pos.HighestPrice) {
+		hp := bs.high
+		_ = e.db.UpdateRiskState(pos.ID, &hp, pos.TrailingActive, hp*(1-e.cfg.TrailingCallback))
+		pos.HighestPrice = &hp
+		pos.CurrentStopPrice = hp * (1 - e.cfg.TrailingCallback)
+	}
+	// 激活：极值达到入场价*(1+激活%)
+	if !pos.TrailingActive && pos.HighestPrice != nil && *pos.HighestPrice >= pos.EntryPrice*(1+e.cfg.TrailingActivation) {
+		hp := *pos.HighestPrice
+		_ = e.db.UpdateRiskState(pos.ID, &hp, true, hp*(1-e.cfg.TrailingCallback))
+		pos.TrailingActive = true
+		pos.CurrentStopPrice = hp * (1 - e.cfg.TrailingCallback)
+		e.db.InsertLog(&storage.TradeLog{
+			Timestamp: time.Now().UnixMilli(), Level: "info", Module: "strategy",
+			Message: fmt.Sprintf("路1跟踪止盈激活(收盘判定) %s 极值=%.6f stop=%.6f", pos.Symbol, hp, pos.CurrentStopPrice),
+			Symbol: pos.Symbol, Price: hp,
+		})
+	}
+	// 跟踪：收盘价 <= 极值*(1-回调%)
+	if pos.TrailingActive && pos.HighestPrice != nil {
+		trail := *pos.HighestPrice * (1 - e.cfg.TrailingCallback)
+		if bs.close <= trail {
+			e.closePosition(ctx, pos, bs.close, "TRAILING_STOP")
+			return
 		}
 	}
 }

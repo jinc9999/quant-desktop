@@ -112,6 +112,15 @@ func migratePersistedStrategyConfig(raw string) (bool, binance.StrategyConfig, e
 		saved.StrategyVersion = dft.StrategyVersion
 		migrated = true
 	}
+	// 路1 收盘判定出场迁移：旧持久化配置缺少 exitOnClose/hardStopPct 键时补默认
+	// （D 版构建 -X defaultExitOnClose=1 / defaultHardStopPct=0.08 → 收盘判定 + 8% 灾难硬止损；
+	// A/B 构建默认 false/0，行为不变）。
+	if !bytes.Contains([]byte(raw), []byte(`"exitOnClose"`)) {
+		dft := binance.DefaultStrategyConfig()
+		saved.ExitOnClose = dft.ExitOnClose
+		saved.HardStopPct = dft.HardStopPct
+		migrated = true
+	}
 	// 最小成交额参数迁移：旧持久化配置中 24h 成交额下限仍为旧的 10 万 USDT 时，
 	// 升级为 1000 万 USDT（2026-08-07 用户要求）；用户显式保存的其他值不会被覆盖。
 	if saved.MinQuoteVolume == 100000 {

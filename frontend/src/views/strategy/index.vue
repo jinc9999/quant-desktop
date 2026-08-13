@@ -56,7 +56,10 @@ const strategyParams = ref({
   smartSizeMode: 0,            // 0=关闭（A/B 默认）1=开启（D 智慧版默认）
   smartSizeHigh: 1.5,          // 爆拉桶仓位倍数
   smartSizeLow: 0.7,           // 温和桶仓位倍数
-  smartSizeBoundary: 2.5       // 爆拉桶边界（%）
+  smartSizeBoundary: 2.5,      // 爆拉桶边界（%）
+  // 路1 收盘判定出场（2026-08-14 全周期复验定案）：盘中触发止损=破产，收盘判定+8%灾难硬止损=正收益
+  exitOnClose: false,          // 收盘判定出场：false=盘中触发（A/B 默认） true=收盘判定（D 默认）
+  hardStopPct: 0               // 灾难硬止损（%）：ExitOnClose 时 D 默认 8；0=关闭
 });
 
 // 运行状态
