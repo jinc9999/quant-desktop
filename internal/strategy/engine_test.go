@@ -2077,6 +2077,26 @@ func TestCheckCloseBarExit_SharedDedupFix(t *testing.T) {
 	}
 }
 
+// TestOpenBlocked_Permanent 验证 -1121/-4411 会话永久跳过：
+// 永久跳过不随 12h 拉黑过期清除（demo 无此币/协议未签，重启前必然失败）。
+func TestOpenBlocked_Permanent(t *testing.T) {
+	e, _ := newTestEngine(t)
+	e.markPermanentBlocked("EDENUSDT")
+	if !e.openBlockedActive("EDENUSDT") {
+		t.Fatalf("永久跳过应保持 active")
+	}
+	// 12h 拉黑过期后应清除
+	e.markOpenBlocked("OLDUSDT", time.Now().Add(-time.Hour))
+	if e.openBlockedActive("OLDUSDT") {
+		t.Fatalf("过期拉黑应清除")
+	}
+	// 永久跳过即使被误写过期拉黑，也不受影响（permanent 优先）
+	e.markOpenBlocked("EDENUSDT", time.Now().Add(-time.Hour))
+	if !e.openBlockedActive("EDENUSDT") {
+		t.Fatalf("永久跳过不应被 12h 过期清除")
+	}
+}
+
 // ========== 十五、K 线信号模式（buildKlineOpenMap）测试 ==========
 
 // TestBuildKlineOpenMap 验证 K 线开盘价构建：

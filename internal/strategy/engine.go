@@ -55,6 +55,15 @@ var structuralOpenErrors = map[int64]bool{
 	-1121: true, // Invalid symbol：模拟盘信号走实盘 fapi、下单走 demo，实盘新币/下架币 demo 无对应合约
 }
 
+// permanentOpenErrors 结构性错误中"本会话永久不可开仓"的错误码：
+// 拉黑 12 小时没有意义（到期后仍必然失败），改为会话内永久跳过，重启应用后清除。
+//   - -1121 Invalid symbol：demo 无此币合约，本会话内不可能恢复（模拟盘环境限制）
+//   - -4411 未签署 TradFi-Perps 协议：需在 demo 平台网页端签署，重启前不会恢复
+var permanentOpenErrors = map[int64]bool{
+	-1121: true,
+	-4411: true,
+}
+
 // transientOpenErrors 瞬时开仓错误码集合（-1001 内部错误 / -1003 限频 / -1021 超时）：
 // 等待 1 秒重试一次，避免零星失败直接计入执行损耗。
 var transientOpenErrors = map[int64]bool{-1001: true, -1003: true, -1021: true}
@@ -91,6 +100,7 @@ type Engine struct {
 	cooldownReason     map[string]string             // symbol -> 最近平仓原因（分原因冷却: 移动止盈可短冷却）
 	failedOpen         map[string]time.Time          // symbol -> 开仓失败时间，短期内不再重试
 	openBlocked        map[string]time.Time          // symbol -> 结构性开仓失败拉黑截止时间（12h，防反复刷屏）
+	permanentBlocked   map[string]bool               // symbol -> 本会话永久跳过（demo 无此币/协议未签，重启清除）
 	closeRetry         map[int64]time.Time           // positionID -> 平仓失败重试冷却截止时间（3min，防强平模式刷屏）
 	stopBreachSince    map[int64]time.Time           // positionID -> 价格首次击穿有效止损位的时间（交易所条件单兜底计时）
 	stopFallbackDelay  time.Duration                 // 条件单存在时，价格击穿止损位后等待条件单成交的最长时间，超时本地兜底平仓
@@ -177,6 +187,7 @@ func NewEngine(cfg binance.StrategyConfig, client *binance.Client, ws *binance.W
 		cooldownReason:     make(map[string]string),
 		failedOpen:         make(map[string]time.Time),
 		openBlocked:        make(map[string]time.Time),
+		permanentBlocked:   make(map[string]bool),
 		closeRetry:         make(map[int64]time.Time),
 		stopBreachSince:    make(map[int64]time.Time),
 		stopFallbackDelay:  30 * time.Second, // 约 2 个 tick（ScanIntervalSec=15s），给交易所条件单留出成交窗口
@@ -1313,10 +1324,20 @@ func (e *Engine) markOpenBlocked(symbol string, until time.Time) {
 	e.openBlocked[symbol] = until
 }
 
+// markPermanentBlocked 本会话永久跳过该币（demo 无此币 / 协议未签，重启后清除）。
+func (e *Engine) markPermanentBlocked(symbol string) {
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	e.permanentBlocked[symbol] = true
+}
+
 // openBlockedActive 返回该币是否仍在结构性拉黑期；已过期时清除记录。
 func (e *Engine) openBlockedActive(symbol string) bool {
 	e.stateMu.Lock()
 	defer e.stateMu.Unlock()
+	if e.permanentBlocked[symbol] {
+		return true // 本会话永久跳过，不随 12h 过期
+	}
 	blockedUntil, ok := e.openBlocked[symbol]
 	if !ok {
 		return false
@@ -1828,8 +1849,13 @@ func (e *Engine) openOne(ctx context.Context, symbol string, entryPrice, amount 
 		}
 		e.logAttempt(failRec)
 		if isAPIErr && structuralOpenErrors[code] {
-			e.markOpenBlocked(symbol, time.Now().Add(openBlockedDuration))
-			log.Printf("[Strategy] %s 开仓结构性失败(code=%d)，拉黑 %s 不再重试: %v", symbol, code, openBlockedDuration, openErr)
+			if permanentOpenErrors[code] {
+				e.markPermanentBlocked(symbol)
+				log.Printf("[Strategy] %s 开仓结构性失败(code=%d)，本会话永久跳过（重启后清除）: %v", symbol, code, openErr)
+			} else {
+				e.markOpenBlocked(symbol, time.Now().Add(openBlockedDuration))
+				log.Printf("[Strategy] %s 开仓结构性失败(code=%d)，拉黑 %s 不再重试: %v", symbol, code, openBlockedDuration, openErr)
+			}
 			// -2027（仓位超限）可能因交易所已有该币种持仓而本地无记录（孤儿仓位），
 			// 尝试收养一次纳入本地管理（失败也不阻塞；拉黑已防刷屏）
 			if code == -2027 {
