@@ -55,12 +55,14 @@ func (t *ticker24) UnmarshalJSON(data []byte) error {
 type kline struct {
 	openTime int64
 	open     float64
+	high     float64
 	close    float64
 }
 
 func main() {
 	dateStr := flag.String("date", "", "统计日期 YYYY-MM-DD（默认今天，北京时间）")
 	gain := flag.Float64("gain", 5, "涨幅阈值 %%")
+	cont := flag.Float64("cont", 0, "续涨统计: 15m收盘 vs 15m开盘 ≥ gain 后，从该根收盘再涨该 %% 的次数（>0 启用；盘中触及/收盘站稳分开统计）")
 	minVol := flag.Float64("minvol", 20000000, "池子 24h 成交额下限")
 	maxSym := flag.Int("max", 160, "池内最多币数")
 	proxy := flag.String("proxy", "", "HTTP 代理")
@@ -94,6 +96,9 @@ func main() {
 	cycle5m := map[string]int{}
 	cycle15m := map[string]int{}
 	bar5m := map[string]int{}
+	contHigh := map[string]int{}
+	contClose := map[string]int{}
+	contBase := map[string]int{}
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, *workers)
 	for _, sym := range pool {
@@ -117,6 +122,18 @@ func main() {
 			if b5 > 0 {
 				bar5m[s] = b5
 			}
+			if *cont > 0 {
+				base, h, c := countContinuation(bars, *gain, *cont)
+				if base > 0 {
+					contBase[s] = base
+				}
+				if h > 0 {
+					contHigh[s] = h
+				}
+				if c > 0 {
+					contClose[s] = c
+				}
+			}
 			mu.Unlock()
 		}(sym)
 	}
@@ -125,6 +142,41 @@ func main() {
 	printStat("口径A 5m收盘 vs 15m周期开盘 >阈值（与策略信号同款公式）", cycle5m)
 	printStat("口径B 15m收盘 vs 15m开盘 >阈值", cycle15m)
 	printStat("口径C 5m收盘 vs 5m开盘 >阈值", bar5m)
+	if *cont > 0 {
+		printContStat("15m涨≥gain 后再涨≥cont%：盘中触及（后续1h内最高价）", contBase, contHigh, *gain, *cont)
+		printContStat("15m涨≥gain 后再涨≥cont%：收盘站稳（后续15m收盘）", contBase, contClose, *gain, *cont)
+	}
+}
+
+func printContStat(title string, base, hit map[string]int, gain, cont float64) {
+	totalBase, totalHit := 0, 0
+	for _, v := range base {
+		totalBase += v
+	}
+	for _, v := range hit {
+		totalHit += v
+	}
+	fmt.Printf("\n=== %s ===\n基准(15m涨≥%.0f%%): %d 次，再涨≥%.0f%%: %d 次（占比 %.1f%%）\n",
+		title, gain, totalBase, cont, totalHit, safeDiv(float64(totalHit), float64(totalBase))*100)
+	type kv struct {
+		s string
+		n int
+	}
+	var arr []kv
+	for s, n := range hit {
+		arr = append(arr, kv{s, n})
+	}
+	sort.Slice(arr, func(i, j int) bool { return arr[i].n > arr[j].n })
+	for _, a := range arr {
+		fmt.Printf("  %-14s %d 次（基准 %d）\n", a.s, a.n, base[a.s])
+	}
+}
+
+func safeDiv(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return a / b
 }
 
 func printStat(title string, m map[string]int) {
@@ -189,6 +241,74 @@ func countGains(bars []kline, gain float64) (cycle5m, cycle15m, bar5m int) {
 	return
 }
 
+// countContinuation 统计 15m 单根涨 ≥ gain 后，从该根收盘再涨 ≥ cont 的次数。
+// 基准：每根已收盘 15m（close vs open ≥ gain）。
+// 续涨：后续 1 小时（12 根 5m）内——
+//   hitHigh : 盘中最高价 ≥ 基准收盘×(1+cont)
+//   hitClose: 后续某根 15m 收盘 ≥ 基准收盘×(1+cont)
+// 同币多次均计数。
+func countContinuation(bars []kline, gain, cont float64) (base, hitHigh, hitClose int) {
+	type cyc struct {
+		open   float64
+		closes []float64
+		high   float64
+		endIdx int
+	}
+	cycles := map[int64]*cyc{}
+	var order []int64
+	lastIdx := 0
+	for i, k := range bars {
+		pid := k.openTime / 900000
+		c, ok := cycles[pid]
+		if !ok {
+			c = &cyc{open: k.open}
+			cycles[pid] = c
+			order = append(order, pid)
+		}
+		c.closes = append(c.closes, k.close)
+		if k.high > c.high {
+			c.high = k.high
+		}
+		c.endIdx = i
+		lastIdx = i
+	}
+	for _, pid := range order {
+		c := cycles[pid]
+		if len(c.closes) < 3 || c.open <= 0 {
+			continue // 15m 未走完
+		}
+		close15 := c.closes[len(c.closes)-1]
+		if (close15-c.open)/c.open*100 < gain {
+			continue
+		}
+		base++
+		target := close15 * (1 + cont/100)
+		// 后续 12 根 5m（1 小时）
+		limit := c.endIdx + 12
+		if limit > lastIdx {
+			limit = lastIdx
+		}
+		for i := c.endIdx + 1; i <= limit; i++ {
+			if bars[i].high >= target {
+				hitHigh++
+				break
+			}
+		}
+		// 后续 15m 收盘站稳
+		for _, pid2 := range order {
+			c2 := cycles[pid2]
+			if pid2 <= pid || len(c2.closes) < 3 || c2.endIdx > c.endIdx+12 {
+				continue
+			}
+			if c2.closes[len(c2.closes)-1] >= target {
+				hitClose++
+				break
+			}
+		}
+	}
+	return
+}
+
 func fetchPool(client *http.Client, minVol float64, maxSym int) []string {
 	resp, err := client.Get(fapiBase + "/fapi/v1/ticker/24hr")
 	if err != nil {
@@ -247,13 +367,19 @@ func fetchKlinesRange(client *http.Client, symbol string, startMs, endMs int64) 
 		if err := json.Unmarshal(row[0], &k.openTime); err != nil {
 			continue
 		}
-		var s string
-		for i, dst := range []*float64{&k.open, &k.close} {
-			if err := json.Unmarshal(row[1+i], &s); err != nil {
+		nums := []struct {
+			dst *float64
+			idx int
+		}{
+			{&k.open, 1}, {&k.high, 2}, {&k.close, 4}, // 币安K线: [0]openTime [1]open [2]high [3]low [4]close
+		}
+		for _, n := range nums {
+			var s string
+			if err := json.Unmarshal(row[n.idx], &s); err != nil {
 				continue
 			}
 			if v, err := strconv.ParseFloat(s, 64); err == nil {
-				*dst = v
+				*n.dst = v
 			}
 		}
 		out = append(out, k)
